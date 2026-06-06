@@ -1,0 +1,11 @@
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+    - id: jordan
+      name: Jordan
+      role: adult
+    - id: sam
+      name: Sam
+      role: kid

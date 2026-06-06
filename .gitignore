@@ -1,0 +1,7 @@
+target/
+chotu.db
+chotu.db-shm
+chotu.db-wal
+config.yaml
+.env
+.antigravitycli/
