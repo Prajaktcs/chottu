@@ -5,7 +5,7 @@ members = [
     "streamer",
     "janitor",
     "coordinator", "health-coach", "chotu-evals",
-    "financial-researcher",
+    "finance-advisor",
 ]
 
 [workspace.dependencies]

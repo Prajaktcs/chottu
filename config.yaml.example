@@ -17,3 +17,19 @@ investment_philosophy:
     - "Strong unit economics / high return on capital"
     - "Strong competitive advantage (moats)"
     - "Excellent capital allocation by management"
+
+target_allocation:
+  monthly_budget: 3000
+  buckets:
+    - name: "Core Equities"
+      weight_percent: 50.0
+      monthly_buy: 1500
+      holdings:
+        - { ticker: "VFV", amount: 1000 }
+        - { ticker: "QQC", amount: 500 }
+    - name: "Tactical Satellite"
+      weight_percent: 50.0
+      monthly_buy: 1500
+      holdings:
+        - { ticker: "CACI", amount: 750 }
+        - { ticker: "FIG", amount: 750 }

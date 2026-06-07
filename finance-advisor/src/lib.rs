@@ -3,7 +3,7 @@ use anyhow::Context;
 use rig_core::providers::gemini;
 use rig_core::client::CompletionClient;
 use rig_core::completion::Prompt;
-use chotu_common::InvestmentPhilosophy;
+use chotu_common::{InvestmentPhilosophy, TargetAllocation, FinancialLedgerEntry};
 
 #[derive(Debug, Clone)]
 pub struct StockResearcher {
@@ -217,9 +217,129 @@ pub fn extract_tickers(text: &str) -> String {
     result.join(",")
 }
 
+fn match_transaction(merchant: &str, category: &str, ticker: &str) -> bool {
+    let merchant_upper = merchant.to_uppercase();
+    let category_upper = category.to_uppercase();
+    let ticker_upper = ticker.to_uppercase();
+    
+    // Smart fallbacks for general investment buckets
+    if ticker_upper == "MICRO-CAP PICKS" {
+        return merchant_upper.contains("QUESTRADE") 
+            || merchant_upper.contains("QUESTTRADE")
+            || merchant_upper.contains("WEALTHSIMPLE")
+            || merchant_upper.contains("ROBINHOOD")
+            || category_upper == "INVESTMENT";
+    }
+
+    if let Some(idx) = merchant_upper.find(&ticker_upper) {
+        let before_ok = idx == 0 || !merchant_upper.chars().nth(idx - 1).unwrap_or(' ').is_alphanumeric();
+        let after_ok = idx + ticker_upper.len() == merchant_upper.len()
+            || !merchant_upper.chars().nth(idx + ticker_upper.len()).unwrap_or(' ').is_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+    }
+    
+    false
+}
+
+pub fn check_allocation_status(
+    target_month: &str,
+    allocation: &TargetAllocation,
+    entries: &[FinancialLedgerEntry],
+) -> String {
+    let mut msg = String::new();
+    msg.push_str(&format!("🎯 *Savings & Target Allocation Tracking: {}*\n\n", target_month));
+
+    let mut total_actual_buys = 0.0;
+    
+    for bucket in &allocation.buckets {
+        let mut actual_bucket_buy = 0.0;
+        let mut holdings_lines = Vec::new();
+        
+        for holding in &bucket.holdings {
+            let mut actual_holding_buy = 0.0;
+            for entry in entries {
+                // We only count spend/buy transactions (which are debits/negative amounts)
+                if entry.amount < 0.0 && match_transaction(&entry.merchant, &entry.category, &holding.ticker) {
+                    actual_holding_buy += entry.amount.abs();
+                }
+            }
+            actual_bucket_buy += actual_holding_buy;
+            total_actual_buys += actual_holding_buy;
+            
+            let holding_percent = if holding.amount > 0.0 {
+                (actual_holding_buy / holding.amount) * 100.0
+            } else {
+                0.0
+            };
+            
+            let status_icon = if actual_holding_buy >= holding.amount {
+                "✅"
+            } else if actual_holding_buy > 0.0 {
+                "⚠️"
+            } else {
+                "❌"
+            };
+            
+            holdings_lines.push(format!(
+                "  - *{}*: ${:.2} / ${:.2} ({:.1}% - {})",
+                holding.ticker, actual_holding_buy, holding.amount, holding_percent, status_icon
+            ));
+        }
+        
+        let bucket_percent = if bucket.monthly_buy > 0.0 {
+            (actual_bucket_buy / bucket.monthly_buy) * 100.0
+        } else {
+            0.0
+        };
+        
+        let bucket_status_icon = if actual_bucket_buy >= bucket.monthly_buy {
+            "✅"
+        } else if actual_bucket_buy > 0.0 {
+            "⚠️"
+        } else {
+            "❌"
+        };
+        
+        msg.push_str(&format!(
+            "• *{}* (Target: ${:.2} | Actual: ${:.2} | {:.1}% - {})\n",
+            bucket.name, bucket.monthly_buy, actual_bucket_buy, bucket_percent, bucket_status_icon
+        ));
+        for line in holdings_lines {
+            msg.push_str(&line);
+            msg.push_str("\n");
+        }
+        msg.push_str("\n");
+    }
+    
+    let overall_percent = if allocation.monthly_budget > 0.0 {
+        (total_actual_buys / allocation.monthly_budget) * 100.0
+    } else {
+        0.0
+    };
+    
+    let overall_status = if total_actual_buys >= allocation.monthly_budget {
+        "On Track ✅"
+    } else if total_actual_buys > 0.0 {
+        "Partially Funded ⚠️"
+    } else {
+        "Not Funded ❌"
+    };
+    
+    msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "✨ *Overall Savings Budget:* ${:.2} / ${:.2} ({:.1}% - {})\n",
+        total_actual_buys, allocation.monthly_budget, overall_percent, overall_status
+    ));
+    
+    msg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chotu_common::{AllocationBucket, BucketHolding};
 
     #[test]
     fn test_extract_tickers() {
@@ -234,5 +354,54 @@ Some noise like Ticker: NOT_A_TICKER is ignored because it is too long.";
         assert!(result.contains("MELI"));
         assert!(result.contains("SE"));
         assert!(!result.contains("NOT_A_TICKER"));
+    }
+
+    #[test]
+    fn test_check_allocation_status() {
+        let allocation = TargetAllocation {
+            monthly_budget: 1000.0,
+            buckets: vec![
+                AllocationBucket {
+                    name: "Core Equities".to_string(),
+                    weight_percent: 100.0,
+                    monthly_buy: 1000.0,
+                    holdings: vec![
+                        BucketHolding { ticker: "VFV".to_string(), amount: 600.0 },
+                        BucketHolding { ticker: "QQC".to_string(), amount: 400.0 },
+                    ],
+                }
+            ],
+        };
+        
+        let entries = vec![
+            FinancialLedgerEntry {
+                id: "1".to_string(),
+                timestamp: chrono::Utc::now(),
+                amount: -600.0,
+                currency: "USD".to_string(),
+                institution: "Questrade".to_string(),
+                merchant: "VFV - Vanguard S&P 500 ETF: Bought shares".to_string(),
+                category: "Uncategorized".to_string(),
+                source_type: "BATCH_DROP".to_string(),
+            },
+            FinancialLedgerEntry {
+                id: "2".to_string(),
+                timestamp: chrono::Utc::now(),
+                amount: -150.0,
+                currency: "USD".to_string(),
+                institution: "Questrade".to_string(),
+                merchant: "QQC Bought".to_string(),
+                category: "Uncategorized".to_string(),
+                source_type: "BATCH_DROP".to_string(),
+            },
+        ];
+        
+        let report = check_allocation_status("2026-06", &allocation, &entries);
+        assert!(report.contains("VFV"));
+        assert!(report.contains("$600.00 / $600.00"));
+        assert!(report.contains("QQC"));
+        assert!(report.contains("$150.00 / $400.00"));
+        assert!(report.contains("Core Equities"));
+        assert!(report.contains("Overall Savings Budget"));
     }
 }

@@ -406,7 +406,7 @@ dependencies = [
  "chotu-common",
  "chrono",
  "dotenvy",
- "financial-researcher",
+ "finance-advisor",
  "health-coach",
  "janitor",
  "serde",
@@ -788,7 +788,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "financial-researcher"
+name = "finance-advisor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
