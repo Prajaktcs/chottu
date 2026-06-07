@@ -51,6 +51,7 @@ prereqs:
 	@echo "Pulling Ollama models..."
 	ollama pull llama3.2:3b
 	ollama pull deepseek-r1:8b
+	ollama pull qwen3.5:4b
 
 run: setup
 	@if [ -z "$$TELEGRAM_BOT_TOKEN" ] || [ -z "$$GEMINI_API_KEY" ]; then \

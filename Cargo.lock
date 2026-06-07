@@ -279,6 +279,7 @@ name = "chotu-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "chrono",
  "reqwest 0.12.28",
  "rig-core",
@@ -3214,6 +3215,7 @@ dependencies = [
  "async-imap",
  "chotu-common",
  "chrono",
+ "dotenvy",
  "futures",
  "native-tls",
  "sqlx",
