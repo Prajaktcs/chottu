@@ -9,3 +9,11 @@ family:
     - id: sam
       name: Sam
       role: kid
+
+investment_philosophy:
+  description: "finding high-conviction micro-cap and small-cap stocks with potential for 100x returns ('hundred baggers')"
+  focus_areas:
+    - "Massive market opportunity"
+    - "Strong unit economics / high return on capital"
+    - "Strong competitive advantage (moats)"
+    - "Excellent capital allocation by management"

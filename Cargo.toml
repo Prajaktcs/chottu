@@ -5,6 +5,7 @@ members = [
     "streamer",
     "janitor",
     "coordinator", "health-coach", "chotu-evals",
+    "financial-researcher",
 ]
 
 [workspace.dependencies]
@@ -27,6 +28,7 @@ futures = "0.3"
 sha2 = "0.10"
 tempfile = "3.10"
 teloxide = { version = "0.12", features = ["macros"] }
+mailparse = "0.15"
 serde_yaml = "0.9"
 rig-core = "0.37.0"
 schemars = "1"

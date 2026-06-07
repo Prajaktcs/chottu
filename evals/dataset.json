@@ -1,0 +1,65 @@
+[
+  {
+    "test_id": "tc_ledger_stream",
+    "sender": "auto-confirm@amazon.ca",
+    "subject": "Your Amazon.ca order confirmation #111-222333-444555",
+    "body_preview": "Thank you for your purchase. We have charged $124.99 CAD to your credit card ending in 4321 for 1 item.",
+    "expected_classification": "LEDGER_STREAM"
+  },
+  {
+    "test_id": "tc_archive",
+    "sender": "security@google.com",
+    "subject": "Security Alert: New sign-in on macOS Chrome",
+    "body_preview": "Your Google Account was recently signed in to from a new macOS device. If this was not you, check your activity.",
+    "expected_classification": "ARCHIVE"
+  },
+  {
+    "test_id": "tc_trash",
+    "sender": "marketing@coupons.com",
+    "subject": "Flash Sale: Save 40% on select fitness gear today only!",
+    "body_preview": "Get the best deals on activewear, supplements, and gym accessories. Use code FIT40 at checkout.",
+    "expected_classification": "TRASH"
+  },
+  {
+    "test_id": "tc_action_item",
+    "sender": "notifications@github.com",
+    "subject": "[PR Review Request] chotu-common: Add new email schema mappings",
+    "body_preview": "@alexexample has requested your review on pull request #42. Please approve or comment on the proposed changes.",
+    "expected_classification": "ACTION_ITEM"
+  },
+  {
+    "test_id": "tc_travel_itinerary",
+    "sender": "booking@expedia.com",
+    "subject": "Your travel itinerary for Seattle trip - Confirmation #XYZ987",
+    "body_preview": "Flight UA104 departs Seattle (SEA) on June 20 at 3:30 PM. Hotel check-in at Seattle Downtown Hotel is confirmed.",
+    "expected_classification": "TRAVEL_ITINERARY"
+  },
+  {
+    "test_id": "tc_financial_bill",
+    "sender": "rogers.services@rogers.com",
+    "subject": "Your Rogers bill is ready for review - Due date June 28, 2026",
+    "body_preview": "Your total upcoming payment of $92.45 is due on June 28, 2026. Auto-pay is active for your account.",
+    "expected_classification": "FINANCIAL_BILL"
+  },
+  {
+    "test_id": "tc_statement_document",
+    "sender": "payslips@adp-employer.com",
+    "subject": "Your ADP Pay Statement is now available online",
+    "body_preview": "Please find attached your statement for the pay period ending June 05, 2026. A PDF copy is attached.",
+    "expected_classification": "STATEMENT_DOCUMENT"
+  },
+  {
+    "test_id": "tc_newsletter",
+    "sender": "newsletter@thisweekinrust.org",
+    "subject": "This Week in Rust #670",
+    "body_preview": "Welcome to another edition of This Week in Rust. Today we look at GAT design patterns, standard library updates, and job openings.",
+    "expected_classification": "NEWSLETTER"
+  },
+  {
+    "test_id": "tc_personal_reference",
+    "sender": "prajakt@shastry.me",
+    "subject": "Reference: Commands to setup local postgres docker container",
+    "body_preview": "Here are the commands to run postgres container: docker run --name local-pg -e POSTGRES_PASSWORD=mysecretpassword -p 5432:5432 -d postgres",
+    "expected_classification": "PERSONAL_REFERENCE"
+  }
+]
