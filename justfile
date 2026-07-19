@@ -1,7 +1,5 @@
 set dotenv-load := true
 
-rust_path := "/Users/user/.rustup/toolchains/stable-aarch64-apple-darwin/bin"
-export PATH := rust_path + ":" + env_var("PATH")
 
 # Display available commands
 default:
