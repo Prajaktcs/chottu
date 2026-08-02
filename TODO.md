@@ -11,3 +11,7 @@
 - [x] Fix `/adjustfood` audit row + `/undofood` inconsistency (rebuild summary from food_log)
 - [x] Slim noisy `/food` / `/undofood` replies (macros-first, like `/status`)
 - [x] Optional: per-member nutrition goals in config + progress on `/status`/`/trends`
+
+## Tasks & Calendar
+- [x] Telegram `/tasks` to list open tasks and mark them complete
+- [ ] Optional: snooze / reassign tasks from Telegram

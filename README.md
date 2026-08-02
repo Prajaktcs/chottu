@@ -88,15 +88,20 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | Command | Description |
 | :--- | :--- |
 | `/help` | Displays the help text. |
-| `/login <fitbit\|gmail>` | Starts the interactive local OAuth flow. |
+| `/login <health\|gmail\|calendar <member>>` | Interactive OAuth (Calendar saves `CALENDAR_REFRESH_TOKEN_<ID>`). |
 | `/sync` | Triggers a manual sync of today's nutrition details. |
 | `/food <member_id> <desc>` | Manually log food (e.g. `/food praj 2 eggs and toast`). |
-| `/status` | View today's status report (calories, macros, steps, goal progress). |
+| `/undofood [member_id]` | Remove the last `/food` entry and rebuild today's totals. |
+| `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals. |
+| `/status` | Today's status (finance + health, goal progress). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
+| `/tasks [open\|all\|completed] [member]` | List email/calendar tasks; `/tasks complete <id>` marks done. Reply `unactionable` to a task reminder to ignore similar emails. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |
+| `/networth` | Estimated net worth (cash + stocks) in base currency. |
+| `/monthly [YYYY-MM]` | Monthly transaction summary. |
+| `/holdings ...` | Set portfolio holdings. |
 | `/chat` | View your current Telegram Chat ID. |
-| `/login <health\|gmail\|calendar <member>>` | Interactive OAuth (Calendar saves `CALENDAR_REFRESH_TOKEN_<ID>`). |
 
 ---
 
