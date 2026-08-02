@@ -10,4 +10,4 @@
 - [x] Allow scheduled Google Health sync when GEMINI_API_KEY is missing
 - [x] Fix `/adjustfood` audit row + `/undofood` inconsistency (rebuild summary from food_log)
 - [x] Slim noisy `/food` / `/undofood` replies (macros-first, like `/status`)
-- [ ] Optional: per-member nutrition goals in config + progress on `/status`/`/trends`
+- [x] Optional: per-member nutrition goals in config + progress on `/status`/`/trends`

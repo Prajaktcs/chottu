@@ -91,7 +91,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/login <fitbit\|gmail>` | Starts the interactive local OAuth flow. |
 | `/sync` | Triggers a manual sync of today's nutrition details. |
 | `/food <member_id> <desc>` | Manually log food (e.g. `/food praj 2 eggs and toast`). |
-| `/status` | View today's status report (calories, macros, steps). |
+| `/status` | View today's status report (calories, macros, steps, goal progress). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |

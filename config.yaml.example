@@ -6,16 +6,27 @@ family:
       calendar:
         provider: google
         email: your.email@gmail.com   # Google account for this member's calendar
+      # Optional daily targets (omit any field you don't care about)
+      nutrition_goals:
+        calories: 2200
+        protein_g: 160
+        carbs_g: 220
+        fats_g: 70
+        fiber_g: 30
+        steps: 8000
     - id: jordan
       name: Jordan
       role: adult
       calendar:
         provider: google
         email: other.email@gmail.com
+      nutrition_goals:
+        calories: 1800
+        protein_g: 120
     - id: sam
       name: Sam
       role: kid
-      # no calendar block = no calendar integration for this member
+      # no calendar / nutrition_goals = no calendar integration / no goal progress
 
 # Note: Per-member Google Calendar refresh tokens are stored in .env, not here.
 # After running /login calendar <member_id> in Telegram, the following will be
