@@ -35,6 +35,62 @@
     "expected_classification": "TRAVEL_ITINERARY"
   },
   {
+    "test_id": "tc_parking_local_ledger",
+    "sender": "SpotHero Support <support@spothero.com>",
+    "subject": "SpotHero Parking Confirmation - Check Your Parking Pass #129593055",
+    "body_preview": "Your SpotHero parking pass is ready. Garage: 123 Main St. Entry after 6:00 PM. Amount charged: $18.00.",
+    "expected_classification": "LEDGER_STREAM"
+  },
+  {
+    "test_id": "tc_parking_airport_travel",
+    "sender": "YYZ Airport Parking <noreply@torontopearson.com>",
+    "subject": "Your airport parking reservation for YYZ — Jun 20–22",
+    "body_preview": "Reservation confirmed for Toronto Pearson (YYZ) Terminal 1 parking, check-in Jun 20, check-out Jun 22. Confirmation #AP-44219.",
+    "expected_classification": "TRAVEL_ITINERARY"
+  },
+  {
+    "test_id": "tc_pc_optimum_promo_trash",
+    "sender": "PC Express <noreply@e.pcexpress.ca>",
+    "subject": "Get 30,000 PC Optimum points",
+    "body_preview": "Earn 30,000 PC Optimum points when you shop this week. Offer ends Sunday. Tap to learn more.",
+    "expected_classification": "TRASH"
+  },
+  {
+    "test_id": "tc_wealthsimple_bill_paid_archive",
+    "sender": "Wealthsimple <notifications@o.wealthsimple.com>",
+    "subject": "Your bill has been paid",
+    "body_preview": "We successfully paid your bill. No further action is required.",
+    "expected_classification": "ARCHIVE"
+  },
+  {
+    "test_id": "tc_finimize_newsletter",
+    "sender": "Finimize Daily <hello@finimize.com>",
+    "subject": "A tale of two tech companies",
+    "body_preview": "Today's market briefing covers two tech firms and what their earnings mean for investors.",
+    "expected_classification": "NEWSLETTER"
+  },
+  {
+    "test_id": "tc_word_daily_newsletter",
+    "sender": "Word Daily <hello@worddaily.com>",
+    "subject": "Word of the Day: Psephology",
+    "body_preview": "Psephology is the statistical study of elections and trends in voting.",
+    "expected_classification": "NEWSLETTER"
+  },
+  {
+    "test_id": "tc_quiz_daily_newsletter",
+    "sender": "Quiz Daily <mail@quizdaily.com>",
+    "subject": "After water, what is the most consumed beverage in the world?",
+    "body_preview": "Take today's quiz and see how you rank against other readers.",
+    "expected_classification": "NEWSLETTER"
+  },
+  {
+    "test_id": "tc_house_outlook_newsletter",
+    "sender": "House Outlook <hello@houseoutlook.com>",
+    "subject": "You're Cleaning Baseboards the Hard Way",
+    "body_preview": "Try this simpler method for cleaning baseboards without scrubbing for hours.",
+    "expected_classification": "NEWSLETTER"
+  },
+  {
     "test_id": "tc_financial_bill",
     "sender": "rogers.services@rogers.com",
     "subject": "Your Rogers bill is ready for review - Due date June 28, 2026",

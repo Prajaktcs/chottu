@@ -6,7 +6,7 @@ Project Chotu is a powerful, local-first agentic workspace built in Rust. It uti
 
 ## Features
 
-- **Google Health Sync**: Automatically imports daily calories, protein, carbs, and fats using the modern Google Health REST API (v4).
+- **Google Health Sync**: Two-way nutrition sync — imports daily calories/macros from the Google Health REST API (v4), and pushes Telegram `/food` entries back for the primary member.
 - **Interactive OAuth Onboarding**: Run `/login fitbit` or `/login gmail` directly in Telegram, and the agent spawns a temporary callback server to authorize and auto-save credentials to your local `.env`.
 - **Stock Research Agent**: Run automated investment analysis (hundred-bagger methodology) via Google Gemini 3.5 Flash, matching stock tickers dynamically.
 - **Gmail IMAP Streamer**: Scrapes bank statements, receipts, and invoices automatically via Gmail OAuth2.
@@ -19,11 +19,13 @@ Project Chotu is a powerful, local-first agentic workspace built in Rust. It uti
 
 1. **Rust Toolchain**: Install Rust (1.80+ recommended) via `rustup`.
 2. **SQLite**: The database is stored locally in `chotu.db`.
-3. **Ollama**: Install [Ollama](https://ollama.com/) locally to run offline classification models:
+3. **Ollama**: Install [Ollama](https://ollama.com/) locally for offline email classification.
+   Small 3–4B models (`llama3.2:3b`, `qwen3.5:4b`) work but misclassify edge cases often.
+   Prefer `qwen3.5:9b` for triage accuracy (next step up from 4b in the Qwen 3.5 family):
    ```bash
-   ollama pull llama3.2:3b
-   ollama pull deepseek-r1:8b
+   ollama pull qwen3.5:9b
    ```
+   Set `OLLAMA_MODEL=qwen3.5:9b` in `.env`.
 
 ---
 
@@ -68,7 +70,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 2. Enable the **Google Health API** and configure the **OAuth Consent Screen** (adding your email as a test user).
 3. Create a **Web Application** credential, setting the Authorized redirect URI to `http://localhost:8080/callback`.
 4. Copy the Client ID & Secret to your `.env` (`FITBIT_CLIENT_ID` / `FITBIT_CLIENT_SECRET`).
-5. Send `/login fitbit` in Telegram and click the authorization link.
+5. Send `/login health` in Telegram and click the authorization link (includes nutrition **write** so Telegram `/food` can sync upstream). Re-run `/login health` if you previously authorized read-only scopes.
 
 ### B. Gmail (IMAP Email sync)
 1. Using the same Google Cloud Console project, add your email to credentials (`CHOTU_EMAIL_USER`).
@@ -90,9 +92,9 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/help` | Displays the help text. |
 | `/login <health\|gmail\|calendar <member>>` | Interactive OAuth (Calendar saves `CALENDAR_REFRESH_TOKEN_<ID>`). |
 | `/sync` | Triggers a manual sync of today's nutrition details. |
-| `/food <member_id> <desc>` | Manually log food (e.g. `/food praj 2 eggs and toast`). |
-| `/undofood [member_id]` | Remove the last `/food` entry and rebuild today's totals. |
-| `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals. |
+| `/food <member_id> <desc>` | Manually log food and push to Google Health for the primary member (e.g. `/food praj 2 eggs and toast`). |
+| `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). |
+| `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
 | `/status` | Today's status (finance + health, goal progress). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
 | `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Reply `unactionable` to a reminder to ignore similar emails. |
