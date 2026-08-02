@@ -3,7 +3,7 @@ use anyhow::Context;
 use rig_core::providers::gemini;
 use rig_core::client::CompletionClient;
 use rig_core::completion::Prompt;
-use chotu_common::{InvestmentPhilosophy, TargetAllocation, FinancialLedgerEntry};
+use chotu_common::{InvestmentPhilosophy, TargetAllocation, FinancialLedgerEntry, AppConfig};
 
 #[derive(Debug, Clone)]
 pub struct StockResearcher {
@@ -247,6 +247,8 @@ pub fn check_allocation_status(
     target_month: &str,
     allocation: &TargetAllocation,
     entries: &[FinancialLedgerEntry],
+    config: &AppConfig,
+    rates: &std::collections::HashMap<String, f64>,
 ) -> String {
     let mut msg = String::new();
     msg.push_str(&format!("🎯 *Savings & Target Allocation Tracking: {}*\n\n", target_month));
@@ -262,7 +264,8 @@ pub fn check_allocation_status(
             for entry in entries {
                 // We only count spend/buy transactions (which are debits/negative amounts)
                 if entry.amount < 0.0 && match_transaction(&entry.merchant, &entry.category, &holding.ticker) {
-                    actual_holding_buy += entry.amount.abs();
+                    let converted = config.convert_to_base(entry.amount.abs(), &entry.currency, rates);
+                    actual_holding_buy += converted;
                 }
             }
             actual_bucket_buy += actual_holding_buy;
@@ -396,7 +399,9 @@ Some noise like Ticker: NOT_A_TICKER is ignored because it is too long.";
             },
         ];
         
-        let report = check_allocation_status("2026-06", &allocation, &entries);
+        let config = AppConfig::default();
+        let rates = std::collections::HashMap::new();
+        let report = check_allocation_status("2026-06", &allocation, &entries, &config, &rates);
         assert!(report.contains("VFV"));
         assert!(report.contains("$600.00 / $600.00"));
         assert!(report.contains("QQC"));

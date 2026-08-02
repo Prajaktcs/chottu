@@ -3,12 +3,30 @@ family:
     - id: alex
       name: Alex
       role: adult
+      calendar:
+        provider: google
+        email: your.email@gmail.com   # Google account for this member's calendar
     - id: jordan
       name: Jordan
       role: adult
+      calendar:
+        provider: google
+        email: other.email@gmail.com
     - id: sam
       name: Sam
       role: kid
+      # no calendar block = no calendar integration for this member
+
+# Note: Per-member Google Calendar refresh tokens are stored in .env, not here.
+# After running /login calendar <member_id> in Telegram, the following will be
+# automatically added to your .env:
+#   CALENDAR_REFRESH_TOKEN_ALEX=...
+#   CALENDAR_REFRESH_TOKEN_JORDAN=...
+#
+# Optional: CHOTU_TIMEZONE=America/Toronto (used when auto-scheduling tasks/bills)
+
+currency: "CAD"
+email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
 
 investment_philosophy:
   description: "finding high-conviction micro-cap and small-cap stocks with potential for 100x returns ('hundred baggers')"

@@ -1,6 +1,5 @@
 set dotenv-load := true
 
-
 # Display available commands
 default:
     @just --list
@@ -51,6 +50,10 @@ run: setup
         exit 1
     fi
     cargo run -p coordinator
+
+# Build the full workspace
+build:
+    cargo build --workspace
 
 # Run unit tests across all crates
 test:

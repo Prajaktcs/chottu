@@ -75,6 +75,12 @@ Chotu uses browser redirects to secure logins locally without public ports.
 2. Add `CHOTU_OAUTH_CLIENT_ID` and `CHOTU_OAUTH_CLIENT_SECRET` to `.env`.
 3. Send `/login gmail` in Telegram and click the authorization link.
 
+### C. Google Calendar (per family member)
+1. Ensure each adult has a `calendar:` block in `config.yaml` (see `config.yaml.example`).
+2. Enable the **Google Calendar API** on the same OAuth client used for Gmail.
+3. Send `/login calendar <member_id>` (e.g. `/login calendar praj`) and authorize with that member's Google account.
+4. Chotu saves `CALENDAR_REFRESH_TOKEN_<MEMBER>` to `.env`. Action items, bill due dates, and travel dates from email are then auto-scheduled.
+
 ---
 
 ## Telegram Bot Commands
@@ -86,9 +92,11 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/sync` | Triggers a manual sync of today's nutrition details. |
 | `/food <member_id> <desc>` | Manually log food (e.g. `/food praj 2 eggs and toast`). |
 | `/status` | View today's status report (calories, macros, steps). |
+| `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |
 | `/chat` | View your current Telegram Chat ID. |
+| `/login <health\|gmail\|calendar <member>>` | Interactive OAuth (Calendar saves `CALENDAR_REFRESH_TOKEN_<ID>`). |
 
 ---
 
