@@ -250,8 +250,12 @@ pub fn check_allocation_status(
     config: &AppConfig,
     rates: &std::collections::HashMap<String, f64>,
 ) -> String {
+    let base = config.currency();
     let mut msg = String::new();
-    msg.push_str(&format!("🎯 *Savings & Target Allocation Tracking: {}*\n\n", target_month));
+    msg.push_str(&format!(
+        "🎯 *Savings & Target Allocation Tracking: {}* ({})\n\n",
+        target_month, base
+    ));
 
     let mut total_actual_buys = 0.0;
     
@@ -286,8 +290,8 @@ pub fn check_allocation_status(
             };
             
             holdings_lines.push(format!(
-                "  - *{}*: ${:.2} / ${:.2} ({:.1}% - {})",
-                holding.ticker, actual_holding_buy, holding.amount, holding_percent, status_icon
+                "  - *{}*: ${:.2} / ${:.2} {} ({:.1}% - {})",
+                holding.ticker, actual_holding_buy, holding.amount, base, holding_percent, status_icon
             ));
         }
         
@@ -306,8 +310,8 @@ pub fn check_allocation_status(
         };
         
         msg.push_str(&format!(
-            "• *{}* (Target: ${:.2} | Actual: ${:.2} | {:.1}% - {})\n",
-            bucket.name, bucket.monthly_buy, actual_bucket_buy, bucket_percent, bucket_status_icon
+            "• *{}* (Target: ${:.2} | Actual: ${:.2} {} | {:.1}% - {})\n",
+            bucket.name, bucket.monthly_buy, actual_bucket_buy, base, bucket_percent, bucket_status_icon
         ));
         for line in holdings_lines {
             msg.push_str(&line);
@@ -332,8 +336,8 @@ pub fn check_allocation_status(
     
     msg.push_str("━━━━━━━━━━━━━━━━━━━━━━━━\n");
     msg.push_str(&format!(
-        "✨ *Overall Savings Budget:* ${:.2} / ${:.2} ({:.1}% - {})\n",
-        total_actual_buys, allocation.monthly_budget, overall_percent, overall_status
+        "✨ *Overall Savings Budget:* ${:.2} / ${:.2} {} ({:.1}% - {})\n",
+        total_actual_buys, allocation.monthly_budget, base, overall_percent, overall_status
     ));
     
     msg
