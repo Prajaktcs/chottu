@@ -95,7 +95,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals. |
 | `/status` | Today's status (finance + health, goal progress). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
-| `/tasks [open\|all\|completed] [member]` | List email/calendar tasks; `/tasks complete <id>` marks done. Reply `unactionable` to a task reminder to ignore similar emails. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Reply `unactionable` to a reminder to ignore similar emails. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |
 | `/networth` | Estimated net worth (cash + stocks) in base currency. |

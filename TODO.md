@@ -14,4 +14,4 @@
 
 ## Tasks & Calendar
 - [x] Telegram `/tasks` to list open tasks and mark them complete
-- [ ] Optional: snooze / reassign tasks from Telegram
+- [x] Optional: snooze / reassign tasks from Telegram
