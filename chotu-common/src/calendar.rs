@@ -285,7 +285,7 @@ pub fn default_calendar_timezone() -> String {
     std::env::var("CHOTU_TIMEZONE").unwrap_or_else(|_| "America/Toronto".to_string())
 }
 
-/// Schedules a timed block on a member's calendar starting at local noon on `date_yyyy_mm_dd`
+/// Schedules a timed block on a member's calendar starting at local 09:00 on `date_yyyy_mm_dd`
 /// (or tomorrow if `None`), lasting `duration_minutes`. Returns the Google event ID.
 pub async fn schedule_timed_block(
     client: &GoogleCalendarClient,
