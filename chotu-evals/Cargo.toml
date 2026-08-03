@@ -1,0 +1,15 @@
+[package]
+name = "chotu-evals"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chotu-common = { path = "../chotu-common" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dotenvy = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }

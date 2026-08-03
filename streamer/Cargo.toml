@@ -1,0 +1,19 @@
+[package]
+name = "streamer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chotu-common = { path = "../chotu-common" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+anyhow = { workspace = true }
+async-imap = { workspace = true }
+native-tls = { workspace = true }
+tokio-native-tls = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+dotenvy = { workspace = true }
+mailparse = { workspace = true }
+teloxide = { workspace = true }

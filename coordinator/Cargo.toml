@@ -1,0 +1,21 @@
+[package]
+name = "coordinator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chotu-common = { path = "../chotu-common" }
+streamer = { path = "../streamer" }
+janitor = { path = "../janitor" }
+health-coach = { path = "../health-coach" }
+finance-advisor = { path = "../finance-advisor" }
+tokio = { workspace = true }
+sqlx = { workspace = true }
+anyhow = { workspace = true }
+teloxide = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+dotenvy = { workspace = true }
+
