@@ -126,6 +126,47 @@ impl FamilyMember {
     pub fn calendar_refresh_token_env_key(&self) -> String {
         format!("CALENDAR_REFRESH_TOKEN_{}", self.id.to_uppercase())
     }
+
+    /// Returns the environment variable key that holds this member's
+    /// Google Health OAuth refresh token.
+    /// e.g. member id "alex" → "HEALTH_REFRESH_TOKEN_ALEX"
+    pub fn health_refresh_token_env_key(&self) -> String {
+        format!("HEALTH_REFRESH_TOKEN_{}", self.id.to_uppercase())
+    }
+}
+
+/// Env key for a member's Google Health refresh token (`HEALTH_REFRESH_TOKEN_{ID}`).
+pub fn health_refresh_token_env_key(member_id: &str) -> String {
+    format!("HEALTH_REFRESH_TOKEN_{}", member_id.to_uppercase())
+}
+
+/// Resolve a member's Google Health refresh token.
+///
+/// Prefers `HEALTH_REFRESH_TOKEN_{ID}`. For the primary (first) family member,
+/// falls back to legacy `FITBIT_REFRESH_TOKEN` so existing single-account setups
+/// keep working.
+pub fn resolve_health_refresh_token(member_id: &str, config: &AppConfig) -> Option<String> {
+    let key = health_refresh_token_env_key(member_id);
+    if let Ok(token) = std::env::var(&key) {
+        if !token.is_empty() {
+            return Some(token);
+        }
+    }
+
+    let is_primary = config
+        .family
+        .members
+        .first()
+        .is_some_and(|m| m.id.eq_ignore_ascii_case(member_id));
+    if is_primary {
+        if let Ok(token) = std::env::var("FITBIT_REFRESH_TOKEN") {
+            if !token.is_empty() {
+                return Some(token);
+            }
+        }
+    }
+
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -315,7 +356,26 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempfile::NamedTempFile;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce() + std::panic::UnwindSafe) {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -337,6 +397,7 @@ mod tests {
             nutrition_goals: None,
         };
         assert_eq!(member.calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
+        assert_eq!(member.health_refresh_token_env_key(), "HEALTH_REFRESH_TOKEN_ALEX");
     }
 
     #[test]
@@ -349,7 +410,7 @@ family:
       role: adult
       calendar:
         provider: google
-        email: you@example.com
+        email: alex@example.com
       nutrition_goals:
         calories: 2200
         protein_g: 160
@@ -393,7 +454,7 @@ target_allocation:
         assert!(loaded.family.members[0].calendar.is_some());
         let cal = loaded.family.members[0].calendar.as_ref().unwrap();
         assert_eq!(cal.provider, "google");
-        assert_eq!(cal.email, "you@example.com");
+        assert_eq!(cal.email, "alex@example.com");
         assert_eq!(loaded.family.members[0].calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
         // Nutrition goals
         let goals = loaded.family.members[0].nutrition_goals.as_ref().unwrap();
@@ -436,5 +497,49 @@ target_allocation:
         let loaded = load_config("non_existent_file.yaml");
         assert_eq!(loaded.family.members.len(), 1);
         assert_eq!(loaded.family.members[0].id, "alex");
+    }
+
+    #[test]
+    fn test_health_env_key_and_resolve() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let mut config = AppConfig::default();
+        config.family.members.push(FamilyMember {
+            id: "jordan".to_string(),
+            name: "Jordan".to_string(),
+            role: "adult".to_string(),
+            calendar: None,
+            nutrition_goals: None,
+        });
+        assert_eq!(
+            health_refresh_token_env_key("jordan"),
+            "HEALTH_REFRESH_TOKEN_JORDAN"
+        );
+
+        with_env_var("HEALTH_REFRESH_TOKEN_ALEX", None, || {
+            with_env_var("HEALTH_REFRESH_TOKEN_JORDAN", None, || {
+                with_env_var("FITBIT_REFRESH_TOKEN", Some("legacy-primary-token"), || {
+                    assert_eq!(
+                        resolve_health_refresh_token("alex", &config).as_deref(),
+                        Some("legacy-primary-token")
+                    );
+                    assert!(resolve_health_refresh_token("jordan", &config).is_none());
+
+                    with_env_var("HEALTH_REFRESH_TOKEN_JORDAN", Some("jordan-token"), || {
+                        assert_eq!(
+                            resolve_health_refresh_token("jordan", &config).as_deref(),
+                            Some("jordan-token")
+                        );
+                    });
+
+                    with_env_var("HEALTH_REFRESH_TOKEN_ALEX", Some("alex-per-member"), || {
+                        assert_eq!(
+                            resolve_health_refresh_token("alex", &config).as_deref(),
+                            Some("alex-per-member")
+                        );
+                    });
+                });
+            });
+        });
     }
 }

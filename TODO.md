@@ -24,10 +24,10 @@
 - [x] Multimodal food capture (Telegram photo of barcode / package / plate → Open Food Facts + Gemini → food log)
 - [x] Morning brief (proactive daily digest: calendar, open tasks, bills due, nutrition vs goals)
 - [ ] User-created tasks and time-based reminders (not only email-derived)
-- [ ] Queryable memory over journals / digests / personal references
+- [x] Queryable memory over journals / digests / personal references / tasks (local RAG)
 
 ### Later domains
-- [ ] Calendar read/query UX (“what's today?”, conflicts)
+- [x] Calendar read/query UX (“what's today?”, conflicts)
 - [ ] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
 - [ ] Spend alerts / category budgets
 - [ ] Family multi-user Telegram UX

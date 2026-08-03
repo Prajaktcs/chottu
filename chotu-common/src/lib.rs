@@ -1,3 +1,4 @@
+pub mod agenda;
 pub mod database;
 pub mod family;
 pub mod google_health;
@@ -14,6 +15,11 @@ pub use family::{
     health_refresh_token_env_key, load_config, resolve_health_refresh_token, AppConfig,
     FamilyMember, FamilySection, InvestmentPhilosophy, TargetAllocation, AllocationBucket,
     BucketHolding, fetch_exchange_rates, CalendarConfig, NutritionGoals,
+};
+pub use agenda::{
+    compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
+    format_brief_calendar_section, local_day_bounds_utc, truncate, week_bounds_utc,
+    CalendarConflict, CalendarWindow, FamilyEventsFetch,
 };
 pub use calendar::{
     build_calendar_client, default_calendar_timezone, schedule_timed_block, CalendarEvent,
