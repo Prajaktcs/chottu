@@ -776,7 +776,7 @@ impl GeminiClient {
 
         // Construct Gemini URL
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
             self.api_key
         );
 
@@ -865,7 +865,7 @@ Do not include any explanation or markdown formatting outside the JSON block.";
         let base64_data = BASE64_STANDARD.encode(image_bytes);
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
             self.api_key
         );
 
@@ -1000,7 +1000,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
 
         let extractor = self
             .client
-            .extractor::<NutritionEstimation>("gemini-3.5-flash")
+            .extractor::<NutritionEstimation>("gemini-3.6-flash")
             .preamble(system_prompt)
             .build();
 
@@ -1028,7 +1028,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
 
         let extractor = self
             .client
-            .extractor::<MissingSyncNutrition>("gemini-3.5-flash")
+            .extractor::<MissingSyncNutrition>("gemini-3.6-flash")
             .preamble(system_prompt)
             .build();
 
@@ -1053,7 +1053,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
 
         let extractor = self
             .client
-            .extractor::<StockPricesResponse>("gemini-3.5-flash")
+            .extractor::<StockPricesResponse>("gemini-3.6-flash")
             .preamble(system_prompt)
             .build();
 
@@ -1069,7 +1069,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
     /// Useful for composing narrative text like morning briefs and weekly prep notes.
     pub async fn ask(&self, prompt: &str) -> Result<String, LlmError> {
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={}",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
             self.api_key
         );
 
