@@ -1350,33 +1350,25 @@ async fn handle_tasks(
         _ => ("status = 'open'", "open"),
     };
 
-    let query = if member_filter.is_some() {
-        format!(
-            "SELECT id, title, status, due_date, assigned_to, email_subject \
-             FROM tasks WHERE {status_clause} AND (assigned_to = ? OR assigned_to IS NULL) \
-             ORDER BY due_date IS NULL, due_date ASC, created_at DESC LIMIT 25"
-        )
-    } else {
-        format!(
-            "SELECT id, title, status, due_date, assigned_to, email_subject \
-             FROM tasks WHERE {status_clause} \
-             ORDER BY due_date IS NULL, due_date ASC, created_at DESC LIMIT 25"
-        )
-    };
+    // sqlx 0.9: build dynamic filters with QueryBuilder (SqlSafeStr rejects String).
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, title, status, due_date, assigned_to, email_subject FROM tasks WHERE ",
+    );
+    qb.push(status_clause);
+    if let Some(ref member_id) = member_filter {
+        qb.push(" AND (assigned_to = ");
+        qb.push_bind(member_id);
+        qb.push(" OR assigned_to IS NULL)");
+    }
+    qb.push(" ORDER BY due_date IS NULL, due_date ASC, created_at DESC LIMIT 25");
 
-    let rows: Vec<TaskListRow> = {
-        let mut q = sqlx::query_as::<_, TaskListRow>(&query);
-        if let Some(ref member_id) = member_filter {
-            q = q.bind(member_id);
-        }
-        match q.fetch_all(pool).await {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Failed to list tasks: {:?}", e);
-                bot.send_message(chat_id, "❌ Database error listing tasks.")
-                    .await?;
-                return Ok(());
-            }
+    let rows: Vec<TaskListRow> = match qb.build_query_as::<TaskListRow>().fetch_all(pool).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to list tasks: {:?}", e);
+            bot.send_message(chat_id, "❌ Database error listing tasks.")
+                .await?;
+            return Ok(());
         }
     };
 

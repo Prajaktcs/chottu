@@ -620,6 +620,7 @@ async fn sum_food_log_for_day_filtered(
     date: &str,
     filter: FoodLogSyncFilter,
 ) -> Result<DayNutritionTotals> {
+    // Filter only toggles a fixed clause; AssertSqlSafe is required for sqlx 0.9 SqlSafeStr.
     let sync_clause = match filter {
         FoodLogSyncFilter::All => "",
         FoodLogSyncFilter::UnsyncedOnly => {
@@ -659,7 +660,7 @@ async fn sum_food_log_for_day_filtered(
         WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?{sync_clause}
         "#
     );
-    let totals = sqlx::query_as::<_, DayNutritionTotals>(&sql)
+    let totals = sqlx::query_as::<_, DayNutritionTotals>(sqlx::AssertSqlSafe(sql))
         .bind(member_id)
         .bind(date)
         .fetch_one(pool)
