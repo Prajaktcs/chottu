@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use chrono::Local;
 use sqlx::SqlitePool;
 
-use crate::{fetch_exchange_rates, AppConfig, FinancialLedgerEntry};
+use crate::agenda::escape_md;
+use crate::{fetch_exchange_rates, AppConfig};
 
 pub const BUDGET_THRESHOLDS: [i32; 2] = [80, 100];
 
@@ -42,11 +43,12 @@ impl BudgetAlert {
     }
 
     pub fn format_markdown(&self, base: &str) -> String {
+        let category = escape_md(&self.category);
         if self.threshold >= 100 {
             if self.spent > self.limit {
                 format!(
                     "🚨 *Spend alert · {}*\n${:.0} / ${:.0} ({:.0}%) — over by ${:.0} {}",
-                    self.category,
+                    category,
                     self.spent,
                     self.limit,
                     self.pct,
@@ -56,14 +58,14 @@ impl BudgetAlert {
             } else {
                 format!(
                     "🚨 *Spend alert · {}*\n${:.0} / ${:.0} ({:.0}%) — at limit ({})",
-                    self.category, self.spent, self.limit, self.pct, base
+                    category, self.spent, self.limit, self.pct, base
                 )
             }
         } else {
             let left = (self.limit - self.spent).max(0.0);
             format!(
                 "⚠️ *Spend alert · {}*\n${:.0} / ${:.0} ({:.0}%) — ${:.0} {} left",
-                self.category, self.spent, self.limit, self.pct, left, base
+                category, self.spent, self.limit, self.pct, left, base
             )
         }
     }
@@ -121,8 +123,7 @@ pub async fn effective_budgets(
         "SELECT category, limit_amount FROM spend_budget_overrides",
     )
     .fetch_all(pool)
-    .await
-    .unwrap_or_default();
+    .await?;
 
     for (cat, limit) in overrides {
         if limit <= 0.0 {
@@ -179,14 +180,21 @@ pub async fn clear_budget_override(
     Ok(result.rows_affected() > 0)
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct LedgerSpendRow {
+    amount: f64,
+    currency: String,
+    category: String,
+}
+
 async fn category_spend_for_month(
     pool: &SqlitePool,
     config: &AppConfig,
     month: &str,
     rates: &HashMap<String, f64>,
 ) -> Result<HashMap<String, f64>, sqlx::Error> {
-    let entries: Vec<FinancialLedgerEntry> = sqlx::query_as(
-        "SELECT id, timestamp, amount, currency, institution, merchant, category, source_type \
+    let entries: Vec<LedgerSpendRow> = sqlx::query_as(
+        "SELECT amount, currency, category \
          FROM financial_ledger \
          WHERE strftime('%Y-%m', timestamp) = ?",
     )
@@ -278,7 +286,11 @@ pub fn format_budget_progress_markdown(
         };
         msg.push_str(&format!(
             "• *{}*: ${:.0} / ${:.0} ({:.0}%){}\n",
-            row.category, row.spent, row.limit, row.pct, flag
+            escape_md(&row.category),
+            row.spent,
+            row.limit,
+            row.pct,
+            flag
         ));
     }
     msg

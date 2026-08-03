@@ -1620,7 +1620,7 @@ async fn create_manual_task(
                     chat_id,
                     format!(
                         "⚠️ Couldn't parse due `{}`. Try `tomorrow 3pm`, `friday`, or `2026-08-10`.",
-                        raw
+                        escape_md_basic(raw)
                     ),
                 )
                 .parse_mode(teloxide::types::ParseMode::Markdown)
@@ -2742,7 +2742,7 @@ async fn handle_budget(
                         chat_id,
                         format!(
                             "✅ Budget set: *{}* → ${:.0} {} / month\n\n{}",
-                            display,
+                            escape_md_basic(&display),
                             amount,
                             base,
                             "_Telegram override (wins over config.yaml)._"
@@ -2777,7 +2777,7 @@ async fn handle_budget(
                         chat_id,
                         format!(
                             "✅ Cleared Telegram override for *{}* (falls back to config.yaml if set).",
-                            display
+                            escape_md_basic(&display)
                         ),
                     )
                     .parse_mode(teloxide::types::ParseMode::Markdown)
@@ -2789,7 +2789,7 @@ async fn handle_budget(
                         chat_id,
                         format!(
                             "ℹ️ No Telegram override found for *{}*. YAML budgets are unchanged.",
-                            display
+                            escape_md_basic(&display)
                         ),
                     )
                     .parse_mode(teloxide::types::ParseMode::Markdown)
