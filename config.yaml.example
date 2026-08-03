@@ -39,6 +39,15 @@ family:
 currency: "CAD"
 email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
 
+# Optional household category spend budgets (base currency). Telegram `/budget set`
+# overrides these; 80%/100% alerts push when TELEGRAM_CHAT_ID is set.
+spend_budgets:
+  categories:
+    Food: 800
+    Shopping: 400
+    Entertainment: 200
+    Subscription: 150
+
 investment_philosophy:
   description: "finding high-conviction micro-cap and small-cap stocks with potential for 100x returns ('hundred baggers')"
   focus_areas:

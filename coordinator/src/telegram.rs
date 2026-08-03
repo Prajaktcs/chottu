@@ -10,11 +10,13 @@ use teloxide::utils::command::BotCommands;
 use tokio::sync::RwLock;
 
 use chotu_common::{
-    answer_memory_query, compose_calendar_agenda, exchange_google_code, fetch_exchange_rates,
-    lookup_barcode, save_calendar_refresh_token, save_google_refresh_token,
-    save_health_refresh_token, spawn_background_reindex, start_redirect_listener, AppConfig,
-    CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient, InvestmentPhilosophy, MemoryIndex,
-    UserIntent,
+    answer_memory_query, clear_budget_override, compose_calendar_agenda, compute_budget_progress,
+    current_budget_month, display_category, exchange_google_code, fetch_exchange_rates,
+    format_budget_progress_markdown, lookup_barcode, mark_budget_alert_sent, parse_due_phrase,
+    pending_budget_alerts, save_calendar_refresh_token, save_google_refresh_token,
+    save_health_refresh_token, set_budget_override, spawn_background_reindex, split_task_add_args,
+    start_redirect_listener, AppConfig, CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient,
+    InvestmentPhilosophy, MemoryIndex, UserIntent,
 };
 use finance_advisor::{run_stock_research, StockResearcher};
 use teloxide::net::Download;
@@ -37,7 +39,7 @@ pub enum Command {
     Cal(String),
     #[command(description = "show multi-day nutrition trends. Usage: /trends [days]")]
     Trends(String),
-    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks complete|snooze|reassign|open <id> ...")]
+    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks add [member] <title> [due <when>]; /tasks complete|snooze|reassign|open <id> ...")]
     Tasks(String),
     #[command(description = "search personal memory (journals, digests, references, tasks). Usage: /memory <question> | /memory reindex")]
     Memory(String),
@@ -63,6 +65,8 @@ pub enum Command {
     Networth,
     #[command(description = "show monthly transaction summary. Usage: /monthly [YYYY-MM]")]
     Monthly(String),
+    #[command(description = "category spend budgets. Usage: /budget | /budget set <Category> <amount> | /budget clear <Category>")]
+    Budget(String),
     #[command(description = "set stock portfolio holdings. Usage: /holdings <ticker>:<shares>:<avg_cost> ...")]
     Holdings(String),
 }
@@ -226,6 +230,61 @@ pub async fn start_telegram_bot(
         } else {
             println!(
                 "Telegram Bot: TELEGRAM_CHAT_ID not configured. Scheduled morning brief disabled. Use /brief manually."
+            );
+        }
+    });
+
+    // One-shot timed task reminders (due_at reached, not yet reminded).
+    let remind_bot = bot.clone();
+    let remind_pool = pool.clone();
+    tokio::spawn(async move {
+        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
+            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
+                let chat_id = ChatId(chat_id_num);
+                println!(
+                    "Telegram Bot: Task reminder poller enabled for ChatId {:?}",
+                    chat_id
+                );
+                loop {
+                    if let Err(e) = poll_due_task_reminders(&remind_bot, chat_id, &remind_pool).await
+                    {
+                        eprintln!("Telegram Bot: task reminder poll failed: {:?}", e);
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                }
+            }
+        } else {
+            println!(
+                "Telegram Bot: TELEGRAM_CHAT_ID not configured. Timed task reminders disabled."
+            );
+        }
+    });
+
+    // Mid-month category spend alerts at 80% / 100% (deduped per month).
+    let budget_bot = bot.clone();
+    let budget_pool = pool.clone();
+    let budget_config = config.clone();
+    tokio::spawn(async move {
+        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
+            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
+                let chat_id = ChatId(chat_id_num);
+                println!(
+                    "Telegram Bot: Spend budget alert poller enabled for ChatId {:?}",
+                    chat_id
+                );
+                loop {
+                    if let Err(e) =
+                        poll_spend_budget_alerts(&budget_bot, chat_id, &budget_pool, &budget_config)
+                            .await
+                    {
+                        eprintln!("Telegram Bot: spend budget alert poll failed: {:?}", e);
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
+                }
+            }
+        } else {
+            println!(
+                "Telegram Bot: TELEGRAM_CHAT_ID not configured. Spend budget alerts disabled."
             );
         }
     });
@@ -432,6 +491,9 @@ async fn handle_command(
         }
         Command::Monthly(args) => {
             handle_monthly(&bot, chat_id, args, &pool, &config).await?;
+        }
+        Command::Budget(args) => {
+            handle_budget(&bot, chat_id, args, &pool, &config).await?;
         }
         Command::Holdings(args) => {
             handle_holdings(&bot, chat_id, args, &pool).await?;
@@ -1227,9 +1289,18 @@ async fn handle_tasks(
     let second = tokens.get(1).copied();
     let third = tokens.get(2).copied();
 
-    // Mutating actions: complete / done / snooze / reassign / open (unsnooze)
+    // Mutating actions: add / complete / done / snooze / reassign / open (unsnooze)
     let action = first.to_lowercase();
     match action.as_str() {
+        "add" | "create" | "new" | "remind" => {
+            let rest = args
+                .trim()
+                .strip_prefix(first)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            return add_manual_task(bot, chat_id, pool, config, &rest).await;
+        }
         "complete" => {
             return match second {
                 Some(id) if id.len() >= 4 => mark_task_complete(bot, chat_id, pool, id).await,
@@ -1419,8 +1490,8 @@ async fn handle_tasks(
 
     if label == "open" || label == "open/snoozed" || label == "snoozed" {
         msg.push_str(
-            "\n_Actions:_ `/tasks complete <id>` · `/tasks snooze <id> [days]` · \
-             `/tasks reassign <id> <member>` · `/tasks open <id>`\n\
+            "\n_Actions:_ `/tasks add [member] <title> [due <when>]` · `/tasks complete <id>` · \
+             `/tasks snooze <id> [days]` · `/tasks reassign <id> <member>` · `/tasks open <id>`\n\
              _Dismiss email tasks:_ reply `unactionable` to the original reminder.",
         );
     }
@@ -1504,6 +1575,191 @@ async fn find_task_by_prefix(
     Ok(Some(matches.into_iter().next().unwrap()))
 }
 
+async fn add_manual_task(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    config: &AppConfig,
+    args: &str,
+) -> Result<(), teloxide::RequestError> {
+    let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
+    let Some((member_id, title, due_raw)) = split_task_add_args(args, &member_ids) else {
+        bot.send_message(
+            chat_id,
+            "⚠️ Usage: `/tasks add [member] <title> [due <when>]`\n\
+             Examples: `/tasks add buy milk` · `/tasks add praj call dentist due tomorrow 15:00`",
+        )
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+        return Ok(());
+    };
+
+    create_manual_task(bot, chat_id, pool, member_id, title, due_raw).await
+}
+
+async fn create_manual_task(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    member_id: Option<String>,
+    title: String,
+    due_raw: Option<String>,
+) -> Result<(), teloxide::RequestError> {
+    let title = title.trim().to_string();
+    if title.is_empty() {
+        bot.send_message(chat_id, "⚠️ Task title cannot be empty.")
+            .await?;
+        return Ok(());
+    }
+
+    let parsed_due = match due_raw.as_deref() {
+        Some(raw) => match parse_due_phrase(raw) {
+            Some(p) => Some(p),
+            None => {
+                bot.send_message(
+                    chat_id,
+                    format!(
+                        "⚠️ Couldn't parse due `{}`. Try `tomorrow 3pm`, `friday`, or `2026-08-10`.",
+                        raw
+                    ),
+                )
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+                return Ok(());
+            }
+        },
+        None => None,
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let due_date = parsed_due.as_ref().map(|p| p.due_date.clone());
+    let due_at = parsed_due.as_ref().map(|p| p.due_at.clone());
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 'manual')",
+    )
+    .bind(&id)
+    .bind(&now)
+    .bind(&now)
+    .bind(&title)
+    .bind(member_id.as_deref())
+    .bind(due_date.as_deref())
+    .bind(due_at.as_deref())
+    .execute(pool)
+    .await
+    {
+        eprintln!("Failed to create task: {:?}", e);
+        bot.send_message(chat_id, "❌ Database error creating task.")
+            .await?;
+        return Ok(());
+    }
+
+    let short_id: String = id.chars().take(8).collect();
+    let mut msg = format!(
+        "✅ Added task `{}`: _{}_",
+        short_id,
+        escape_md_basic(&title)
+    );
+    if let Some(ref mid) = member_id {
+        msg.push_str(&format!(" · @{}", mid));
+    }
+    if let Some(ref due) = due_date {
+        if let Some(ref at) = due_at {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at) {
+                let local = dt.with_timezone(&chrono::Local);
+                msg.push_str(&format!(
+                    " · due {} {}",
+                    due,
+                    local.format("%H:%M")
+                ));
+            } else {
+                msg.push_str(&format!(" · due {}", due));
+            }
+        } else {
+            msg.push_str(&format!(" · due {}", due));
+        }
+    }
+
+    bot.send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+
+    refresh_task_memory(pool, &id).await;
+    Ok(())
+}
+
+async fn poll_due_task_reminders(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+) -> Result<(), anyhow::Error> {
+    let now = chrono::Utc::now();
+    let now_s = now.to_rfc3339();
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, title, due_date, due_at FROM tasks \
+         WHERE status = 'open' \
+           AND due_at IS NOT NULL \
+           AND due_at <= ? \
+           AND reminded_at IS NULL \
+         ORDER BY due_at ASC LIMIT 20",
+    )
+    .bind(&now_s)
+    .fetch_all(pool)
+    .await?;
+
+    for (id, title, due_date, due_at) in rows {
+        let short_id: String = id.chars().take(8).collect();
+        let when = due_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| {
+                dt.with_timezone(&chrono::Local)
+                    .format("%a %b %e %H:%M")
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .or(due_date)
+            .unwrap_or_else(|| "now".to_string());
+
+        let msg = format!(
+            "⏰ *Reminder*\n`{}` {}\n_Due {}_\n\
+             `/tasks complete {}` · `/tasks snooze {}`",
+            short_id,
+            escape_md_basic(&title),
+            escape_md_basic(&when),
+            short_id,
+            short_id
+        );
+
+        if let Err(e) = bot
+            .send_message(chat_id, msg)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await
+        {
+            eprintln!("Telegram Bot: failed to send task reminder {}: {:?}", id, e);
+            continue;
+        }
+
+        if let Err(e) = sqlx::query(
+            "UPDATE tasks SET reminded_at = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&now_s)
+        .bind(&now_s)
+        .bind(&id)
+        .execute(pool)
+        .await
+        {
+            eprintln!("Telegram Bot: failed to mark reminded_at for {}: {:?}", id, e);
+        }
+    }
+
+    Ok(())
+}
+
 async fn mark_task_complete(
     bot: &Bot,
     chat_id: ChatId,
@@ -1563,11 +1819,14 @@ async fn snooze_task(
         .format("%Y-%m-%d")
         .to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    // Date-only snooze → local 09:00 that day (same default as create).
+    let due_at = parse_due_phrase(&due).map(|p| p.due_at);
 
     if let Err(e) = sqlx::query(
-        "UPDATE tasks SET status = 'snoozed', due_date = ?, updated_at = ? WHERE id = ?",
+        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
     )
     .bind(&due)
+    .bind(due_at.as_deref())
     .bind(&now)
     .bind(&id)
     .execute(pool)
@@ -2410,10 +2669,222 @@ async fn handle_monthly(
         msg.push_str(&target_report);
     }
 
+    match compute_budget_progress(pool, config, &target_month).await {
+        Ok(rows) if !rows.is_empty() => {
+            msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
+            msg.push_str(&format_budget_progress_markdown(
+                &target_month,
+                base,
+                &rows,
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Failed to compute budget progress for monthly: {:?}", e);
+        }
+    }
+
     bot.send_message(chat_id, msg)
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
 
+    Ok(())
+}
+
+async fn handle_budget(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: String,
+    pool: &SqlitePool,
+    config: &AppConfig,
+) -> Result<(), teloxide::RequestError> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return send_budget_progress(bot, chat_id, pool, config).await;
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let action = parts.next().unwrap_or("").to_lowercase();
+    match action.as_str() {
+        "set" => {
+            let category = parts.next().unwrap_or("").trim();
+            let amount_raw = parts.next().unwrap_or("").trim();
+            if category.is_empty() || amount_raw.is_empty() {
+                bot.send_message(
+                    chat_id,
+                    "⚠️ Usage: `/budget set <Category> <amount>` (e.g. `/budget set Food 800`)",
+                )
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+                return Ok(());
+            }
+            let Ok(amount) = amount_raw.replace(',', "").parse::<f64>() else {
+                bot.send_message(chat_id, "⚠️ Amount must be a number (e.g. `800`).")
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                return Ok(());
+            };
+            if amount <= 0.0 {
+                bot.send_message(chat_id, "⚠️ Amount must be greater than zero.")
+                    .await?;
+                return Ok(());
+            }
+            let display = display_category(category);
+            if display.is_empty() || display.to_lowercase() == "income" {
+                bot.send_message(chat_id, "⚠️ Invalid category name.")
+                    .await?;
+                return Ok(());
+            }
+            match set_budget_override(pool, &display, amount).await {
+                Ok(()) => {
+                    let base = config.currency();
+                    bot.send_message(
+                        chat_id,
+                        format!(
+                            "✅ Budget set: *{}* → ${:.0} {} / month\n\n{}",
+                            display,
+                            amount,
+                            base,
+                            "_Telegram override (wins over config.yaml)._"
+                        ),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                    send_budget_progress(bot, chat_id, pool, config).await?;
+                }
+                Err(e) => {
+                    eprintln!("Failed to set budget override: {:?}", e);
+                    bot.send_message(chat_id, "❌ Failed to save budget override.")
+                        .await?;
+                }
+            }
+        }
+        "clear" => {
+            let category = parts.next().unwrap_or("").trim();
+            if category.is_empty() {
+                bot.send_message(
+                    chat_id,
+                    "⚠️ Usage: `/budget clear <Category>` (e.g. `/budget clear Entertainment`)",
+                )
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+                return Ok(());
+            }
+            let display = display_category(category);
+            match clear_budget_override(pool, &display).await {
+                Ok(true) => {
+                    bot.send_message(
+                        chat_id,
+                        format!(
+                            "✅ Cleared Telegram override for *{}* (falls back to config.yaml if set).",
+                            display
+                        ),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                    send_budget_progress(bot, chat_id, pool, config).await?;
+                }
+                Ok(false) => {
+                    bot.send_message(
+                        chat_id,
+                        format!(
+                            "ℹ️ No Telegram override found for *{}*. YAML budgets are unchanged.",
+                            display
+                        ),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                }
+                Err(e) => {
+                    eprintln!("Failed to clear budget override: {:?}", e);
+                    bot.send_message(chat_id, "❌ Failed to clear budget override.")
+                        .await?;
+                }
+            }
+        }
+        _ => {
+            bot.send_message(
+                chat_id,
+                "⚠️ Usage:\n• `/budget` — this month's progress\n\
+                 • `/budget set <Category> <amount>`\n\
+                 • `/budget clear <Category>`",
+            )
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn send_budget_progress(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    config: &AppConfig,
+) -> Result<(), teloxide::RequestError> {
+    let month = current_budget_month();
+    let base = config.currency();
+    match compute_budget_progress(pool, config, &month).await {
+        Ok(rows) => {
+            let msg = format_budget_progress_markdown(&month, base, &rows);
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+        }
+        Err(e) => {
+            eprintln!("Failed to compute budget progress: {:?}", e);
+            bot.send_message(chat_id, "❌ Database error retrieving budgets.")
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn poll_spend_budget_alerts(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    config: &AppConfig,
+) -> Result<(), teloxide::RequestError> {
+    let month = current_budget_month();
+    let base = config.currency();
+    let alerts = match pending_budget_alerts(pool, config, &month).await {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("Telegram Bot: pending_budget_alerts failed: {:?}", e);
+            return Ok(());
+        }
+    };
+    if alerts.is_empty() {
+        return Ok(());
+    }
+
+    let mut msg = String::new();
+    for (i, alert) in alerts.iter().enumerate() {
+        if i > 0 {
+            msg.push_str("\n\n");
+        }
+        msg.push_str(&alert.format_markdown(base));
+    }
+    println!(
+        "Telegram Bot: Pushing {} spend budget alert(s) for {}",
+        alerts.len(),
+        month
+    );
+    bot.send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+
+    for alert in &alerts {
+        if let Err(e) =
+            mark_budget_alert_sent(pool, &month, &alert.category, alert.threshold).await
+        {
+            eprintln!(
+                "Telegram Bot: failed to mark budget alert sent ({}/{}): {:?}",
+                alert.category, alert.threshold, e
+            );
+        }
+    }
     Ok(())
 }
 
@@ -2862,6 +3333,13 @@ async fn dispatch_free_text_intent(
         UserIntent::Tasks { filter } => {
             handle_tasks(bot, chat_id, filter, pool, config).await?;
         }
+        UserIntent::TaskAdd {
+            member_id,
+            title,
+            due_raw,
+        } => {
+            create_manual_task(bot, chat_id, pool, member_id, title, due_raw).await?;
+        }
         UserIntent::Memory { query } => {
             handle_memory(bot, chat_id, query, pool, llm, gemini_client).await?;
         }
@@ -2897,10 +3375,14 @@ async fn dispatch_free_text_intent(
             )
             .await?;
         }
+        UserIntent::Budget => {
+            handle_budget(bot, chat_id, String::new(), pool, config).await?;
+        }
         UserIntent::Help => {
             let help_text = format!(
                 "👋 Hi! I'm Chotu. You can use slash commands or plain English \
-                 (calendar, brief, status, tasks, memory, food, sync, trends, net worth, monthly).\n\n{}",
+                 (calendar, brief, status, tasks, remind me, memory, food, sync, trends, net worth, monthly, budget).\n\n{}",
+
                 Command::descriptions()
             );
             bot.send_message(chat_id, help_text).await?;
