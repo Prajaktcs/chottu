@@ -54,7 +54,7 @@ impl StockResearcher {
 
         let agent = self
             .client
-            .agent("gemini-3.5-flash")
+            .agent("gemini-3.6-flash")
             .preamble(&system_prompt)
             .build();
 
