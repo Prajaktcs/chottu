@@ -28,6 +28,12 @@ pub enum CalendarError {
     },
     #[error("Google Calendar create-event response did not contain an event id")]
     MissingEventId,
+    #[error("invalid calendar date '{input}', expected YYYY-MM-DD")]
+    InvalidDate {
+        input: String,
+        #[source]
+        source: chrono::ParseError,
+    },
     #[error("invalid local datetime for calendar scheduling: {0}")]
     InvalidLocalDateTime(chrono::NaiveDateTime),
 }
@@ -356,8 +362,12 @@ pub async fn schedule_timed_block(
     let timezone = default_calendar_timezone();
     let local_today = Local::now().date_naive();
     let target_date = match date_yyyy_mm_dd {
-        Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d")
-            .unwrap_or_else(|_| local_today + Duration::days(1)),
+        Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|source| {
+            CalendarError::InvalidDate {
+                input: d.to_string(),
+                source,
+            }
+        })?,
         None => local_today + Duration::days(1),
     };
 
@@ -421,5 +431,24 @@ mod tests {
             attendees: None,
         };
         assert!(parse_google_event(item, "Alex").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_schedule_timed_block_rejects_invalid_date_before_request() {
+        let client = GoogleCalendarClient::new("client", "secret", "refresh");
+        let error = schedule_timed_block(
+            &client,
+            "Test event",
+            None,
+            Some("not-a-date"),
+            30,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            CalendarError::InvalidDate { input, .. } if input == "not-a-date"
+        ));
     }
 }
