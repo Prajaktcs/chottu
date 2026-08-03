@@ -1614,7 +1614,24 @@ async fn create_manual_task(
 
     let parsed_due = match due_raw.as_deref() {
         Some(raw) => match parse_due_phrase(raw) {
-            Some(p) => Some(p),
+            Some(p) => {
+                if let Ok(due_dt) = chrono::DateTime::parse_from_rfc3339(&p.due_at) {
+                    if due_dt.with_timezone(&chrono::Utc) <= chrono::Utc::now() {
+                        bot.send_message(
+                            chat_id,
+                            format!(
+                                "⚠️ Due `{}` is already in the past. Try a future time \
+                                 (e.g. `tomorrow 9am`, `friday 15:00`).",
+                                escape_md_basic(raw)
+                            ),
+                        )
+                        .parse_mode(teloxide::types::ParseMode::Markdown)
+                        .await?;
+                        return Ok(());
+                    }
+                }
+                Some(p)
+            }
             None => {
                 bot.send_message(
                     chat_id,
@@ -1710,6 +1727,23 @@ async fn poll_due_task_reminders(
     .await?;
 
     for (id, title, due_date, due_at) in rows {
+        // Claim first so concurrent pollers cannot double-send.
+        let claimed = sqlx::query(
+            "UPDATE tasks SET reminded_at = ?, updated_at = ? \
+             WHERE id = ? AND status = 'open' AND reminded_at IS NULL \
+               AND due_at IS NOT NULL AND due_at <= ?",
+        )
+        .bind(&now_s)
+        .bind(&now_s)
+        .bind(&id)
+        .bind(&now_s)
+        .execute(pool)
+        .await?;
+
+        if claimed.rows_affected() == 0 {
+            continue;
+        }
+
         let short_id: String = id.chars().take(8).collect();
         let when = due_at
             .as_deref()
@@ -1741,19 +1775,21 @@ async fn poll_due_task_reminders(
             .await
         {
             eprintln!("Telegram Bot: failed to send task reminder {}: {:?}", id, e);
-            continue;
-        }
-
-        if let Err(e) = sqlx::query(
-            "UPDATE tasks SET reminded_at = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(&now_s)
-        .bind(&now_s)
-        .bind(&id)
-        .execute(pool)
-        .await
-        {
-            eprintln!("Telegram Bot: failed to mark reminded_at for {}: {:?}", id, e);
+            // Release claim so the next poll can retry.
+            if let Err(reset_err) = sqlx::query(
+                "UPDATE tasks SET reminded_at = NULL, updated_at = ? WHERE id = ? AND reminded_at = ?",
+            )
+            .bind(&now_s)
+            .bind(&id)
+            .bind(&now_s)
+            .execute(pool)
+            .await
+            {
+                eprintln!(
+                    "Telegram Bot: failed to release reminder claim for {}: {:?}",
+                    id, reset_err
+                );
+            }
         }
     }
 
