@@ -8,11 +8,20 @@ IMPORTANT DISAMBIGUATION RULES (apply these first):
 - TRASH is for sales pitches, discount blasts, and cold promo — not for subscribed educational/market digests.
 - House tips / lifestyle content from publishers (e.g. House Outlook) is NEWSLETTER, never LEDGER_STREAM.
 - Standalone local parking (SpotHero/ParkWhiz) is LEDGER_STREAM if paid; airport/trip parking is TRAVEL_ITINERARY.
+- Broker/bank *market* alerts ("traded above high volume", price alerts, smart alerts) are NEWSLETTER or ARCHIVE — never LEDGER_STREAM. Share volume is not a dollar amount.
+- Low-balance / available-balance threshold alerts are ARCHIVE, not LEDGER_STREAM (they are not debits/credits).
+- Canceled/cancelled order notices are ARCHIVE, not LEDGER_STREAM.
+- Credit-card "authorization" / foreign-transaction notices are ARCHIVE (holds), not LEDGER_STREAM unless a settled purchase receipt.
+- Generic "Direct Deposit Greater Than $X" threshold alerts are ARCHIVE, not LEDGER_STREAM.
+- Forum/community digests (Reddit, etc.) are NEWSLETTER or TRASH — never LEDGER_STREAM even if the post mentions money.
+- Loan spam / pre-approval pitches ("personalized loan", "superfast approval") are TRASH.
+- ACTION_ITEM is only for real personal/work commitments you must do (approve, reply to a person, submit something with a deadline). Social notifications, job-alert blasts, "rate your purchase", survey/test invitations, and charity signup nudges are NOT ACTION_ITEM — use TRASH or ARCHIVE.
+- TRAVEL_ITINERARY requires a real booking (confirmation code, flight/hotel/parking dates). Travel deal emails, flight credits, cruise marketing, and standalone local parking (SpotHero) are NOT travel.
 
 1. LEDGER_STREAM:
    - Must be used for transactional emails with actual financial events: purchase receipts, order invoices/confirmations, refunds, payment requests, money transfers, dividend payouts, bank debit/credit alerts, or completed points redemptions.
    - Examples of LEDGER_STREAM: Amazon order confirmations, Google Play receipts, Lyft ride receipts, SpotHero/ParkWhiz local parking purchases, Interac e-Transfers, Wealthsimple dividend payouts, HDFC transaction alerts, "You redeemed 30,000 PC Optimum points".
-   - Do NOT use for: "Get N points" offers, coupon/promo emails, tips/content newsletters, or "bill has been paid" confirmations.
+   - Do NOT use for: "Get N points" offers, coupon/promo emails, tips/content newsletters, "bill has been paid" confirmations, volume/price alerts, balance-threshold alerts, canceled orders, or loan marketing.
 
 2. ARCHIVE:
    - Must be used for important non-marketing notifications, personal correspondence, account notices, security alerts, and system notices — including past-tense bill/autopay paid confirmations.
@@ -23,13 +32,15 @@ IMPORTANT DISAMBIGUATION RULES (apply these first):
    - Examples of TRASH: MealPal lunch reminders, "50% off everything", "Get 30,000 PC Optimum points", Kayak/airline deal blasts, insurance quote spam, fitness membership promo ("Still thinking about…?").
 
 4. ACTION_ITEM:
-   - Must be used for emails that request actions or commitments from you.
-   - Examples of ACTION_ITEM: "Action required: approve design", "please review this PR", "Task assigned to you".
+   - Must be used only for emails that create a real personal or work commitment you need to complete.
+   - Examples of ACTION_ITEM: "Action required: approve design", "please review this PR", "Task assigned to you", a person asking you to send a document by Friday.
+   - Do NOT use for: LinkedIn "you have a new message" / connection / recommendation notifications, LinkedIn Job Alerts or "apply now" blasts, Amazon/marketplace "rate your transaction", UserTesting or survey invites, charity/fundraising nudges ("It starts next week"), community digests, or generic "view this" CTAs. Those are TRASH (promo/engagement) or ARCHIVE (passive notification).
 
 5. TRAVEL_ITINERARY:
    - Must be used for trips and trip logistics: flights, hotels, buses/trains, car rentals, airport transfers, and parking only when clearly part of a trip (airport/hotel parking for travel dates).
    - Examples of TRAVEL_ITINERARY: Flight booking confirmation, Expedia itinerary, Airbnb reservation, airport parking for YYZ Jun 20–22.
    - Do NOT use for standalone local parking passes (SpotHero/ParkWhiz) with no trip context — those are LEDGER_STREAM (if paid) or ARCHIVE (pass-only).
+   - Do NOT use for travel marketing: flight credits, "deals from $X", cruise promotions, highway/toll offers (407 ETR), or "edit your trip" nudges without a confirmed itinerary.
 
 6. FINANCIAL_BILL:
    - Must be used for future bills, invoices to be paid, payment reminders, or upcoming automatic payments still due.
@@ -126,6 +137,58 @@ Classification: NEWSLETTER (Reason: Subscribed daily quiz digest, not promo spam
 Sender: "House Outlook" <hello@houseoutlook.com>
 Subject: You're Cleaning Baseboards the Hard Way
 Classification: NEWSLETTER (Reason: Home tips publisher content, not a paid service receipt)
+
+Sender: IQalerts@questrade.com
+Subject: Alert: DDOG traded above high volume 6,250,982
+Classification: NEWSLETTER (Reason: Broker market/volume alert; share volume is not a ledger transaction)
+
+Sender: PNC Alerts <pncalerts@pnc.com>
+Subject: Your Checking Account Available Balance Is Less Than $100.00
+Classification: ARCHIVE (Reason: Low-balance threshold alert, not a debit or credit)
+
+Sender: Coinbase <contact@coinbase.com>
+Subject: We've canceled your order for 0.52 ETH
+Classification: ARCHIVE (Reason: Canceled order notice; no completed money movement)
+
+Sender: FastApproval <aparna@maldiver.info>
+Subject: SuperFast Approval for Your Personalized Loan For Rs 1,50,000
+Classification: TRASH (Reason: Unsolicited loan spam / pre-approval pitch)
+
+Sender: Reddit <noreply@redditmail.com>
+Subject: "Metal card came in"
+Classification: NEWSLETTER (Reason: Forum digest/post notification, not a financial transaction)
+
+Sender: PNC Alerts <pncalerts@pnc.com>
+Subject: Authorization on your credit card outside of Canada
+Classification: ARCHIVE (Reason: Card authorization/hold notice, not a settled ledger purchase)
+
+Sender: LinkedIn <notifications-noreply@linkedin.com>
+Subject: You have 1 new message
+Classification: ARCHIVE (Reason: Passive social notification; not a real commitment)
+
+Sender: LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>
+Subject: Data Analyst, Principal at Dayforce: up to CA$172K/year
+Classification: TRASH (Reason: Automated job-alert marketing blast, not a task you committed to)
+
+Sender: LinkedIn <jobs-noreply@linkedin.com>
+Subject: Prajakt, apply now to 'Staff Software Engineer'
+Classification: TRASH (Reason: Job recommendation CTA, not an actionable personal commitment)
+
+Sender: Amazon Marketplace <marketplace-messages@amazon.ca>
+Subject: Prajakt Chandrashekhar, will you rate your transaction at Amazon.ca?
+Classification: TRASH (Reason: Marketplace rating nudge / engagement promo)
+
+Sender: UserTesting <noreply@usertesting.com>
+Subject: New test opportunity for you!
+Classification: TRASH (Reason: Paid-test / survey recruitment blast)
+
+Sender: "Ashley (Great Cycle Challenge)" <hello@greatcyclechallenge.ca>
+Subject: It starts next week...
+Classification: TRASH (Reason: Charity signup / fundraising nudge)
+
+Sender: Expedia.ca <email@expediamail.com>
+Subject: Flights + C$300 credit
+Classification: TRASH (Reason: Travel deal / credit marketing, not a booking confirmation)
 
 Sender: "Alex Example" <alex@example.com>
 Subject: Reference: SSH setup commands for homelab

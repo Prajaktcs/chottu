@@ -117,5 +117,40 @@
     "subject": "Reference: Commands to setup local postgres docker container",
     "body_preview": "Here are the commands to run postgres container: docker run --name local-pg -e POSTGRES_PASSWORD=mysecretpassword -p 5432:5432 -d postgres",
     "expected_classification": "PERSONAL_REFERENCE"
+  },
+  {
+    "test_id": "tc_linkedin_message_archive",
+    "sender": "LinkedIn <notifications-noreply@linkedin.com>",
+    "subject": "You have 1 new message",
+    "body_preview": "You have a new message waiting on LinkedIn. Sign in to read it.",
+    "expected_classification": "ARCHIVE"
+  },
+  {
+    "test_id": "tc_linkedin_job_alert_trash",
+    "sender": "LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>",
+    "subject": "Data Analyst, Principal at Dayforce: up to CA$172K/year",
+    "body_preview": "A new job matching your preferences was posted. Apply on LinkedIn.",
+    "expected_classification": "TRASH"
+  },
+  {
+    "test_id": "tc_amazon_rate_trash",
+    "sender": "Amazon Marketplace <marketplace-messages@amazon.ca>",
+    "subject": "Prajakt Chandrashekhar, will you rate your transaction at Amazon.ca?",
+    "body_preview": "How was your recent marketplace transaction? Leave a rating.",
+    "expected_classification": "TRASH"
+  },
+  {
+    "test_id": "tc_usertesting_trash",
+    "sender": "UserTesting <noreply@usertesting.com>",
+    "subject": "New test opportunity for you!",
+    "body_preview": "A new user testing session is available. Sign up to participate and earn a reward.",
+    "expected_classification": "TRASH"
+  },
+  {
+    "test_id": "tc_expedia_deal_trash",
+    "sender": "Expedia.ca <email@expediamail.com>",
+    "subject": "Flights + C$300 credit",
+    "body_preview": "Book selected flights and get a C$300 credit. Limited time offer.",
+    "expected_classification": "TRASH"
   }
 ]

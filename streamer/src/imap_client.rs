@@ -408,38 +408,42 @@ where
                             }
                         };
 
+                        // Only put dated commitments on the calendar. Undated action items
+                        // used to all land on tomorrow at 09:00 and clutter the day.
                         let mut calendar_event_id: Option<String> = None;
-                        if let Some(ref member_id) = assigned_to_member {
-                            if let Some(member) =
-                                config.family.members.iter().find(|m| &m.id == member_id)
-                            {
-                                if let Some(cal_client) =
-                                    chotu_common::build_calendar_client(member)
+                        if due_date.is_some() {
+                            if let Some(ref member_id) = assigned_to_member {
+                                if let Some(member) =
+                                    config.family.members.iter().find(|m| &m.id == member_id)
                                 {
-                                    match chotu_common::schedule_timed_block(
-                                        &cal_client,
-                                        &task_desc,
-                                        Some(&format!(
-                                            "From email: {}\nSubject: {}",
-                                            metadata.sender, metadata.subject
-                                        )),
-                                        due_date.as_deref(),
-                                        30,
-                                    )
-                                    .await
+                                    if let Some(cal_client) =
+                                        chotu_common::build_calendar_client(member)
                                     {
-                                        Ok(event_id) => {
-                                            println!(
-                                                "Scheduled action item on calendar: {}",
-                                                event_id
-                                            );
-                                            calendar_event_id = Some(event_id);
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "Failed to schedule action item on calendar: {:?}",
-                                                e
-                                            );
+                                        match chotu_common::schedule_timed_block(
+                                            &cal_client,
+                                            &task_desc,
+                                            Some(&format!(
+                                                "From email: {}\nSubject: {}",
+                                                metadata.sender, metadata.subject
+                                            )),
+                                            due_date.as_deref(),
+                                            30,
+                                        )
+                                        .await
+                                        {
+                                            Ok(event_id) => {
+                                                println!(
+                                                    "Scheduled action item on calendar: {}",
+                                                    event_id
+                                                );
+                                                calendar_event_id = Some(event_id);
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "Failed to schedule action item on calendar: {:?}",
+                                                    e
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -504,6 +508,23 @@ where
                                 }
                             }
                         };
+
+                        let dest_ok = {
+                            let d = ext.destination.trim();
+                            !d.is_empty() && !d.eq_ignore_ascii_case("unknown")
+                        };
+                        let has_dates = ext.start_date.is_some() || ext.end_date.is_some();
+                        // Skip hollow extractions (e.g. parking/deal emails mislabeled as travel).
+                        if !dest_ok || !has_dates {
+                            println!(
+                                "Skipping hollow travel itinerary (destination={:?}, start={:?}, end={:?})",
+                                ext.destination, ext.start_date, ext.end_date
+                            );
+                            let mut seen_stream =
+                                session.uid_store(&query, "+FLAGS (\\Seen)").await?;
+                            while seen_stream.next().await.is_some() {}
+                            continue;
+                        }
 
                         if let Some(ref member_id) = assigned_to_member {
                             if let Some(member) =

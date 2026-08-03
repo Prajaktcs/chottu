@@ -285,6 +285,8 @@ IMPORTANT DISAMBIGUATION RULES (apply these first):\
 - Generic \"Direct Deposit Greater Than $X\" threshold alerts are ARCHIVE, not LEDGER_STREAM.\
 - Forum/community digests (Reddit, etc.) are NEWSLETTER or TRASH — never LEDGER_STREAM even if the post mentions money.\
 - Loan spam / pre-approval pitches (\"personalized loan\", \"superfast approval\") are TRASH.\
+- ACTION_ITEM is only for real personal/work commitments you must do (approve, reply to a person, submit something with a deadline). Social notifications, job-alert blasts, \"rate your purchase\", survey/test invitations, and charity signup nudges are NOT ACTION_ITEM — use TRASH or ARCHIVE.\
+- TRAVEL_ITINERARY requires a real booking (confirmation code, flight/hotel/parking dates). Travel deal emails, flight credits, cruise marketing, and standalone local parking (SpotHero) are NOT travel.\
 \
 1. LEDGER_STREAM:\
    - Must be used for transactional emails with actual financial events: purchase receipts, order invoices/confirmations, refunds, payment requests, money transfers, dividend payouts, bank debit/credit alerts, or completed points redemptions.\
@@ -300,13 +302,15 @@ IMPORTANT DISAMBIGUATION RULES (apply these first):\
    - Examples of TRASH: MealPal lunch reminders, \"50% off everything\", \"Get 30,000 PC Optimum points\", Kayak/airline deal blasts, insurance quote spam, fitness membership promo (\"Still thinking about…?\").\
 \
 4. ACTION_ITEM:\
-   - Must be used for emails that request actions or commitments from you.\
-   - Examples of ACTION_ITEM: \"Action required: approve design\", \"please review this PR\", \"Task assigned to you\".\
+   - Must be used only for emails that create a real personal or work commitment you need to complete.\
+   - Examples of ACTION_ITEM: \"Action required: approve design\", \"please review this PR\", \"Task assigned to you\", a person asking you to send a document by Friday.\
+   - Do NOT use for: LinkedIn \"you have a new message\" / connection / recommendation notifications, LinkedIn Job Alerts or \"apply now\" blasts, Amazon/marketplace \"rate your transaction\", UserTesting or survey invites, charity/fundraising nudges (\"It starts next week\"), community digests, or generic \"view this\" CTAs. Those are TRASH (promo/engagement) or ARCHIVE (passive notification).\
 \
 5. TRAVEL_ITINERARY:\
    - Must be used for trips and trip logistics: flights, hotels, buses/trains, car rentals, airport transfers, and parking only when clearly part of a trip (airport/hotel parking for travel dates).\
    - Examples of TRAVEL_ITINERARY: Flight booking confirmation, Expedia itinerary, Airbnb reservation, airport parking for YYZ Jun 20–22.\
    - Do NOT use for standalone local parking passes (SpotHero/ParkWhiz) with no trip context — those are LEDGER_STREAM (if paid) or ARCHIVE (pass-only).\
+   - Do NOT use for travel marketing: flight credits, \"deals from $X\", cruise promotions, highway/toll offers (407 ETR), or \"edit your trip\" nudges without a confirmed itinerary.\
 \
 6. FINANCIAL_BILL:\
    - Must be used for future bills, invoices to be paid, payment reminders, or upcoming automatic payments still due.\
@@ -427,6 +431,34 @@ Classification: NEWSLETTER (Reason: Forum digest/post notification, not a financ
 Sender: PNC Alerts <pncalerts@pnc.com>\
 Subject: Authorization on your credit card outside of Canada\
 Classification: ARCHIVE (Reason: Card authorization/hold notice, not a settled ledger purchase)\
+\
+Sender: LinkedIn <notifications-noreply@linkedin.com>\
+Subject: You have 1 new message\
+Classification: ARCHIVE (Reason: Passive social notification; not a real commitment)\
+\
+Sender: LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>\
+Subject: Data Analyst, Principal at Dayforce: up to CA$172K/year\
+Classification: TRASH (Reason: Automated job-alert marketing blast, not a task you committed to)\
+\
+Sender: LinkedIn <jobs-noreply@linkedin.com>\
+Subject: Prajakt, apply now to 'Staff Software Engineer'\
+Classification: TRASH (Reason: Job recommendation CTA, not an actionable personal commitment)\
+\
+Sender: Amazon Marketplace <marketplace-messages@amazon.ca>\
+Subject: Prajakt Chandrashekhar, will you rate your transaction at Amazon.ca?\
+Classification: TRASH (Reason: Marketplace rating nudge / engagement promo)\
+\
+Sender: UserTesting <noreply@usertesting.com>\
+Subject: New test opportunity for you!\
+Classification: TRASH (Reason: Paid-test / survey recruitment blast)\
+\
+Sender: \"Ashley (Great Cycle Challenge)\" <hello@greatcyclechallenge.ca>\
+Subject: It starts next week...\
+Classification: TRASH (Reason: Charity signup / fundraising nudge)\
+\
+Sender: Expedia.ca <email@expediamail.com>\
+Subject: Flights + C$300 credit\
+Classification: TRASH (Reason: Travel deal / credit marketing, not a booking confirmation)\
 \
 Sender: \"Alex Example\" <alex@example.com>\
 Subject: Reference: SSH setup commands for homelab\
@@ -618,7 +650,9 @@ CRITICAL amount rules:\
     ) -> Result<ActionItemExtraction, LlmError> {
         let system_prompt = "\
 You are an action item extraction assistant. Extract the main task or action request from the email, \
-plus an optional due date in YYYY-MM-DD form when one is mentioned.";
+plus an optional due date in YYYY-MM-DD form when one is mentioned. \
+Only extract a real commitment. If the email is a social notification, job alert, rating request, \
+survey invite, or marketing CTA, still return a short task_description but leave due_date null.";
 
         self.extract_structured(system_prompt, &Self::format_email_user_prompt(email))
             .await
