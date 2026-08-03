@@ -356,7 +356,23 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempfile::NamedTempFile;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
 
     #[test]
     fn test_default_config() {
@@ -482,6 +498,8 @@ target_allocation:
 
     #[test]
     fn test_health_env_key_and_resolve() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
         let mut config = AppConfig::default();
         config.family.members.push(FamilyMember {
             id: "jordan".to_string(),
@@ -495,29 +513,30 @@ target_allocation:
             "HEALTH_REFRESH_TOKEN_JORDAN"
         );
 
-        std::env::remove_var("HEALTH_REFRESH_TOKEN_ALEX");
-        std::env::remove_var("HEALTH_REFRESH_TOKEN_JORDAN");
-        std::env::set_var("FITBIT_REFRESH_TOKEN", "legacy-primary-token");
-        assert_eq!(
-            resolve_health_refresh_token("alex", &config).as_deref(),
-            Some("legacy-primary-token")
-        );
-        assert!(resolve_health_refresh_token("jordan", &config).is_none());
+        with_env_var("HEALTH_REFRESH_TOKEN_ALEX", None, || {
+            with_env_var("HEALTH_REFRESH_TOKEN_JORDAN", None, || {
+                with_env_var("FITBIT_REFRESH_TOKEN", Some("legacy-primary-token"), || {
+                    assert_eq!(
+                        resolve_health_refresh_token("alex", &config).as_deref(),
+                        Some("legacy-primary-token")
+                    );
+                    assert!(resolve_health_refresh_token("jordan", &config).is_none());
 
-        std::env::set_var("HEALTH_REFRESH_TOKEN_JORDAN", "jordan-token");
-        assert_eq!(
-            resolve_health_refresh_token("jordan", &config).as_deref(),
-            Some("jordan-token")
-        );
+                    with_env_var("HEALTH_REFRESH_TOKEN_JORDAN", Some("jordan-token"), || {
+                        assert_eq!(
+                            resolve_health_refresh_token("jordan", &config).as_deref(),
+                            Some("jordan-token")
+                        );
+                    });
 
-        std::env::set_var("HEALTH_REFRESH_TOKEN_ALEX", "alex-per-member");
-        assert_eq!(
-            resolve_health_refresh_token("alex", &config).as_deref(),
-            Some("alex-per-member")
-        );
-
-        std::env::remove_var("FITBIT_REFRESH_TOKEN");
-        std::env::remove_var("HEALTH_REFRESH_TOKEN_ALEX");
-        std::env::remove_var("HEALTH_REFRESH_TOKEN_JORDAN");
+                    with_env_var("HEALTH_REFRESH_TOKEN_ALEX", Some("alex-per-member"), || {
+                        assert_eq!(
+                            resolve_health_refresh_token("alex", &config).as_deref(),
+                            Some("alex-per-member")
+                        );
+                    });
+                });
+            });
+        });
     }
 }

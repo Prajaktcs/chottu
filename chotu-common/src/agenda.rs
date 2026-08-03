@@ -120,11 +120,31 @@ pub fn window_bounds_utc(window: CalendarWindow) -> Option<(DateTime<Utc>, DateT
 }
 
 pub fn is_all_day(ev: &CalendarEvent) -> bool {
+    // Date-only Google events are stored as midnight UTC (see calendar::parse_datetime).
+    // Checking local midnight would misclassify them in non-UTC zones (e.g. America/Toronto).
+    let utc_midnight_span = ev.start.time().num_seconds_from_midnight() == 0
+        && ev.end.time().num_seconds_from_midnight() == 0
+        && (ev.end - ev.start) >= Duration::hours(23);
+    if utc_midnight_span {
+        return true;
+    }
+
+    // Fallback: local midnight spans (defensive if a timed all-day arrives differently).
     let start_local = ev.start.with_timezone(&Local);
     let end_local = ev.end.with_timezone(&Local);
     start_local.time().num_seconds_from_midnight() == 0
         && end_local.time().num_seconds_from_midnight() == 0
         && (end_local - start_local) >= Duration::hours(23)
+}
+
+/// Civil date used for agenda grouping/display.
+/// All-day events keep the UTC date from Google's date-only field; timed events use local.
+pub fn event_civil_day(ev: &CalendarEvent) -> String {
+    if is_all_day(ev) {
+        ev.start.format("%Y-%m-%d").to_string()
+    } else {
+        ev.start.with_timezone(&Local).format("%Y-%m-%d").to_string()
+    }
 }
 
 pub fn is_declined(ev: &CalendarEvent) -> bool {
@@ -198,12 +218,10 @@ pub fn find_conflicts(events: &[CalendarEvent]) -> Vec<CalendarConflict> {
 }
 
 pub fn format_event_when(ev: &CalendarEvent, reference_day: &str) -> String {
-    let start_local = ev.start.with_timezone(&Local);
-    let end_local = ev.end.with_timezone(&Local);
-
     if is_all_day(ev) {
-        let start_day = start_local.format("%Y-%m-%d").to_string();
-        let end_day = (end_local - Duration::seconds(1))
+        // Use UTC civil dates — matches how date-only Google events are stored.
+        let start_day = ev.start.format("%Y-%m-%d").to_string();
+        let end_day = (ev.end - Duration::seconds(1))
             .format("%Y-%m-%d")
             .to_string();
         if start_day == reference_day && end_day == reference_day {
@@ -212,7 +230,7 @@ pub fn format_event_when(ev: &CalendarEvent, reference_day: &str) -> String {
             format!("all day ({}→{})", start_day, end_day)
         }
     } else {
-        format!("{}", start_local.format("%H:%M"))
+        format!("{}", ev.start.with_timezone(&Local).format("%H:%M"))
     }
 }
 
@@ -290,13 +308,18 @@ fn format_week_timeline(events: &[CalendarEvent], cap: usize) -> String {
         if shown >= cap {
             break;
         }
-        let day = ev.start.with_timezone(&Local).format("%Y-%m-%d").to_string();
+        let day = event_civil_day(ev);
         if day != last_day {
             // %e pads day-of-month with a space; collapse for Telegram.
-            let heading = format!("{}", ev.start.with_timezone(&Local).format("%a %b %e"))
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            // All-day: UTC civil date from Google date-only; timed: local wall clock.
+            let heading = if is_all_day(ev) {
+                format!("{}", ev.start.format("%a %b %e"))
+            } else {
+                format!("{}", ev.start.with_timezone(&Local).format("%a %b %e"))
+            }
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
             lines.push_str(&format!("\n*{}*\n", escape_md(&heading)));
             last_day = day.clone();
         }
@@ -463,7 +486,7 @@ mod tests {
             "C",
             "Praj",
             t0 + Duration::hours(1),
-            t0 + Duration::hours(90),
+            t0 + Duration::hours(2),
         );
 
         let conflicts = find_conflicts(&[a.clone(), b.clone()]);
@@ -473,6 +496,34 @@ mod tests {
 
         // Touching endpoints are not conflicts.
         assert!(find_conflicts(&[a, touch]).is_empty());
+    }
+
+    #[test]
+    fn test_is_all_day_utc_midnight_date_only() {
+        // Mirrors calendar::parse_datetime for Google date-only events.
+        let start = NaiveDate::from_ymd_opt(2026, 8, 3)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let end = NaiveDate::from_ymd_opt(2026, 8, 4)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc();
+        let ev = CalendarEvent {
+            id: "allday".to_string(),
+            title: "Holiday".to_string(),
+            start,
+            end,
+            location: None,
+            description: None,
+            member_name: "Praj".to_string(),
+            response_status: None,
+        };
+        assert!(is_all_day(&ev));
+        assert_eq!(event_civil_day(&ev), "2026-08-03");
+        assert!(find_conflicts(&[ev]).is_empty());
     }
 
     #[test]
