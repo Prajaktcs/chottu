@@ -4,6 +4,17 @@ Project Chotu is a self-hosted, local-first multi-agent system built in Rust. A 
 
 It started as a personal finance helper (“chotu” ≈ agile apprentice in Mumbai slang) and now covers family nutrition, calendar/tasks from email, queryable personal memory, morning briefs, evening reflection, and investment research.
 
+## AI involvement (transparency)
+
+This project was built with **heavy AI coding assistance** (primarily Cursor). Rough split:
+
+| Who | Owns |
+| :--- | :--- |
+| **Human** | Product goals, architecture, integrations (OAuth, IMAP, Telegram, Google Health, etc.), security/privacy posture, reviewing diffs, and deciding what ships |
+| **AI** | Large share of implementation drafts, refactors, tests, docs, and iterative bug-fix scaffolding — always under human direction |
+
+Nothing here runs or deploys without human review. Treat the codebase as **human-directed, AI-assisted**, not AI-autonomous. The in-app LLMs (Ollama / Gemini) are runtime features of the household agent; they are separate from how the source was written.
+
 ---
 
 ## What It Can Do
