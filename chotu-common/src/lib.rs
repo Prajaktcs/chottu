@@ -19,11 +19,11 @@ pub use family::{
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
     format_brief_calendar_section, local_day_bounds_utc, truncate, week_bounds_utc,
-    CalendarConflict, CalendarWindow, FamilyEventsFetch,
+    CalendarConflict, CalendarWindow, FamilyCalendarError, FamilyEventsFetch,
 };
 pub use calendar::{
-    build_calendar_client, default_calendar_timezone, schedule_timed_block, CalendarEvent,
-    GoogleCalendarClient,
+    build_calendar_client, default_calendar_timezone, schedule_timed_block, CalendarError,
+    CalendarEvent, GoogleCalendarClient,
 };
 pub use google_health::{
     GoogleHealthClient, GoogleHealthFoodSummary, NutritionLogWrite, GOOGLE_HEALTH_OAUTH_SCOPES,

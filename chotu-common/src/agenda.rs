@@ -2,7 +2,7 @@
 
 use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, TimeZone, Timelike, Utc};
 
-use crate::calendar::{build_calendar_client, CalendarEvent};
+use crate::calendar::{build_calendar_client, CalendarError, CalendarEvent};
 use crate::family::AppConfig;
 
 /// Agenda window for `/cal` and CALENDAR intent.
@@ -60,13 +60,20 @@ impl CalendarWindow {
 }
 
 /// Result of fetching events across linked family calendars.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FamilyEventsFetch {
     pub events: Vec<CalendarEvent>,
     /// True if at least one member had a usable calendar client.
     pub any_client: bool,
-    /// Member display names whose fetch failed.
-    pub errors: Vec<String>,
+    /// Typed per-member failures, while preserving successful members' events.
+    pub errors: Vec<FamilyCalendarError>,
+}
+
+#[derive(Debug)]
+pub struct FamilyCalendarError {
+    pub member_id: String,
+    pub member_name: String,
+    pub source: CalendarError,
 }
 
 /// Overlapping timed event pair (same or cross-member).
@@ -162,7 +169,7 @@ pub async fn fetch_family_events(
 ) -> FamilyEventsFetch {
     let mut events: Vec<CalendarEvent> = Vec::new();
     let mut any_client = false;
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<FamilyCalendarError> = Vec::new();
 
     for member in &config.family.members {
         let Some(client) = build_calendar_client(member) else {
@@ -176,7 +183,11 @@ pub async fn fetch_family_events(
                     "Calendar: fetch failed for {}: {:?}",
                     member.id, e
                 );
-                errors.push(member.name.clone());
+                errors.push(FamilyCalendarError {
+                    member_id: member.id.clone(),
+                    member_name: member.name.clone(),
+                    source: e,
+                });
             }
         }
     }
@@ -342,13 +353,18 @@ fn format_week_timeline(events: &[CalendarEvent], cap: usize) -> String {
     lines
 }
 
-fn format_errors_footer(errors: &[String]) -> String {
+fn format_errors_footer(errors: &[FamilyCalendarError]) -> String {
     if errors.is_empty() {
         return String::new();
     }
+    let member_names = errors
+        .iter()
+        .map(|error| error.member_name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
         "_Calendar unavailable for: {}_\n",
-        escape_md(&errors.join(", "))
+        escape_md(&member_names)
     )
 }
 
