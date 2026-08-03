@@ -361,16 +361,19 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce()) {
+    fn with_env_var(key: &str, value: Option<&str>, f: impl FnOnce() + std::panic::UnwindSafe) {
         let prev = std::env::var(key).ok();
         match value {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
         }
-        f();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         match prev {
             Some(v) => std::env::set_var(key, v),
             None => std::env::remove_var(key),
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
         }
     }
 

@@ -193,22 +193,26 @@ pub async fn fetch_family_events(
 
 /// Timed-event overlaps (same or cross-member). All-day events are excluded.
 pub fn find_conflicts(events: &[CalendarEvent]) -> Vec<CalendarConflict> {
-    let timed: Vec<&CalendarEvent> = events.iter().filter(|e| !is_all_day(e)).collect();
+    let mut timed: Vec<&CalendarEvent> = events.iter().filter(|e| !is_all_day(e)).collect();
+    timed.sort_by_key(|e| e.start);
     let mut out = Vec::new();
 
     for i in 0..timed.len() {
-        for j in (i + 1)..timed.len() {
-            let a = timed[i];
-            let b = timed[j];
+        let a = timed[i];
+        for b in timed.iter().skip(i + 1) {
+            // Sorted by start: once b starts at/after a ends, later events can't overlap a.
+            if b.start >= a.end {
+                break;
+            }
             // Half-open: [start, end) — touching endpoints are not conflicts.
-            if a.start < b.end && b.start < a.end {
+            if a.start < b.end {
                 // Skip identical Google event mirrored on two calendars (same id).
                 if a.id == b.id {
                     continue;
                 }
                 out.push(CalendarConflict {
-                    a: a.clone(),
-                    b: b.clone(),
+                    a: (*a).clone(),
+                    b: (*b).clone(),
                 });
             }
         }
@@ -248,19 +252,24 @@ fn format_event_line(ev: &CalendarEvent, reference_day: &str) -> String {
 }
 
 fn format_conflict_line(c: &CalendarConflict) -> String {
-    let a_start = c.a.start.with_timezone(&Local).format("%H:%M");
-    let a_end = c.a.end.with_timezone(&Local).format("%H:%M");
-    let b_start = c.b.start.with_timezone(&Local).format("%H:%M");
-    let b_end = c.b.end.with_timezone(&Local).format("%H:%M");
-    // Show intersection window loosely as A's start through min(ends) for compactness
-    let overlap_start = if c.a.start > c.b.start {
-        a_start
+    let overlap_start_dt = if c.a.start > c.b.start {
+        c.a.start
     } else {
-        b_start
+        c.b.start
     };
-    let overlap_end = if c.a.end < c.b.end { a_end } else { b_end };
+    let overlap_end_dt = if c.a.end < c.b.end { c.a.end } else { c.b.end };
+    let day = overlap_start_dt
+        .with_timezone(&Local)
+        .format("%a %b %e")
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let overlap_start = overlap_start_dt.with_timezone(&Local).format("%H:%M");
+    let overlap_end = overlap_end_dt.with_timezone(&Local).format("%H:%M");
     format!(
-        "⚠ {}–{} — {} ({}) ∩ {} ({})\n",
+        "⚠ {} {}–{} — {} ({}) ∩ {} ({})\n",
+        day,
         overlap_start,
         overlap_end,
         escape_md(&truncate(&c.a.title, 40)),
