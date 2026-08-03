@@ -291,6 +291,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "chrono-tz",
  "reqwest 0.12.28",
  "rig-core",
  "schemars",

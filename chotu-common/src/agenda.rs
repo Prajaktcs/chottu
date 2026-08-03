@@ -92,20 +92,40 @@ pub fn local_day_bounds_utc(
 }
 
 fn local_naive_day_bounds_utc(naive: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-    let start_local = Local
+    naive_day_bounds_utc_in(&Local, naive)
+}
+
+fn naive_day_bounds_utc_in<Tz: TimeZone>(
+    timezone: &Tz,
+    naive: NaiveDate,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let next_day = naive.succ_opt()?;
+    let start_local = timezone
         .from_local_datetime(&naive.and_hms_opt(0, 0, 0)?)
         .single()?;
-    let end_local = start_local + Duration::days(1);
+    let end_local = timezone
+        .from_local_datetime(&next_day.and_hms_opt(0, 0, 0)?)
+        .single()?;
     Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
 }
 
 /// Full local calendar week Mon 00:00 → next Mon 00:00 (UTC).
 pub fn week_bounds_utc(anchor: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    week_bounds_utc_in(&Local, anchor)
+}
+
+fn week_bounds_utc_in<Tz: TimeZone>(
+    timezone: &Tz,
+    anchor: NaiveDate,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let (monday, _) = local_week_monday_sunday(anchor);
-    let start_local = Local
+    let next_monday = monday.checked_add_signed(Duration::days(7))?;
+    let start_local = timezone
         .from_local_datetime(&monday.and_hms_opt(0, 0, 0)?)
         .single()?;
-    let end_local = start_local + Duration::days(7);
+    let end_local = timezone
+        .from_local_datetime(&next_monday.and_hms_opt(0, 0, 0)?)
+        .single()?;
     Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
 }
 
@@ -573,6 +593,30 @@ mod tests {
         assert_eq!(sun.weekday(), Weekday::Sun);
         assert_eq!(mon, NaiveDate::from_ymd_opt(2026, 8, 3).unwrap());
         assert_eq!(sun, NaiveDate::from_ymd_opt(2026, 8, 9).unwrap());
+    }
+
+    #[test]
+    fn test_bounds_follow_civil_midnights_across_dst() {
+        let timezone = chrono_tz::America::Toronto;
+
+        let spring_forward = NaiveDate::from_ymd_opt(2026, 3, 8).unwrap();
+        let (spring_start, spring_end) =
+            naive_day_bounds_utc_in(&timezone, spring_forward).unwrap();
+        assert_eq!(spring_end - spring_start, Duration::hours(23));
+
+        let fall_back = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let (fall_start, fall_end) = naive_day_bounds_utc_in(&timezone, fall_back).unwrap();
+        assert_eq!(fall_end - fall_start, Duration::hours(25));
+
+        let week_anchor = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
+        let (week_start, week_end) = week_bounds_utc_in(&timezone, week_anchor).unwrap();
+        let start_local = week_start.with_timezone(&timezone);
+        let end_local = week_end.with_timezone(&timezone);
+        assert_eq!(start_local.weekday(), Weekday::Mon);
+        assert_eq!(end_local.weekday(), Weekday::Mon);
+        assert_eq!(start_local.time().num_seconds_from_midnight(), 0);
+        assert_eq!(end_local.time().num_seconds_from_midnight(), 0);
+        assert_eq!(week_end - week_start, Duration::hours(167));
     }
 
     #[test]
