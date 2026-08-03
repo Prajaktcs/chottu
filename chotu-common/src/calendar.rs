@@ -1,8 +1,36 @@
-use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
-use crate::oauth::refresh_oauth2_token;
+use crate::oauth::{refresh_oauth2_token, OAuthError};
+
+#[derive(Error, Debug)]
+pub enum CalendarError {
+    #[error("failed to refresh Google Calendar access token")]
+    TokenRefresh(#[source] OAuthError),
+    #[error("Google Calendar {operation} request failed")]
+    Request {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Google Calendar {operation} returned HTTP {status}: {body}")]
+    Api {
+        operation: &'static str,
+        status: u16,
+        body: String,
+    },
+    #[error("failed to decode Google Calendar {operation} response")]
+    ResponseDecode {
+        operation: &'static str,
+        #[source]
+        source: reqwest::Error,
+    },
+    #[error("Google Calendar create-event response did not contain an event id")]
+    MissingEventId,
+    #[error("invalid local datetime for calendar scheduling: {0}")]
+    InvalidLocalDateTime(chrono::NaiveDateTime),
+}
 
 // ─── Data Types ────────────────────────────────────────────────────────────────
 
@@ -85,10 +113,10 @@ impl GoogleCalendarClient {
     }
 
     /// Obtains a fresh access token by exchanging the stored refresh token.
-    async fn get_access_token(&self) -> Result<String> {
+    async fn get_access_token(&self) -> Result<String, CalendarError> {
         let token = refresh_oauth2_token(&self.client_id, &self.client_secret, &self.refresh_token)
             .await
-            .context("Failed to refresh Google Calendar access token")?;
+            .map_err(CalendarError::TokenRefresh)?;
         Ok(token.access_token)
     }
 
@@ -99,7 +127,7 @@ impl GoogleCalendarClient {
         member_name: &str,
         from: DateTime<Utc>,
         to: DateTime<Utc>,
-    ) -> Result<Vec<CalendarEvent>> {
+    ) -> Result<Vec<CalendarEvent>, CalendarError> {
         let access_token = self.get_access_token().await?;
 
         let time_min = from.to_rfc3339();
@@ -124,16 +152,27 @@ impl GoogleCalendarClient {
                 req = req.query(&[("pageToken", pt.as_str())]);
             }
 
-            let resp = req.send().await.context("Google Calendar API request failed")?;
+            let resp = req.send().await.map_err(|source| CalendarError::Request {
+                operation: "list-events",
+                source,
+            })?;
 
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
-                return Err(anyhow!("Google Calendar API returned {}: {}", status, body));
+                return Err(CalendarError::Api {
+                    operation: "list-events",
+                    status: status.as_u16(),
+                    body,
+                });
             }
 
-            let list: GoogleEventsListResponse = resp.json().await
-                .context("Failed to parse Google Calendar events response")?;
+            let list: GoogleEventsListResponse = resp.json().await.map_err(|source| {
+                CalendarError::ResponseDecode {
+                    operation: "list-events",
+                    source,
+                }
+            })?;
 
             if let Some(items) = list.items {
                 for item in items {
@@ -160,7 +199,7 @@ impl GoogleCalendarClient {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
         timezone: &str,
-    ) -> Result<String> {
+    ) -> Result<String, CalendarError> {
         let access_token = self.get_access_token().await?;
 
         let body = serde_json::json!({
@@ -182,25 +221,36 @@ impl GoogleCalendarClient {
             .json(&body)
             .send()
             .await
-            .context("Google Calendar create event request failed")?;
+            .map_err(|source| CalendarError::Request {
+                operation: "create-event",
+                source,
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("Google Calendar create event returned {}: {}", status, text));
+            return Err(CalendarError::Api {
+                operation: "create-event",
+                status: status.as_u16(),
+                body: text,
+            });
         }
 
-        let created: serde_json::Value = resp.json().await
-            .context("Failed to parse create event response")?;
+        let created: serde_json::Value = resp.json().await.map_err(|source| {
+            CalendarError::ResponseDecode {
+                operation: "create-event",
+                source,
+            }
+        })?;
 
         created["id"]
             .as_str()
             .map(|s| s.to_string())
-            .ok_or_else(|| anyhow!("Google Calendar create event: missing 'id' in response"))
+            .ok_or(CalendarError::MissingEventId)
     }
 
     /// Deletes an event by ID from the primary calendar.
-    pub async fn delete_event(&self, event_id: &str) -> Result<()> {
+    pub async fn delete_event(&self, event_id: &str) -> Result<(), CalendarError> {
         let access_token = self.get_access_token().await?;
 
         let url = format!(
@@ -213,7 +263,10 @@ impl GoogleCalendarClient {
             .bearer_auth(&access_token)
             .send()
             .await
-            .context("Google Calendar delete event request failed")?;
+            .map_err(|source| CalendarError::Request {
+                operation: "delete-event",
+                source,
+            })?;
 
         // 204 No Content = success; 404 = already gone (treat as OK)
         if resp.status().is_success() || resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -222,7 +275,11 @@ impl GoogleCalendarClient {
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        Err(anyhow!("Google Calendar delete event returned {}: {}", status, text))
+        Err(CalendarError::Api {
+            operation: "delete-event",
+            status: status.as_u16(),
+            body: text,
+        })
     }
 }
 
@@ -293,7 +350,7 @@ pub async fn schedule_timed_block(
     description: Option<&str>,
     date_yyyy_mm_dd: Option<&str>,
     duration_minutes: i64,
-) -> Result<String> {
+) -> Result<String, CalendarError> {
     use chrono::{Duration, Local, NaiveDate, NaiveTime, TimeZone};
 
     let timezone = default_calendar_timezone();
@@ -312,10 +369,7 @@ pub async fn schedule_timed_block(
             dt.with_timezone(&Utc)
         }
         chrono::LocalResult::None => {
-            return Err(anyhow!(
-                "Invalid local datetime for calendar scheduling: {}",
-                start_naive
-            ));
+            return Err(CalendarError::InvalidLocalDateTime(start_naive));
         }
     };
     let end = start + Duration::minutes(duration_minutes.max(15));
