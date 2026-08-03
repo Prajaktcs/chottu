@@ -12,8 +12,8 @@ use tokio::sync::RwLock;
 use chotu_common::{
     answer_memory_query, clear_budget_override, compose_calendar_agenda, compute_budget_progress,
     current_budget_month, display_category, exchange_google_code, fetch_exchange_rates,
-    format_budget_progress_markdown, lookup_barcode, mark_budget_alert_sent, parse_due_phrase,
-    pending_budget_alerts, save_calendar_refresh_token, save_google_refresh_token,
+    fetch_stock_quotes, format_budget_progress_markdown, lookup_barcode, mark_budget_alert_sent,
+    parse_due_phrase, pending_budget_alerts, save_calendar_refresh_token, save_google_refresh_token,
     save_health_refresh_token, set_budget_override, spawn_background_reindex, split_task_add_args,
     start_redirect_listener, AppConfig, CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient,
     InvestmentPhilosophy, MemoryIndex, UserIntent,
@@ -487,7 +487,7 @@ async fn handle_command(
             handle_undo_food(&bot, chat_id, args, &pool, &config).await?;
         }
         Command::Networth => {
-            handle_networth(&bot, chat_id, &pool, &gemini_client, &config).await?;
+            handle_networth(&bot, chat_id, &pool, &config).await?;
         }
         Command::Monthly(args) => {
             handle_monthly(&bot, chat_id, args, &pool, &config).await?;
@@ -2384,7 +2384,6 @@ async fn handle_networth(
     bot: &Bot,
     chat_id: ChatId,
     pool: &SqlitePool,
-    gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
     let base = config.currency();
@@ -2416,10 +2415,10 @@ async fn handle_networth(
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
         msg.push_str(&format!("✨ *Invested Net Worth:* $0.00 {}", base));
     } else {
-        bot.send_message(chat_id, "🔍 Fetching real-time stock prices via Gemini...").await?;
-        
+        bot.send_message(chat_id, "🔍 Fetching live quotes via Yahoo Finance...").await?;
+
         let tickers: Vec<String> = holdings.iter().map(|h| h.ticker.clone()).collect();
-        let prices = match gemini_client.fetch_stock_prices(&tickers).await {
+        let prices = match fetch_stock_quotes(&tickers).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Failed to fetch stock prices: {:?}", e);
@@ -2429,7 +2428,7 @@ async fn handle_networth(
                     portfolio_cost += h.shares_owned * h.average_cost;
                 }
                 msg.push_str(&format!(
-                    "• 📈 *Stock Portfolio:* ${:.2} {} (Gemini price lookup failed, showing book cost)\n",
+                    "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, showing book cost)\n",
                     portfolio_cost, base
                 ));
                 msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -2445,32 +2444,26 @@ async fn handle_networth(
 
         let price_map: std::collections::HashMap<String, (f64, String)> = prices
             .into_iter()
-            .map(|p| {
-                (
-                    p.ticker.to_uppercase(),
-                    (
-                        p.price,
-                        p.currency.unwrap_or_else(|| "USD".to_string()),
-                    ),
-                )
-            })
+            .map(|p| (p.ticker.to_uppercase(), (p.price, p.currency)))
             .collect();
 
         let mut total_portfolio_value = 0.0;
         let mut total_portfolio_cost = 0.0;
         let mut breakdown = String::new();
+        let mut missing_quotes = 0usize;
 
         for h in &holdings {
             let ticker_upper = h.ticker.to_uppercase();
-            let (raw_price, quote_currency) = price_map
-                .get(&ticker_upper)
-                .cloned()
-                .unwrap_or_else(|| (h.average_cost, base.to_string()));
+            let used_quote = price_map.get(&ticker_upper).cloned();
+            if used_quote.is_none() {
+                missing_quotes += 1;
+            }
+            let (raw_price, quote_currency) =
+                used_quote.unwrap_or_else(|| (h.average_cost, base.to_string()));
 
             let price_base = config.convert_to_base(raw_price, &quote_currency, &rates);
-            // Assume book cost was entered in the ticker's native quote currency.
-            let cost_base =
-                config.convert_to_base(h.shares_owned * h.average_cost, &quote_currency, &rates);
+            // Book cost has no stored currency; treat average_cost as already in base.
+            let cost_base = h.shares_owned * h.average_cost;
             let value_base = h.shares_owned * price_base;
             total_portfolio_cost += cost_base;
             total_portfolio_value += value_base;
@@ -2506,6 +2499,12 @@ async fn handle_networth(
             "• 📈 *Stock Portfolio:* ${:.2} {} (Cost: ${:.2} | {}{:.1}%)\n",
             total_portfolio_value, base, total_portfolio_cost, overall_sign, overall_diff_percent
         ));
+        if missing_quotes > 0 {
+            msg.push_str(&format!(
+                "  _({} holding(s) used book cost — try Yahoo symbols like `VFV.TO`)_\n",
+                missing_quotes
+            ));
+        }
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
         msg.push_str(&format!(
             "✨ *Invested Net Worth:* ${:.2} {}\n\n",
@@ -3399,7 +3398,7 @@ async fn dispatch_free_text_intent(
             handle_food_log(bot, chat_id, args, pool, gemini_client, config).await?;
         }
         UserIntent::Networth => {
-            handle_networth(bot, chat_id, pool, gemini_client, config).await?;
+            handle_networth(bot, chat_id, pool, config).await?;
         }
         UserIntent::Monthly { yyyy_mm } => {
             handle_monthly(
