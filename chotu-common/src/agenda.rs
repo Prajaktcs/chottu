@@ -85,20 +85,26 @@ pub fn local_day_bounds_utc(
 }
 
 fn local_naive_day_bounds_utc(naive: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let next_day = naive.succ_opt()?;
     let start_local = Local
         .from_local_datetime(&naive.and_hms_opt(0, 0, 0)?)
         .single()?;
-    let end_local = start_local + Duration::days(1);
+    let end_local = Local
+        .from_local_datetime(&next_day.and_hms_opt(0, 0, 0)?)
+        .single()?;
     Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
 }
 
 /// Full local calendar week Mon 00:00 → next Mon 00:00 (UTC).
 pub fn week_bounds_utc(anchor: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let (monday, _) = local_week_monday_sunday(anchor);
+    let next_monday = monday.checked_add_signed(Duration::days(7))?;
     let start_local = Local
         .from_local_datetime(&monday.and_hms_opt(0, 0, 0)?)
         .single()?;
-    let end_local = start_local + Duration::days(7);
+    let end_local = Local
+        .from_local_datetime(&next_monday.and_hms_opt(0, 0, 0)?)
+        .single()?;
     Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
 }
 
