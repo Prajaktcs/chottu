@@ -16,3 +16,23 @@
 ## Tasks & Calendar
 - [x] Telegram `/tasks` to list open tasks and mark them complete
 - [x] Optional: snooze / reassign tasks from Telegram
+
+## Personal Agent
+
+### Short path (build in order)
+- [x] Free-text intent router over existing tools (status, tasks, food, sync, trends, networth, monthly)
+- [x] Multimodal food capture (Telegram photo of barcode / package / plate → Open Food Facts + Gemini → food log)
+- [x] Morning brief (proactive daily digest: calendar, open tasks, bills due, nutrition vs goals)
+- [ ] User-created tasks and time-based reminders (not only email-derived)
+- [ ] Queryable memory over journals / digests / personal references
+
+### Later domains
+- [ ] Calendar read/query UX (“what's today?”, conflicts)
+- [ ] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
+- [ ] Spend alerts / category budgets
+- [ ] Family multi-user Telegram UX
+- [ ] Meal planning ↔ grocery lists
+
+### Non-goals
+- Outbound email / SMTP / creating drafts or replies
+- Executive shell actions or arbitrary file deletion outside designated storage

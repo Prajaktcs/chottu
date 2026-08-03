@@ -6,7 +6,7 @@ Project Chotu is a powerful, local-first agentic workspace built in Rust. It uti
 
 ## Features
 
-- **Google Health Sync**: Two-way nutrition sync — imports daily calories/macros from the Google Health REST API (v4), and pushes Telegram `/food` entries back for the primary member.
+- **Google Health Sync**: Two-way nutrition sync — imports daily calories/macros from the Google Health REST API (v4), and pushes Telegram `/food` entries (including photo-logged meals) back for the primary member.
 - **Interactive OAuth Onboarding**: Run `/login fitbit` or `/login gmail` directly in Telegram, and the agent spawns a temporary callback server to authorize and auto-save credentials to your local `.env`.
 - **Stock Research Agent**: Run automated investment analysis (hundred-bagger methodology) via Google Gemini 3.5 Flash, matching stock tickers dynamically.
 - **Gmail IMAP Streamer**: Scrapes bank statements, receipts, and invoices automatically via Gmail OAuth2.
@@ -96,6 +96,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). |
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
 | `/status` | Today's status (finance + health, goal progress). |
+| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals. Auto-sends at 7:00 local when `TELEGRAM_CHAT_ID` is set (`MORNING_BRIEF_HOUR` to override). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
 | `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Reply `unactionable` to a reminder to ignore similar emails. |
 | `/reflect` | Manually trigger the evening reflection loop. |
@@ -104,6 +105,10 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/monthly [YYYY-MM]` | Monthly transaction summary. |
 | `/holdings ...` | Set portfolio holdings. |
 | `/chat` | View your current Telegram Chat ID. |
+
+Plain-text messages also work for common asks (e.g. "morning brief", "how's today", "open tasks", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend"). Unclear messages get a short clarifying question instead of the full command list.
+
+**Food photos:** send a barcode, product package, or plated meal. Optional caption sets member/portion (e.g. `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push for the primary member).
 
 ---
 
