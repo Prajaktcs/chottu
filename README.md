@@ -50,6 +50,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 ### Tasks, calendar & morning brief (Coordinator)
 - Tasks derived from email action items; manage via `/tasks` (list, complete, snooze, reassign, reopen).
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
+- **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
 - **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals.
 - **Evening reflection**: scheduled or `/reflect` — grounds a journal prompt in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
 
@@ -65,7 +66,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - `/research` — Gemini-backed equity research steered by your configured investment philosophy (e.g. hundred-bagger / micro-cap focus).
 
 ### Natural-language Telegram UX
-- Slash commands for everything above, **plus** free-text intent routing (“morning brief”, “open tasks”, “net worth”, “trends last 14 days”, “sync health”, …).
+- Slash commands for everything above, **plus** free-text intent routing (“what's today”, “morning brief”, “open tasks”, “net worth”, “trends last 14 days”, “sync health”, …).
 - Unclear messages get a short clarifying question instead of dumping the full command list.
 - Interactive `/login` for Google Health, Gmail, and Calendar (local OAuth callback; tokens written to `.env`).
 
@@ -194,17 +195,18 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/clearfood [member_id]` | Clear today's food logs and summary for a member. |
 | `/status` | Today's status (finance + health, goal progress). |
 | `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals. Auto-sends at 7:00 local when `TELEGRAM_CHAT_ID` is set (`MORNING_BRIEF_HOUR` to override). |
+| `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
 | `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Reply `unactionable` to a reminder to ignore similar emails. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |
-| `/networth` | Estimated net worth (cash + stocks) in base currency. |
+| `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
 | `/monthly [YYYY-MM]` | Monthly transaction summary. |
 | `/holdings ...` | Set portfolio holdings. |
 | `/chat` | View your current Telegram Chat ID. |
 
-Plain-text messages also work for common asks (e.g. "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend"). Unclear messages get a short clarifying question instead of the full command list.
+Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend"). Unclear messages get a short clarifying question instead of the full command list.
 
 **Food photos:** send a barcode, product package, or plated meal. Optional caption sets member/portion (e.g. `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
 

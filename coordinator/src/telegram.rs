@@ -10,10 +10,11 @@ use teloxide::utils::command::BotCommands;
 use tokio::sync::RwLock;
 
 use chotu_common::{
-    answer_memory_query, exchange_google_code, fetch_exchange_rates, lookup_barcode,
-    save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token,
-    spawn_background_reindex, start_redirect_listener, AppConfig, ChotuLlm, FoodPhotoKind,
-    GeminiClient, InvestmentPhilosophy, MemoryIndex, UserIntent,
+    answer_memory_query, compose_calendar_agenda, exchange_google_code, fetch_exchange_rates,
+    lookup_barcode, save_calendar_refresh_token, save_google_refresh_token,
+    save_health_refresh_token, spawn_background_reindex, start_redirect_listener, AppConfig,
+    CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient, InvestmentPhilosophy, MemoryIndex,
+    UserIntent,
 };
 use finance_advisor::{run_stock_research, StockResearcher};
 use teloxide::net::Download;
@@ -32,6 +33,8 @@ pub enum Command {
     Status,
     #[command(description = "morning brief: calendar, tasks, bills, nutrition.")]
     Brief,
+    #[command(description = "calendar agenda. Usage: /cal [today|tomorrow|week]")]
+    Cal(String),
     #[command(description = "show multi-day nutrition trends. Usage: /trends [days]")]
     Trends(String),
     #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks complete|snooze|reassign|open <id> ...")]
@@ -303,6 +306,9 @@ async fn handle_command(
         }
         Command::Brief => {
             handle_brief(&bot, chat_id, &pool, &config).await?;
+        }
+        Command::Cal(args) => {
+            handle_cal(&bot, chat_id, args, &config).await?;
         }
         Command::Trends(args) => {
             handle_trends(&bot, chat_id, args, &pool, &config).await?;
@@ -1751,6 +1757,41 @@ async fn handle_brief(
     Ok(())
 }
 
+async fn handle_cal(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: String,
+    config: &AppConfig,
+) -> Result<(), teloxide::RequestError> {
+    let trimmed = args.trim().to_lowercase();
+    let window = if trimmed.is_empty()
+        || trimmed == "today"
+        || trimmed == "day"
+        || trimmed == "tomorrow"
+        || trimmed == "tmr"
+        || trimmed == "tmrw"
+        || trimmed == "week"
+        || trimmed == "this week"
+        || trimmed == "thisweek"
+    {
+        CalendarWindow::parse(&trimmed)
+    } else {
+        bot.send_message(
+            chat_id,
+            "⚠️ Usage: `/cal [today|tomorrow|week]`",
+        )
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+        return Ok(());
+    };
+
+    let report = compose_calendar_agenda(config, window).await;
+    bot.send_message(chat_id, report)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+    Ok(())
+}
+
 async fn handle_memory(
     bot: &Bot,
     chat_id: ChatId,
@@ -2785,7 +2826,7 @@ async fn dispatch_free_text_intent(
     if trimmed.is_empty() {
         bot.send_message(
             chat_id,
-            "Send a message like \"morning brief\", \"how's today\", \"open tasks\", or \"log eggs for praj\".",
+            "Send a message like \"what's today\", \"morning brief\", \"open tasks\", or \"log eggs for praj\".",
         )
         .await?;
         return Ok(());
@@ -2819,6 +2860,9 @@ async fn dispatch_free_text_intent(
     match classification.into_user_intent() {
         UserIntent::Status => handle_status(bot, chat_id, pool, config).await?,
         UserIntent::Brief => handle_brief(bot, chat_id, pool, config).await?,
+        UserIntent::Calendar { window } => {
+            handle_cal(bot, chat_id, window, config).await?;
+        }
         UserIntent::Trends { days } => {
             let args = days.map(|d| d.to_string()).unwrap_or_default();
             handle_trends(bot, chat_id, args, pool, config).await?;
@@ -2864,7 +2908,7 @@ async fn dispatch_free_text_intent(
         UserIntent::Help => {
             let help_text = format!(
                 "👋 Hi! I'm Chotu. You can use slash commands or plain English \
-                 (brief, status, tasks, memory, food, sync, trends, net worth, monthly).\n\n{}",
+                 (calendar, brief, status, tasks, memory, food, sync, trends, net worth, monthly).\n\n{}",
                 Command::descriptions()
             );
             bot.send_message(chat_id, help_text).await?;

@@ -115,6 +115,7 @@ pub struct FoodPhotoAnalysis {
 pub enum IntentKind {
     Status,
     Brief,
+    Calendar,
     Trends,
     Tasks,
     Sync,
@@ -133,6 +134,9 @@ pub struct IntentClassification {
     /// For TRENDS: lookback days (default 7 if omitted).
     #[serde(default)]
     pub days: Option<i64>,
+    /// For CALENDAR: today | tomorrow | week (default today).
+    #[serde(default)]
+    pub calendar_window: Option<String>,
     /// For TASKS: filter/action args, e.g. "open", "all", "snoozed praj".
     #[serde(default)]
     pub tasks_args: Option<String>,
@@ -159,6 +163,7 @@ pub struct IntentClassification {
 pub enum UserIntent {
     Status,
     Brief,
+    Calendar { window: String },
     Trends { days: Option<i64> },
     Tasks { filter: String },
     Sync,
@@ -178,6 +183,26 @@ impl IntentClassification {
         match self.intent {
             IntentKind::Status => UserIntent::Status,
             IntentKind::Brief => UserIntent::Brief,
+            IntentKind::Calendar => {
+                let raw = self
+                    .calendar_window
+                    .unwrap_or_else(|| "today".to_string())
+                    .trim()
+                    .to_lowercase();
+                let window = if raw.is_empty()
+                    || raw == "today"
+                    || raw == "day"
+                {
+                    "today".to_string()
+                } else if raw == "tomorrow" || raw == "tmr" || raw == "tmrw" {
+                    "tomorrow".to_string()
+                } else if raw == "week" || raw == "this week" || raw == "thisweek" {
+                    "week".to_string()
+                } else {
+                    "today".to_string()
+                };
+                UserIntent::Calendar { window }
+            }
             IntentKind::Trends => UserIntent::Trends { days: self.days },
             IntentKind::Tasks => UserIntent::Tasks {
                 filter: self
@@ -231,7 +256,7 @@ impl IntentClassification {
             IntentKind::Help => UserIntent::Help,
             IntentKind::Unknown => UserIntent::Unknown {
                 clarify_question: self.clarify_question.unwrap_or_else(|| {
-                    "I didn't catch that — try asking for brief, status, tasks, memory, food log, sync, trends, net worth, or monthly spend."
+                    "I didn't catch that — try asking for calendar, brief, status, tasks, memory, food log, sync, trends, net worth, or monthly spend."
                         .to_string()
                 }),
             },
@@ -243,7 +268,8 @@ const INTENT_CLASSIFIER_SYSTEM_PROMPT: &str = "\
 You classify short personal-assistant messages from Telegram into exactly one intent.\
 \
 Intents:\
-- BRIEF: morning / day-ahead digest (calendar + tasks + bills + nutrition), e.g. \"morning brief\", \"brief me\", \"what's on today\", \"day ahead\".\
+- BRIEF: full morning / day-ahead digest (calendar + tasks + bills + nutrition), e.g. \"morning brief\", \"brief me\", \"day ahead digest\".\
+- CALENDAR: agenda / schedule only; set calendar_window to today, tomorrow, or week (default today). e.g. \"what's today\", \"what's on today\", \"tomorrow's schedule\", \"this week\", \"any conflicts\", \"calendar\".\
 - STATUS: today finance + health numbers, e.g. \"how's today\", \"status\", \"how am I doing\".\
 - TRENDS: multi-day nutrition trends; set days if mentioned (default 7), e.g. \"trends last 14 days\".\
 - TASKS: list or manage tasks; put filter/action text in tasks_args (e.g. \"open\", \"all\", \"snoozed\").\
@@ -259,7 +285,8 @@ Rules:\
 - Prefer FOOD when the message clearly describes food eaten (even without the word log).\
 - Prefer TASKS for \"what's left\", \"todo\", \"open tasks\", complete/snooze/reassign actions.\
 - Prefer MEMORY for recall/search questions about notes, journals, digests, recipes, or \"did I write/save...\".\
-- Prefer BRIEF for agenda / morning brief / day ahead / what's on today.\
+- Prefer CALENDAR for agenda / schedule / conflicts / what's on today / tomorrow / this week (not the full brief).\
+- Prefer BRIEF only for explicit morning brief / full digest phrasing.\
 - Prefer STATUS for health/finance status without an agenda ask.\
 - Never invent a food_description; if intent is FOOD but meal text is missing, use UNKNOWN with a clarify_question.\
 - Never invent memory_query; if intent is MEMORY but the question is missing, use UNKNOWN with a clarify_question.\
@@ -1249,6 +1276,39 @@ mod tests {
         )
         .unwrap();
         assert_eq!(brief.into_user_intent(), UserIntent::Brief);
+
+        let calendar: IntentClassification = serde_json::from_str(
+            r#"{"intent":"CALENDAR","calendar_window":"tomorrow","reason":"tomorrow agenda"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            calendar.into_user_intent(),
+            UserIntent::Calendar {
+                window: "tomorrow".to_string()
+            }
+        );
+
+        let calendar_week: IntentClassification = serde_json::from_str(
+            r#"{"intent":"CALENDAR","calendar_window":"week","reason":"week view"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            calendar_week.into_user_intent(),
+            UserIntent::Calendar {
+                window: "week".to_string()
+            }
+        );
+
+        let calendar_default: IntentClassification = serde_json::from_str(
+            r#"{"intent":"CALENDAR","reason":"what's on today"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            calendar_default.into_user_intent(),
+            UserIntent::Calendar {
+                window: "today".to_string()
+            }
+        );
 
         let trends: IntentClassification = serde_json::from_str(
             r#"{"intent":"TRENDS","days":14,"reason":"two week trends"}"#,

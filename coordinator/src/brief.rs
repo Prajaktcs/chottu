@@ -1,8 +1,8 @@
 //! Morning brief: calendar, open tasks, bills due, yesterday's nutrition vs goals.
 
-use chrono::{Duration, Local, TimeZone, Timelike, Utc};
+use chrono::{Duration, Local};
 use chotu_common::{
-    build_calendar_client, AppConfig, CalendarEvent, HealthFamilySummary,
+    escape_md, format_brief_calendar_section, truncate, AppConfig, HealthFamilySummary,
 };
 use sqlx::SqlitePool;
 
@@ -33,7 +33,7 @@ pub async fn compose_morning_brief(pool: &SqlitePool, config: &AppConfig) -> Str
     let mut out = format!("☀️ *Morning Brief* — {}\n", weekday);
 
     out.push_str("\n📅 *Today*\n");
-    out.push_str(&format_calendar_section(config, &today).await);
+    out.push_str(&format_brief_calendar_section(config, &today).await);
 
     out.push_str("\n✅ *Tasks*\n");
     out.push_str(&format_tasks_section(pool, &today).await);
@@ -45,73 +45,6 @@ pub async fn compose_morning_brief(pool: &SqlitePool, config: &AppConfig) -> Str
     out.push_str(&format_nutrition_section(pool, config, &yesterday).await);
 
     out
-}
-
-async fn format_calendar_section(config: &AppConfig, today: &str) -> String {
-    let (day_start_utc, day_end_utc) = match local_day_bounds_utc(today) {
-        Some(bounds) => bounds,
-        None => return "_Could not resolve today's date bounds._\n".to_string(),
-    };
-
-    let mut events: Vec<CalendarEvent> = Vec::new();
-    let mut any_client = false;
-    let mut errors: Vec<String> = Vec::new();
-
-    for member in &config.family.members {
-        let Some(client) = build_calendar_client(member) else {
-            continue;
-        };
-        any_client = true;
-        match client
-            .fetch_events(&member.name, day_start_utc, day_end_utc)
-            .await
-        {
-            Ok(mut member_events) => events.append(&mut member_events),
-            Err(e) => {
-                eprintln!(
-                    "Morning brief: calendar fetch failed for {}: {:?}",
-                    member.id, e
-                );
-                errors.push(member.name.clone());
-            }
-        }
-    }
-
-    if !any_client {
-        return "_No calendars linked — `/login calendar <member>`._\n".to_string();
-    }
-
-    events.sort_by_key(|e| e.start);
-
-    let mut lines = String::new();
-    if events.is_empty() {
-        lines.push_str("_No events today._\n");
-    } else {
-        for ev in events.iter().take(12) {
-            let when = format_event_when(ev, today);
-            let title = escape_md(&truncate(&ev.title, 60));
-            let who = escape_md(&ev.member_name);
-            let loc = ev
-                .location
-                .as_deref()
-                .filter(|s| !s.trim().is_empty())
-                .map(|s| format!(" · {}", escape_md(&truncate(s, 40))))
-                .unwrap_or_default();
-            lines.push_str(&format!("• {} — {} ({}){}\n", when, title, who, loc));
-        }
-        if events.len() > 12 {
-            lines.push_str(&format!("_…and {} more_\n", events.len() - 12));
-        }
-    }
-
-    if !errors.is_empty() {
-        lines.push_str(&format!(
-            "_Calendar unavailable for: {}_\n",
-            escape_md(&errors.join(", "))
-        ));
-    }
-
-    lines
 }
 
 async fn format_tasks_section(pool: &SqlitePool, today: &str) -> String {
@@ -335,58 +268,6 @@ async fn format_nutrition_section(
         lines.push_str("_No nutrition logged yesterday._\n");
     }
     lines
-}
-
-fn local_day_bounds_utc(
-    date_yyyy_mm_dd: &str,
-) -> Option<(chrono::DateTime<Utc>, chrono::DateTime<Utc>)> {
-    let naive = chrono::NaiveDate::parse_from_str(date_yyyy_mm_dd, "%Y-%m-%d").ok()?;
-    let start_local = Local
-        .from_local_datetime(&naive.and_hms_opt(0, 0, 0)?)
-        .single()?;
-    let end_local = start_local + Duration::days(1);
-    Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
-}
-
-fn format_event_when(ev: &CalendarEvent, today: &str) -> String {
-    let start_local = ev.start.with_timezone(&Local);
-    let end_local = ev.end.with_timezone(&Local);
-
-    // All-day heuristic: midnight-to-midnight (or multi-day spanning midnight UTC from date-only)
-    let all_day = start_local.time().num_seconds_from_midnight() == 0
-        && end_local.time().num_seconds_from_midnight() == 0
-        && (end_local - start_local) >= Duration::hours(23);
-
-    if all_day {
-        let start_day = start_local.format("%Y-%m-%d").to_string();
-        let end_day = (end_local - Duration::seconds(1))
-            .format("%Y-%m-%d")
-            .to_string();
-        if start_day == today && end_day == today {
-            "all day".to_string()
-        } else {
-            format!("all day ({}→{})", start_day, end_day)
-        }
-    } else {
-        format!("{}", start_local.format("%H:%M"))
-    }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    let count = s.chars().count();
-    if count <= max {
-        s.to_string()
-    } else {
-        let truncated: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{}…", truncated)
-    }
-}
-
-fn escape_md(s: &str) -> String {
-    s.replace('_', "\\_")
-        .replace('*', "\\*")
-        .replace('`', "\\`")
-        .replace('[', "\\[")
 }
 
 /// Tiny helper so date math stays readable without sprinkling parse_from_str.
