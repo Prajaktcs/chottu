@@ -868,7 +868,8 @@ You MUST return ONLY a JSON object matching this schema:
     {
       \"ticker\": \"Stock ticker symbol, e.g. AAPL, MSFT, TSLA\",
       \"shares_owned\": number (number of shares),
-      \"average_cost\": number (average cost per share)
+      \"average_cost\": number (average cost per share),
+      \"average_cost_currency\": \"USD\" | \"CAD\" | \"EUR\" | \"GBP\" | \"INR\" | string | null (currency of average_cost as shown on the statement; null if unclear)
     }
   ]
 }

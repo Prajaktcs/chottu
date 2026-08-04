@@ -64,7 +64,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Continuous ledger from email receipts and drop-folder imports.
 - `/monthly` spend summaries; `/networth` from cash + holdings (FX-aware when rates are available).
 - Category **spend budgets** (`spend_budgets` in `config.yaml` or `/budget set`): progress via `/budget`, appended on `/monthly`, and mid-month Telegram pushes at 80% / 100%.
-- `/holdings` to set portfolio positions; optional target allocation buckets in `config.yaml`.
+- Portfolio positions sync from dropped statements; optional target allocation buckets in `config.yaml`.
 - `/research` — Gemini-backed equity research steered by your configured investment philosophy (e.g. hundred-bagger / micro-cap focus).
 
 ### Natural-language Telegram UX
@@ -103,7 +103,7 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 - Food logging via text or photo (barcode / package / plate)
 - Morning brief + evening reflection journals
 - Local RAG memory over journals, digests, references, tasks
-- Financial ledger, monthly summary, category budgets + spend alerts, net worth, holdings
+- Financial ledger, monthly summary, category budgets + spend alerts, net worth from portfolio statements
 - Configurable stock research (Gemini)
 - Document drop folder for batch CSV/PDF imports
 - Docker image for Linux / cloud deployment
@@ -206,7 +206,6 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
 | `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
 | `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% Telegram alerts when `TELEGRAM_CHAT_ID` is set. |
-| `/holdings ...` | Set portfolio holdings. |
 | `/chat` | View your current Telegram Chat ID. |
 
 Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.

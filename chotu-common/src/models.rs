@@ -18,6 +18,9 @@ pub struct PortfolioHolding {
     pub ticker: String,
     pub shares_owned: f64,
     pub average_cost: f64,
+    /// ISO currency for `average_cost` when known (from statement extraction).
+    /// `None` means unknown — callers should fall back carefully.
+    pub average_cost_currency: Option<String>,
     pub last_updated: DateTime<Utc>,
 }
 
@@ -151,6 +154,9 @@ pub struct ExtractedPortfolioHolding {
     pub ticker: String,
     pub shares_owned: f64,
     pub average_cost: f64,
+    /// Currency of `average_cost` as shown on the statement (e.g. USD, CAD).
+    #[serde(default)]
+    pub average_cost_currency: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
