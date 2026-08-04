@@ -118,10 +118,12 @@ pub enum IntentKind {
     Calendar,
     Trends,
     Tasks,
+    TaskAdd,
     Sync,
     Food,
     Networth,
     Monthly,
+    Budget,
     Memory,
     Help,
     Unknown,
@@ -140,7 +142,13 @@ pub struct IntentClassification {
     /// For TASKS: filter/action args, e.g. "open", "all", "snoozed praj".
     #[serde(default)]
     pub tasks_args: Option<String>,
-    /// For FOOD: family member id when mentioned.
+    /// For TASK_ADD: task title / reminder text.
+    #[serde(default)]
+    pub task_title: Option<String>,
+    /// For TASK_ADD: due phrase, e.g. "tomorrow 3pm", "friday", "2026-08-10".
+    #[serde(default)]
+    pub due_raw: Option<String>,
+    /// For FOOD / TASK_ADD: family member id when mentioned.
     #[serde(default)]
     pub member_id: Option<String>,
     /// For FOOD: meal description text.
@@ -166,6 +174,11 @@ pub enum UserIntent {
     Calendar { window: String },
     Trends { days: Option<i64> },
     Tasks { filter: String },
+    TaskAdd {
+        member_id: Option<String>,
+        title: String,
+        due_raw: Option<String>,
+    },
     Sync,
     Food {
         member_id: Option<String>,
@@ -173,6 +186,7 @@ pub enum UserIntent {
     },
     Networth,
     Monthly { yyyy_mm: Option<String> },
+    Budget,
     Memory { query: String },
     Help,
     Unknown { clarify_question: String },
@@ -211,6 +225,26 @@ impl IntentClassification {
                     .trim()
                     .to_string(),
             },
+            IntentKind::TaskAdd => {
+                let title = self.task_title.unwrap_or_default().trim().to_string();
+                if title.is_empty() {
+                    UserIntent::Unknown {
+                        clarify_question: self.clarify_question.unwrap_or_else(|| {
+                            "What task should I add? e.g. remind me to call the dentist tomorrow 3pm."
+                                .to_string()
+                        }),
+                    }
+                } else {
+                    UserIntent::TaskAdd {
+                        member_id: self.member_id.filter(|s| !s.trim().is_empty()),
+                        title,
+                        due_raw: self
+                            .due_raw
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                    }
+                }
+            }
             IntentKind::Sync => UserIntent::Sync,
             IntentKind::Food => {
                 let description = self
@@ -236,6 +270,7 @@ impl IntentClassification {
             IntentKind::Monthly => UserIntent::Monthly {
                 yyyy_mm: self.month.filter(|s| !s.trim().is_empty()),
             },
+            IntentKind::Budget => UserIntent::Budget,
             IntentKind::Memory => {
                 let query = self
                     .memory_query
@@ -256,7 +291,8 @@ impl IntentClassification {
             IntentKind::Help => UserIntent::Help,
             IntentKind::Unknown => UserIntent::Unknown {
                 clarify_question: self.clarify_question.unwrap_or_else(|| {
-                    "I didn't catch that — try asking for calendar, brief, status, tasks, memory, food log, sync, trends, net worth, or monthly spend."
+                    "I didn't catch that — try asking for calendar, brief, status, tasks, remind me, memory, food log, sync, trends, net worth, monthly spend, or budget."
+
                         .to_string()
                 }),
             },
@@ -272,24 +308,30 @@ Intents:\
 - CALENDAR: agenda / schedule only; set calendar_window to today, tomorrow, or week (default today). e.g. \"what's today\", \"what's on today\", \"tomorrow's schedule\", \"this week\", \"any conflicts\", \"calendar\".\
 - STATUS: today finance + health numbers, e.g. \"how's today\", \"status\", \"how am I doing\".\
 - TRENDS: multi-day nutrition trends; set days if mentioned (default 7), e.g. \"trends last 14 days\".\
-- TASKS: list or manage tasks; put filter/action text in tasks_args (e.g. \"open\", \"all\", \"snoozed\").\
+- TASKS: list or manage existing tasks; put filter/action text in tasks_args (e.g. \"open\", \"all\", \"snoozed\", \"complete abc123\").\
+- TASK_ADD: create a new task or reminder; put the title in task_title, optional member_id, and optional due_raw (e.g. \"tomorrow 3pm\", \"friday\", \"2026-08-10\"). Examples: \"remind me to call the dentist tomorrow\", \"add task buy milk\", \"todo: pay rent Friday\".\
 - MEMORY: recall/search over journals, newsletter digests, personal references, or past tasks; put the question in memory_query (e.g. \"what was that Thai recipe\", \"did I write about the interview\", \"find my note on homelab\").\
 - SYNC: pull Google Health / nutrition sync now.\
 - FOOD: log a meal; put member_id when named and the meal text in food_description.\
 - NETWORTH: portfolio / net worth questions.\
 - MONTHLY: monthly spending summary; set month as YYYY-MM if given.\
+- BUDGET: category spend budgets / how much left this month (e.g. \"budget\", \"how's food budget\", \"am I over on shopping\").\
 - HELP: asking what you can do / commands.\
 - UNKNOWN: anything else, jokes, unrelated chat — set a short clarify_question.\
 \
 Rules:\
 - Prefer FOOD when the message clearly describes food eaten (even without the word log).\
-- Prefer TASKS for \"what's left\", \"todo\", \"open tasks\", complete/snooze/reassign actions.\
+- Prefer TASK_ADD for \"remind me\", \"add task\", \"todo:\", creating a new reminder/task.\
+- Prefer TASKS for listing or managing existing tasks (open/complete/snooze/reassign), not creating.\
 - Prefer MEMORY for recall/search questions about notes, journals, digests, recipes, or \"did I write/save...\".\
 - Prefer CALENDAR for agenda / schedule / conflicts / what's on today / tomorrow / this week (not the full brief).\
 - Prefer BRIEF only for explicit morning brief / full digest phrasing.\
+- Prefer BUDGET for category budget progress / overspend questions (not the full monthly ledger summary).\
+- Prefer MONTHLY for overall spend summary / category totals for a month.\
 - Prefer STATUS for health/finance status without an agenda ask.\
 - Never invent a food_description; if intent is FOOD but meal text is missing, use UNKNOWN with a clarify_question.\
 - Never invent memory_query; if intent is MEMORY but the question is missing, use UNKNOWN with a clarify_question.\
+- Never invent task_title; if intent is TASK_ADD but title is missing, use UNKNOWN with a clarify_question.\
 - member_id must be one of the provided family member ids when set.\
 - Keep reason brief.\
 ";
@@ -1353,6 +1395,30 @@ mod tests {
             }
         );
 
+        let task_add: IntentClassification = serde_json::from_str(
+            r#"{"intent":"TASK_ADD","task_title":"call the dentist","due_raw":"tomorrow 3pm","member_id":"praj","reason":"reminder"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            task_add.into_user_intent(),
+            UserIntent::TaskAdd {
+                member_id: Some("praj".to_string()),
+                title: "call the dentist".to_string(),
+                due_raw: Some("tomorrow 3pm".to_string()),
+            }
+        );
+
+        let task_add_missing: IntentClassification = serde_json::from_str(
+            r#"{"intent":"TASK_ADD","task_title":"","clarify_question":"What task?","reason":"empty"}"#,
+        )
+        .unwrap();
+        match task_add_missing.into_user_intent() {
+            UserIntent::Unknown { clarify_question } => {
+                assert!(clarify_question.to_lowercase().contains("task"));
+            }
+            other => panic!("expected Unknown, got {:?}", other),
+        }
+
         let memory: IntentClassification = serde_json::from_str(
             r#"{"intent":"MEMORY","memory_query":"what was that Thai curry recipe","reason":"recall note"}"#,
         )
@@ -1374,6 +1440,12 @@ mod tests {
                 yyyy_mm: Some("2026-07".to_string())
             }
         );
+
+        let budget: IntentClassification = serde_json::from_str(
+            r#"{"intent":"BUDGET","reason":"food budget progress"}"#,
+        )
+        .unwrap();
+        assert_eq!(budget.into_user_intent(), UserIntent::Budget);
 
         let unknown: IntentClassification = serde_json::from_str(
             r#"{"intent":"UNKNOWN","clarify_question":"Did you mean status or tasks?","reason":"ambiguous"}"#,

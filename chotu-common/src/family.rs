@@ -214,11 +214,20 @@ pub struct TargetAllocation {
     pub buckets: Vec<AllocationBucket>,
 }
 
+/// Household monthly spend limits by ledger category (e.g. Food, Shopping).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SpendBudgets {
+    /// Map of category name → monthly limit in base currency.
+    #[serde(default)]
+    pub categories: std::collections::HashMap<String, f64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub family: FamilySection,
     pub investment_philosophy: Option<InvestmentPhilosophy>,
     pub target_allocation: Option<TargetAllocation>,
+    pub spend_budgets: Option<SpendBudgets>,
     pub currency: Option<String>,
     pub email_classifier_prompt_path: Option<String>,
 }
@@ -237,6 +246,7 @@ impl Default for AppConfig {
             },
             investment_philosophy: Some(InvestmentPhilosophy::default()),
             target_allocation: None,
+            spend_budgets: None,
             currency: None,
             email_classifier_prompt_path: None,
         }
@@ -428,6 +438,11 @@ family:
 currency: "CAD"
 email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
 
+spend_budgets:
+  categories:
+    Food: 800
+    Shopping: 400
+
 target_allocation:
   monthly_budget: 3000
   buckets:
@@ -464,6 +479,10 @@ target_allocation:
         assert!(loaded.family.members[2].nutrition_goals.is_none());
         // Sam has no calendar
         assert!(loaded.family.members[2].calendar.is_none());
+
+        let budgets = loaded.spend_budgets.as_ref().unwrap();
+        assert_eq!(budgets.categories.get("Food"), Some(&800.0));
+        assert_eq!(budgets.categories.get("Shopping"), Some(&400.0));
 
         let target = loaded.target_allocation.unwrap();
         assert_eq!(target.monthly_budget, 3000.0);

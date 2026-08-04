@@ -1,5 +1,6 @@
 pub mod agenda;
 pub mod database;
+pub mod due_parse;
 pub mod family;
 pub mod google_health;
 pub mod ledger;
@@ -9,12 +10,16 @@ pub mod models;
 pub mod oauth;
 pub mod calendar;
 pub mod open_food_facts;
+pub mod spend_budget;
 
 pub use database::init_db;
+pub use due_parse::{
+    is_due_for_reminder, parse_due_phrase, split_task_add_args, ParsedDue,
+};
 pub use family::{
     health_refresh_token_env_key, load_config, resolve_health_refresh_token, AppConfig,
     FamilyMember, FamilySection, InvestmentPhilosophy, TargetAllocation, AllocationBucket,
-    BucketHolding, fetch_exchange_rates, CalendarConfig, NutritionGoals,
+    BucketHolding, SpendBudgets, fetch_exchange_rates, CalendarConfig, NutritionGoals,
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
@@ -53,6 +58,11 @@ pub use oauth::{
     save_google_health_refresh_token, save_google_refresh_token, save_health_refresh_token,
     start_redirect_listener, FitbitTokenResponse, GoogleInitialTokenResponse, GoogleTokenResponse,
     OAuthError,
+};
+pub use spend_budget::{
+    clear_budget_override, compute_budget_progress, current_budget_month, display_category,
+    effective_budgets, format_budget_progress_markdown, mark_budget_alert_sent,
+    pending_budget_alerts, set_budget_override, BudgetAlert, BudgetProgress, BUDGET_THRESHOLDS,
 };
 
 #[cfg(test)]

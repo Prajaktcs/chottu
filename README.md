@@ -48,7 +48,8 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Daily `/status` and multi-day `/trends` with goal progress when goals are configured.
 
 ### Tasks, calendar & morning brief (Coordinator)
-- Tasks derived from email action items; manage via `/tasks` (list, complete, snooze, reassign, reopen).
+- Tasks from email action items **or** Telegram (`/tasks add`, “remind me to…”); manage via `/tasks` (list, complete, snooze, reassign, reopen).
+- Timed reminders: one Telegram ping when a task’s `due_at` is reached (`TELEGRAM_CHAT_ID` required).
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
 - **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals.
@@ -62,11 +63,12 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 ### Finance & investing (Finance Advisor + ledger)
 - Continuous ledger from email receipts and drop-folder imports.
 - `/monthly` spend summaries; `/networth` from cash + holdings (FX-aware when rates are available).
+- Category **spend budgets** (`spend_budgets` in `config.yaml` or `/budget set`): progress via `/budget`, appended on `/monthly`, and mid-month Telegram pushes at 80% / 100%.
 - `/holdings` to set portfolio positions; optional target allocation buckets in `config.yaml`.
 - `/research` — Gemini-backed equity research steered by your configured investment philosophy (e.g. hundred-bagger / micro-cap focus).
 
 ### Natural-language Telegram UX
-- Slash commands for everything above, **plus** free-text intent routing (“what's today”, “morning brief”, “open tasks”, “net worth”, “trends last 14 days”, “sync health”, …).
+- Slash commands for everything above, **plus** free-text intent routing (“what's today”, “remind me to call the dentist tomorrow 3pm”, “morning brief”, “open tasks”, “net worth”, “trends last 14 days”, “sync health”, …).
 - Unclear messages get a short clarifying question instead of dumping the full command list.
 - Interactive `/login` for Google Health, Gmail, and Calendar (local OAuth callback; tokens written to `.env`).
 
@@ -101,7 +103,7 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 - Food logging via text or photo (barcode / package / plate)
 - Morning brief + evening reflection journals
 - Local RAG memory over journals, digests, references, tasks
-- Financial ledger, monthly summary, net worth, holdings
+- Financial ledger, monthly summary, category budgets + spend alerts, net worth, holdings
 - Configurable stock research (Gemini)
 - Document drop folder for batch CSV/PDF imports
 - Docker image for Linux / cloud deployment
@@ -198,15 +200,16 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
-| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Reply `unactionable` to a reminder to ignore similar emails. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/tasks add [member] <title> [due <when>]` (e.g. `due tomorrow 15:00`). Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping Telegram once when due (`TELEGRAM_CHAT_ID`). Reply `unactionable` to an email reminder to ignore similar mail. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
-| `/monthly [YYYY-MM]` | Monthly transaction summary. |
+| `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
+| `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% Telegram alerts when `TELEGRAM_CHAT_ID` is set. |
 | `/holdings ...` | Set portfolio holdings. |
 | `/chat` | View your current Telegram Chat ID. |
 
-Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend"). Unclear messages get a short clarifying question instead of the full command list.
+Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
 
 **Food photos:** send a barcode, product package, or plated meal. Optional caption sets member/portion (e.g. `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
 
