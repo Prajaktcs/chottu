@@ -28,7 +28,7 @@
 
 ### Later domains
 - [x] Calendar read/query UX (“what's today?”, conflicts)
-- [ ] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
+- [x] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
 - [x] Spend alerts / category budgets
 - [ ] Family multi-user Telegram UX
 - [ ] Meal planning ↔ grocery lists

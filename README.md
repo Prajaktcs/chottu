@@ -45,7 +45,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
   - Barcode → [Open Food Facts](https://world.openfoodfacts.org/)
   - Package / plated meal → Gemini vision
 - Adjust, undo, or clear today’s food; overnight scheduled sync merges Telegram meals with Google Health instead of overwriting.
-- Daily `/status` and multi-day `/trends` with goal progress when goals are configured.
+- Daily `/status` and multi-day `/trends` with goal progress when goals are configured; each member report ends with a short local-Ollama coach tip grounded in the logged metrics.
 
 ### Tasks, calendar & morning brief (Coordinator)
 - Tasks from email action items **or** Telegram (`/tasks add`, “remind me to…”); manage via `/tasks` (list, complete, snooze, reassign, reopen).
@@ -195,11 +195,11 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). |
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
 | `/clearfood [member_id]` | Clear today's food logs and summary for a member. |
-| `/status` | Today's status (finance + health, goal progress). |
+| `/status` | Today's status (finance + health, goal progress, short local-Ollama coach tip per member). |
 | `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals. Auto-sends at 7:00 local when `TELEGRAM_CHAT_ID` is set (`MORNING_BRIEF_HOUR` to override). |
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
-| `/trends [days]` | Multi-day nutrition/activity trends (default 7 days). |
+| `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
 | `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/tasks add [member] <title> [due <when>]` (e.g. `due tomorrow 15:00`). Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping Telegram once when due (`TELEGRAM_CHAT_ID`). Reply `unactionable` to an email reminder to ignore similar mail. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Run stock analysis (e.g., `/research Apple, Nvidia`). |

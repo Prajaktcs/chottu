@@ -1,9 +1,13 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+mod coaching;
 mod sync;
 mod trends;
 
+pub use coaching::{
+    append_coach_tip, generate_nutrition_coach_tip, NutritionCoachContext,
+};
 pub use sync::{
     credentials_configured, delete_google_nutrition_logs, external_nutrition_base,
     google_data_point_ids_for_day, google_health_client_for_member, google_health_client_from_env,
