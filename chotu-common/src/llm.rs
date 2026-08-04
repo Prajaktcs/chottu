@@ -328,7 +328,6 @@ Rules:\
 - Prefer BRIEF only for explicit morning brief / full digest phrasing.\
 - Prefer BUDGET for category budget progress / overspend questions (not the full monthly ledger summary).\
 - Prefer MONTHLY for overall spend summary / category totals for a month.\
-
 - Prefer STATUS for health/finance status without an agenda ask.\
 - Never invent a food_description; if intent is FOOD but meal text is missing, use UNKNOWN with a clarify_question.\
 - Never invent memory_query; if intent is MEMORY but the question is missing, use UNKNOWN with a clarify_question.\
