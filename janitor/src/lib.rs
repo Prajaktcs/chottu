@@ -262,19 +262,33 @@ async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path
                                 println!("Extracted {} portfolio holdings.", holdings.len());
                                 let now = chrono::Utc::now();
                                 for h in holdings {
-                                    println!("Updating holding: {} ({} shares @ average cost ${:.2})", h.ticker, h.shares_owned, h.average_cost);
+                                    let cost_currency = h
+                                        .average_cost_currency
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|c| !c.is_empty())
+                                        .map(|c| c.to_uppercase());
+                                    println!(
+                                        "Updating holding: {} ({} shares @ average cost ${:.2} {})",
+                                        h.ticker,
+                                        h.shares_owned,
+                                        h.average_cost,
+                                        cost_currency.as_deref().unwrap_or("?")
+                                    );
                                     let ticker_upper = h.ticker.to_uppercase();
                                     sqlx::query(
-                                        "INSERT INTO portfolio_holdings (ticker, shares_owned, average_cost, last_updated) \
-                                         VALUES (?, ?, ?, ?) \
+                                        "INSERT INTO portfolio_holdings (ticker, shares_owned, average_cost, average_cost_currency, last_updated) \
+                                         VALUES (?, ?, ?, ?, ?) \
                                          ON CONFLICT(ticker) DO UPDATE SET \
                                             shares_owned = excluded.shares_owned, \
                                             average_cost = excluded.average_cost, \
+                                            average_cost_currency = excluded.average_cost_currency, \
                                             last_updated = excluded.last_updated"
                                     )
                                     .bind(&ticker_upper)
                                     .bind(h.shares_owned)
                                     .bind(h.average_cost)
+                                    .bind(&cost_currency)
                                     .bind(now)
                                     .execute(pool)
                                     .await?;

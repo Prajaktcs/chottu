@@ -87,6 +87,7 @@ CREATE TABLE IF NOT EXISTS portfolio_holdings (
     ticker TEXT PRIMARY KEY,
     shares_owned REAL NOT NULL,
     average_cost REAL NOT NULL,
+    average_cost_currency TEXT,          -- ISO code for average_cost; NULL if unknown
     last_updated DATETIME NOT NULL
 );
 

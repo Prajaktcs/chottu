@@ -2386,7 +2386,7 @@ async fn handle_networth(
 
     // Portfolio only for now — email ledger is a transaction log, not a cash balance.
     let holdings: Vec<chotu_common::PortfolioHolding> = match sqlx::query_as::<_, chotu_common::PortfolioHolding>(
-        "SELECT ticker, shares_owned, average_cost, last_updated FROM portfolio_holdings"
+        "SELECT ticker, shares_owned, average_cost, average_cost_currency, last_updated FROM portfolio_holdings"
     )
     .fetch_all(pool)
     .await {
@@ -2417,14 +2417,14 @@ async fn handle_networth(
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Failed to fetch stock prices: {:?}", e);
-                // No quote currencies available — assume average_cost is already in base.
                 let mut portfolio_cost = 0.0;
                 for h in &holdings {
-                    portfolio_cost += h.shares_owned * h.average_cost;
+                    let converted = holding_values_in_base(h, None, config, &rates);
+                    portfolio_cost += converted.cost_base;
                 }
                 msg.push_str(&format!(
-                    "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, book cost assumed in {})\n",
-                    portfolio_cost, base, base
+                    "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, showing FX'd book cost)\n",
+                    portfolio_cost, base
                 ));
                 msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
                 msg.push_str(&format!(
@@ -2449,26 +2449,16 @@ async fn handle_networth(
 
         for h in &holdings {
             let ticker_upper = h.ticker.to_uppercase();
-            let book_cost = h.shares_owned * h.average_cost;
-            let (price_base, cost_base) = if let Some((raw_price, quote_currency)) =
-                price_map.get(&ticker_upper).cloned()
-            {
-                // Holdings store no cost currency; assume average_cost is in the quote currency.
-                (
-                    config.convert_to_base(raw_price, &quote_currency, &rates),
-                    config.convert_to_base(book_cost, &quote_currency, &rates),
-                )
-            } else {
+            let quote = price_map.get(&ticker_upper).map(|(p, c)| (*p, c.as_str()));
+            let converted = holding_values_in_base(h, quote, config, &rates);
+            if converted.missing_quote {
                 missing_quotes += 1;
-                // No quote: treat average_cost as already in base.
-                (h.average_cost, book_cost)
-            };
-            let value_base = h.shares_owned * price_base;
-            total_portfolio_cost += cost_base;
-            total_portfolio_value += value_base;
+            }
+            total_portfolio_cost += converted.cost_base;
+            total_portfolio_value += converted.value_base;
 
-            let diff_percent = if cost_base > 0.0 {
-                (value_base - cost_base) / cost_base * 100.0
+            let diff_percent = if converted.cost_base > 0.0 {
+                (converted.value_base - converted.cost_base) / converted.cost_base * 100.0
             } else {
                 0.0
             };
@@ -2478,10 +2468,10 @@ async fn handle_networth(
                 "  - *{}*: {:.1} shares @ ${:.2} {} (Cost: ${:.2} | Value: ${:.2} | {}{:.1}%)\n",
                 ticker_upper,
                 h.shares_owned,
-                price_base,
+                converted.price_base,
                 base,
-                cost_base,
-                value_base,
+                converted.cost_base,
+                converted.value_base,
                 sign,
                 diff_percent
             ));
@@ -2500,8 +2490,8 @@ async fn handle_networth(
         ));
         if missing_quotes > 0 {
             msg.push_str(&format!(
-                "  _({} holding(s) used book cost assumed in {} — try Yahoo symbols like `VFV.TO`)_\n",
-                missing_quotes, base
+                "  _({} holding(s) used book cost — try Yahoo symbols like `VFV.TO`)_\n",
+                missing_quotes
             ));
         }
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -2519,6 +2509,60 @@ async fn handle_networth(
         .await?;
 
     Ok(())
+}
+
+/// Per-share price and book cost converted into the configured base currency.
+struct HoldingValuesInBase {
+    price_base: f64,
+    cost_base: f64,
+    value_base: f64,
+    missing_quote: bool,
+}
+
+/// Convert a holding's live price and book cost into base currency.
+///
+/// Cost currency preference:
+/// 1. persisted `average_cost_currency` from statement extraction
+/// 2. otherwise the Yahoo quote currency (best available hint)
+/// 3. otherwise treat amounts as already in base
+fn holding_values_in_base(
+    holding: &chotu_common::PortfolioHolding,
+    quote: Option<(f64, &str)>,
+    config: &AppConfig,
+    rates: &std::collections::HashMap<String, f64>,
+) -> HoldingValuesInBase {
+    let base = config.currency();
+    let book_cost = holding.shares_owned * holding.average_cost;
+    let stored_cost_ccy = holding
+        .average_cost_currency
+        .as_deref()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+
+    match quote {
+        Some((raw_price, quote_currency)) => {
+            let cost_currency = stored_cost_ccy.unwrap_or(quote_currency);
+            let price_base = config.convert_to_base(raw_price, quote_currency, rates);
+            let cost_base = config.convert_to_base(book_cost, cost_currency, rates);
+            HoldingValuesInBase {
+                price_base,
+                cost_base,
+                value_base: holding.shares_owned * price_base,
+                missing_quote: false,
+            }
+        }
+        None => {
+            let cost_currency = stored_cost_ccy.unwrap_or(base);
+            let price_base = config.convert_to_base(holding.average_cost, cost_currency, rates);
+            let cost_base = config.convert_to_base(book_cost, cost_currency, rates);
+            HoldingValuesInBase {
+                price_base,
+                cost_base,
+                value_base: holding.shares_owned * price_base,
+                missing_quote: true,
+            }
+        }
+    }
 }
 
 async fn handle_monthly(
@@ -4180,6 +4224,25 @@ async fn handle_manual_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn holding(ticker: &str, shares: f64, avg_cost: f64, currency: Option<&str>) -> chotu_common::PortfolioHolding {
+        chotu_common::PortfolioHolding {
+            ticker: ticker.to_string(),
+            shares_owned: shares,
+            average_cost: avg_cost,
+            average_cost_currency: currency.map(|c| c.to_string()),
+            last_updated: Utc::now(),
+        }
+    }
+
+    fn cad_config() -> AppConfig {
+        AppConfig {
+            currency: Some("CAD".to_string()),
+            ..AppConfig::default()
+        }
+    }
 
     #[test]
     fn test_split_message() {
@@ -4188,5 +4251,56 @@ mod tests {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0], "Line 1\nLine 2\n");
         assert_eq!(chunks[1], "Line 3\nLine 4\n");
+    }
+
+    #[test]
+    fn holding_values_converts_quote_and_stored_cost_currency() {
+        let config = cad_config();
+        let rates = HashMap::from([("USD".to_string(), 0.73)]); // 1 CAD = 0.73 USD
+        let h = holding("AAPL", 10.0, 100.0, Some("USD"));
+
+        let v = holding_values_in_base(&h, Some((200.0, "USD")), &config, &rates);
+        assert!(!v.missing_quote);
+        // USD → CAD via amount / rate
+        assert!((v.price_base - 200.0 / 0.73).abs() < 1e-9);
+        assert!((v.cost_base - 1000.0 / 0.73).abs() < 1e-9);
+        assert!((v.value_base - 10.0 * v.price_base).abs() < 1e-9);
+    }
+
+    #[test]
+    fn holding_values_uses_stored_cost_currency_even_when_quote_differs() {
+        let config = cad_config();
+        let rates = HashMap::from([("USD".to_string(), 0.73)]);
+        // CAD-listed ETF quoted in CAD, but statement cost was USD
+        let h = holding("VFV.TO", 5.0, 80.0, Some("USD"));
+
+        let v = holding_values_in_base(&h, Some((120.0, "CAD")), &config, &rates);
+        assert!(!v.missing_quote);
+        assert!((v.price_base - 120.0).abs() < 1e-9); // already CAD
+        assert!((v.cost_base - 400.0 / 0.73).abs() < 1e-9); // 5 * 80 USD → CAD
+    }
+
+    #[test]
+    fn holding_values_missing_quote_falls_back_to_cost_currency() {
+        let config = cad_config();
+        let rates = HashMap::from([("USD".to_string(), 0.73)]);
+        let h = holding("AAPL", 2.0, 50.0, Some("USD"));
+
+        let v = holding_values_in_base(&h, None, &config, &rates);
+        assert!(v.missing_quote);
+        assert!((v.price_base - 50.0 / 0.73).abs() < 1e-9);
+        assert!((v.cost_base - 100.0 / 0.73).abs() < 1e-9);
+    }
+
+    #[test]
+    fn holding_values_missing_quote_and_currency_assumes_base() {
+        let config = cad_config();
+        let rates = HashMap::new();
+        let h = holding("XYZ", 3.0, 10.0, None);
+
+        let v = holding_values_in_base(&h, None, &config, &rates);
+        assert!(v.missing_quote);
+        assert!((v.price_base - 10.0).abs() < 1e-9);
+        assert!((v.cost_base - 30.0).abs() < 1e-9);
     }
 }
