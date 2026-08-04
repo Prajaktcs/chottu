@@ -1109,31 +1109,6 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         Ok(response)
     }
 
-    /// Fetches the current stock/ETF prices for the requested tickers using Gemini
-    pub async fn fetch_stock_prices(
-        &self,
-        tickers: &[String],
-    ) -> Result<Vec<StockPriceEstimation>, LlmError> {
-        if tickers.is_empty() {
-            return Ok(Vec::new());
-        }
-        let system_prompt = "You are a financial helper assistant. For the list of stock/ETF ticker symbols provided by the user, look up and return the current stock price in its native trading currency and specify the currency code (e.g. USD, CAD, EUR). If you don't know the exact price, estimate the most recent known price.";
-        let user_prompt = format!("Tickers: {}", tickers.join(", "));
-
-        let extractor = self
-            .client
-            .extractor::<StockPricesResponse>("gemini-3.6-flash")
-            .preamble(system_prompt)
-            .build();
-
-        let response = extractor
-            .extract(&user_prompt)
-            .await
-            .map_err(|e| LlmError::Client(e.to_string()))?;
-
-        Ok(response.prices)
-    }
-
     /// Sends a free-form prompt to Gemini and returns the plain text response.
     /// Useful for composing narrative text like morning briefs and weekly prep notes.
     pub async fn ask(&self, prompt: &str) -> Result<String, LlmError> {
@@ -1179,18 +1154,6 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
 pub struct MissingSyncNutrition {
     pub omega_3_dha_mg: f64,
     pub triglycerides_mg: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-pub struct StockPriceEstimation {
-    pub ticker: String,
-    pub price: f64,
-    pub currency: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
-pub struct StockPricesResponse {
-    pub prices: Vec<StockPriceEstimation>,
 }
 
 // -------------------------------------------------------------

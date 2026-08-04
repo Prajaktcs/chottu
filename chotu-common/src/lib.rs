@@ -10,6 +10,7 @@ pub mod models;
 pub mod oauth;
 pub mod calendar;
 pub mod open_food_facts;
+pub mod quotes;
 pub mod spend_budget;
 
 pub use database::init_db;
@@ -40,10 +41,11 @@ pub use ledger::{
 pub use llm::{
     ChotuLlm, GeminiClient, LlmError, NutritionEstimation, MissingSyncNutrition,
     LedgerExtraction, ActionItemExtraction, TravelItineraryExtraction, UpcomingBillExtraction,
-    PersonalReferenceExtraction, StockPriceEstimation, StockPricesResponse,
-    IntentKind, IntentClassification, UserIntent, FoodPhotoAnalysis, FoodPhotoKind,
+    PersonalReferenceExtraction, IntentKind, IntentClassification, UserIntent,
+    FoodPhotoAnalysis, FoodPhotoKind,
 };
 pub use open_food_facts::{lookup_barcode, OpenFoodFactsProduct};
+pub use quotes::{fetch_stock_quotes, StockQuote, QuoteError};
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, spawn_background_reindex, MemoryHit,
     MemoryIndex, ReindexStats, SourceType, DEFAULT_EMBED_MODEL,
