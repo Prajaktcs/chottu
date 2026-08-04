@@ -181,27 +181,20 @@ pub async fn fetch_stock_quotes(tickers: &[String]) -> Result<Vec<StockQuote>, Q
     let client = reqwest::Client::new();
     let mut quotes = Vec::with_capacity(tickers.len());
     let mut errors = Vec::new();
-    let mut set = JoinSet::new();
-    let mut pending = tickers.iter();
+    let mut set: JoinSet<Result<StockQuote, QuoteError>> = JoinSet::new();
+    let mut next = 0usize;
 
-    let spawn_next = |set: &mut JoinSet<_>, pending: &mut std::slice::Iter<'_, String>, client: &reqwest::Client| {
-        if let Some(ticker) = pending.next() {
+    while next < tickers.len() || !set.is_empty() {
+        while set.len() < MAX_CONCURRENT_QUOTES && next < tickers.len() {
             let client = client.clone();
-            let ticker = ticker.clone();
+            let ticker = tickers[next].clone();
+            next += 1;
             set.spawn(async move { fetch_stock_quote(&client, &ticker).await });
-            true
-        } else {
-            false
         }
-    };
 
-    for _ in 0..MAX_CONCURRENT_QUOTES {
-        if !spawn_next(&mut set, &mut pending, &client) {
+        let Some(joined) = set.join_next().await else {
             break;
-        }
-    }
-
-    while let Some(joined) = set.join_next().await {
+        };
         match joined {
             Ok(Ok(q)) => quotes.push(q),
             Ok(Err(e)) => {
@@ -213,7 +206,6 @@ pub async fn fetch_stock_quotes(tickers: &[String]) -> Result<Vec<StockQuote>, Q
                 errors.push(QuoteError::NotFound("join".to_string()));
             }
         }
-        let _ = spawn_next(&mut set, &mut pending, &client);
     }
 
     if quotes.is_empty() && !errors.is_empty() {
