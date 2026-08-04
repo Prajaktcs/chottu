@@ -67,8 +67,6 @@ pub enum Command {
     Monthly(String),
     #[command(description = "category spend budgets. Usage: /budget | /budget set <Category> <amount> | /budget clear <Category>")]
     Budget(String),
-    #[command(description = "set stock portfolio holdings. Usage: /holdings <ticker>:<shares>:<avg_cost> ...")]
-    Holdings(String),
 }
 
 #[derive(Debug, Clone)]
@@ -494,9 +492,6 @@ async fn handle_command(
         }
         Command::Budget(args) => {
             handle_budget(&bot, chat_id, args, &pool, &config).await?;
-        }
-        Command::Holdings(args) => {
-            handle_holdings(&bot, chat_id, args, &pool).await?;
         }
     }
 
@@ -2409,7 +2404,7 @@ async fn handle_networth(
 
     if holdings.is_empty() {
         msg.push_str(&format!(
-            "• 📈 *Stock Portfolio:* $0.00 {} (No holdings set. Use `/holdings` to add stocks)\n",
+            "• 📈 *Stock Portfolio:* $0.00 {} (No holdings yet — drop a portfolio statement to sync)\n",
             base
         ));
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -2422,14 +2417,14 @@ async fn handle_networth(
             Ok(p) => p,
             Err(e) => {
                 eprintln!("Failed to fetch stock prices: {:?}", e);
-                // Fallback: treat average_cost as already in base currency
+                // No quote currencies available — assume average_cost is already in base.
                 let mut portfolio_cost = 0.0;
                 for h in &holdings {
                     portfolio_cost += h.shares_owned * h.average_cost;
                 }
                 msg.push_str(&format!(
-                    "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, showing book cost)\n",
-                    portfolio_cost, base
+                    "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, book cost assumed in {})\n",
+                    portfolio_cost, base, base
                 ));
                 msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
                 msg.push_str(&format!(
@@ -2454,16 +2449,20 @@ async fn handle_networth(
 
         for h in &holdings {
             let ticker_upper = h.ticker.to_uppercase();
-            let used_quote = price_map.get(&ticker_upper).cloned();
-            if used_quote.is_none() {
+            let book_cost = h.shares_owned * h.average_cost;
+            let (price_base, cost_base) = if let Some((raw_price, quote_currency)) =
+                price_map.get(&ticker_upper).cloned()
+            {
+                // Holdings store no cost currency; assume average_cost is in the quote currency.
+                (
+                    config.convert_to_base(raw_price, &quote_currency, &rates),
+                    config.convert_to_base(book_cost, &quote_currency, &rates),
+                )
+            } else {
                 missing_quotes += 1;
-            }
-            let (raw_price, quote_currency) =
-                used_quote.unwrap_or_else(|| (h.average_cost, base.to_string()));
-
-            let price_base = config.convert_to_base(raw_price, &quote_currency, &rates);
-            // Book cost has no stored currency; treat average_cost as already in base.
-            let cost_base = h.shares_owned * h.average_cost;
+                // No quote: treat average_cost as already in base.
+                (h.average_cost, book_cost)
+            };
             let value_base = h.shares_owned * price_base;
             total_portfolio_cost += cost_base;
             total_portfolio_value += value_base;
@@ -2501,8 +2500,8 @@ async fn handle_networth(
         ));
         if missing_quotes > 0 {
             msg.push_str(&format!(
-                "  _({} holding(s) used book cost — try Yahoo symbols like `VFV.TO`)_\n",
-                missing_quotes
+                "  _({} holding(s) used book cost assumed in {} — try Yahoo symbols like `VFV.TO`)_\n",
+                missing_quotes, base
             ));
         }
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
@@ -2515,80 +2514,6 @@ async fn handle_networth(
         msg.push_str(&breakdown);
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
-
-    Ok(())
-}
-
-async fn handle_holdings(
-    bot: &Bot,
-    chat_id: ChatId,
-    args: String,
-    pool: &SqlitePool,
-) -> Result<(), teloxide::RequestError> {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.is_empty() {
-        bot.send_message(
-            chat_id,
-            "⚠️ Usage: `/holdings <ticker>:<shares>:<avg_cost> ...`\nExample: `/holdings AAPL:100:175.50 MSFT:50:420.00`"
-        ).await?;
-        return Ok(());
-    }
-
-    let now = chrono::Utc::now();
-    let mut updated = Vec::new();
-
-    for token in tokens {
-        let parts: Vec<&str> = token.split(':').collect();
-        if parts.len() != 3 {
-            bot.send_message(
-                chat_id,
-                format!("❌ Invalid format for '{}'. Must be TICKER:SHARES:COST (e.g. AAPL:10:180.50).", token)
-            ).await?;
-            return Ok(());
-        }
-
-        let ticker = parts[0].to_uppercase();
-        let shares: f64 = match parts[1].parse() {
-            Ok(s) => s,
-            Err(_) => {
-                bot.send_message(chat_id, format!("❌ Invalid shares for '{}'. Must be a number.", token)).await?;
-                return Ok(());
-            }
-        };
-        let cost: f64 = match parts[2].parse() {
-            Ok(c) => c,
-            Err(_) => {
-                bot.send_message(chat_id, format!("❌ Invalid cost for '{}'. Must be a number.", token)).await?;
-                return Ok(());
-            }
-        };
-
-        if let Err(e) = sqlx::query(
-            "INSERT INTO portfolio_holdings (ticker, shares_owned, average_cost, last_updated) \
-             VALUES (?, ?, ?, ?) \
-             ON CONFLICT(ticker) DO UPDATE SET \
-                shares_owned = excluded.shares_owned, \
-                average_cost = excluded.average_cost, \
-                last_updated = excluded.last_updated"
-        )
-        .bind(&ticker)
-        .bind(shares)
-        .bind(cost)
-        .bind(now)
-        .execute(pool)
-        .await {
-            eprintln!("Failed to save holdings for {}: {:?}", ticker, e);
-            bot.send_message(chat_id, "❌ Database error updating holdings.").await?;
-            return Ok(());
-        }
-
-        updated.push(format!("*{}* ({} shares @ ${:.2})", ticker, shares, cost));
-    }
-
-    let msg = format!("✅ *Portfolio updated successfully!*\n\nSaved holdings:\n{}", updated.join("\n"));
     bot.send_message(chat_id, msg)
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
