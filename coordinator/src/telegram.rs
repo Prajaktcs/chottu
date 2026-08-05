@@ -359,7 +359,7 @@ async fn handle_command(
             handle_food_log(&bot, chat_id, args, &pool, &gemini_client, &config).await?;
         }
         Command::Status => {
-            handle_status(&bot, chat_id, &pool, &config).await?;
+            handle_status(&bot, chat_id, &pool, &config, &llm).await?;
         }
         Command::Brief => {
             handle_brief(&bot, chat_id, &pool, &config).await?;
@@ -368,7 +368,7 @@ async fn handle_command(
             handle_cal(&bot, chat_id, args, &config).await?;
         }
         Command::Trends(args) => {
-            handle_trends(&bot, chat_id, args, &pool, &config).await?;
+            handle_trends(&bot, chat_id, args, &pool, &config, &llm).await?;
         }
         Command::Tasks(args) => {
             handle_tasks(&bot, chat_id, args, &pool, &config).await?;
@@ -1992,6 +1992,7 @@ async fn handle_trends(
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
+    llm: &ChotuLlm,
 ) -> Result<(), teloxide::RequestError> {
     let days = args
         .trim()
@@ -2005,7 +2006,7 @@ async fn handle_trends(
     )
     .await?;
 
-    match health_coach::build_nutrition_trend_reports(pool, config, days).await {
+    match health_coach::build_nutrition_trend_reports(pool, config, days, Some(llm)).await {
         Ok(reports) => {
             for report in reports {
                 bot.send_message(chat_id, report)
@@ -2221,6 +2222,7 @@ async fn handle_status(
     chat_id: ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    llm: &ChotuLlm,
 ) -> Result<(), teloxide::RequestError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -2259,14 +2261,16 @@ async fn handle_status(
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
 
-    // 2. Send Individual Health Metrics for each member
-    for h in healths {
-        // Find member name from config
-        let name = config
+    // 2. Build per-member health reports, then coach tips in parallel
+    let mut pending: Vec<(String, Option<health_coach::NutritionCoachContext>)> = Vec::new();
+
+    for h in &healths {
+        let member = config
             .family
             .members
             .iter()
-            .find(|m| m.id == h.family_member_id)
+            .find(|m| m.id == h.family_member_id);
+        let name = member
             .map(|m| m.name.as_str())
             .unwrap_or(h.family_member_id.as_str());
 
@@ -2300,56 +2304,189 @@ async fn handle_status(
 
         if has_nutrition {
             member_report.push_str("• *Nutrition Summary*:\n");
-            
+
             let mut table = String::new();
             table.push_str("```\n");
             table.push_str("Nutrient       | Amount    \n");
             table.push_str("---------------+-----------\n");
-            table.push_str(&format!("{:<14} | {:<10}\n", "Calories", format!("{} kcal", h.total_calories_ingested)));
-            table.push_str(&format!("{:<14} | {:<10}\n", "Protein", format!("{:.1}g", h.protein_grams)));
-            table.push_str(&format!("{:<14} | {:<10}\n", "Carbs", format!("{:.1}g", h.carbs_grams)));
-            table.push_str(&format!("{:<14} | {:<10}\n", "Fat", format!("{:.1}g", h.fats_grams)));
+            table.push_str(&format!(
+                "{:<14} | {:<10}\n",
+                "Calories",
+                format!("{} kcal", h.total_calories_ingested)
+            ));
+            table.push_str(&format!(
+                "{:<14} | {:<10}\n",
+                "Protein",
+                format!("{:.1}g", h.protein_grams)
+            ));
+            table.push_str(&format!(
+                "{:<14} | {:<10}\n",
+                "Carbs",
+                format!("{:.1}g", h.carbs_grams)
+            ));
+            table.push_str(&format!(
+                "{:<14} | {:<10}\n",
+                "Fat",
+                format!("{:.1}g", h.fats_grams)
+            ));
 
-            // Fats breakdown (only non-zero values)
-            if h.saturated_fat_g > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "  Saturated", format!("{:.1}g", h.saturated_fat_g))); }
-            if h.unsaturated_fat_g > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "  Unsaturated", format!("{:.1}g", h.unsaturated_fat_g))); }
-            if h.trans_fat_g > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "  Trans Fat", format!("{:.1}g", h.trans_fat_g))); }
-            if h.cholesterol_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "  Cholesterol", format!("{:.1}mg", h.cholesterol_mg))); }
-            if h.triglycerides_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "  Triglycerides", format!("{:.1}mg", h.triglycerides_mg))); }
-            if h.omega_3_dha_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "  Omega-3 DHA", format!("{:.1}mg", h.omega_3_dha_mg))); }
+            if h.saturated_fat_g > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "  Saturated",
+                    format!("{:.1}g", h.saturated_fat_g)
+                ));
+            }
+            if h.unsaturated_fat_g > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "  Unsaturated",
+                    format!("{:.1}g", h.unsaturated_fat_g)
+                ));
+            }
+            if h.trans_fat_g > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "  Trans Fat",
+                    format!("{:.1}g", h.trans_fat_g)
+                ));
+            }
+            if h.cholesterol_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "  Cholesterol",
+                    format!("{:.1}mg", h.cholesterol_mg)
+                ));
+            }
+            if h.triglycerides_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "  Triglycerides",
+                    format!("{:.1}mg", h.triglycerides_mg)
+                ));
+            }
+            if h.omega_3_dha_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "  Omega-3 DHA",
+                    format!("{:.1}mg", h.omega_3_dha_mg)
+                ));
+            }
 
-            // Vitamins (only non-zero values)
-            if h.vitamin_a_mcg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Vitamin A", format!("{:.1}mcg", h.vitamin_a_mcg))); }
-            if h.vitamin_b_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Vitamin B", format!("{:.1}mg", h.vitamin_b_mg))); }
-            if h.vitamin_c_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Vitamin C", format!("{:.1}mg", h.vitamin_c_mg))); }
-            if h.vitamin_d_mcg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Vitamin D", format!("{:.1}mcg", h.vitamin_d_mcg))); }
-            if h.vitamin_e_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Vitamin E", format!("{:.1}mg", h.vitamin_e_mg))); }
-            if h.vitamin_k_mcg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Vitamin K", format!("{:.1}mcg", h.vitamin_k_mcg))); }
+            if h.vitamin_a_mcg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Vitamin A",
+                    format!("{:.1}mcg", h.vitamin_a_mcg)
+                ));
+            }
+            if h.vitamin_b_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Vitamin B",
+                    format!("{:.1}mg", h.vitamin_b_mg)
+                ));
+            }
+            if h.vitamin_c_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Vitamin C",
+                    format!("{:.1}mg", h.vitamin_c_mg)
+                ));
+            }
+            if h.vitamin_d_mcg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Vitamin D",
+                    format!("{:.1}mcg", h.vitamin_d_mcg)
+                ));
+            }
+            if h.vitamin_e_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Vitamin E",
+                    format!("{:.1}mg", h.vitamin_e_mg)
+                ));
+            }
+            if h.vitamin_k_mcg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Vitamin K",
+                    format!("{:.1}mcg", h.vitamin_k_mcg)
+                ));
+            }
 
-            // Minerals (only non-zero values)
-            if h.sodium_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Sodium", format!("{:.1}mg", h.sodium_mg))); }
-            if h.potassium_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Potassium", format!("{:.1}mg", h.potassium_mg))); }
-            if h.calcium_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Calcium", format!("{:.1}mg", h.calcium_mg))); }
-            if h.magnesium_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Magnesium", format!("{:.1}mg", h.magnesium_mg))); }
-            if h.zinc_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Zinc", format!("{:.1}mg", h.zinc_mg))); }
-            if h.iron_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Iron", format!("{:.1}mg", h.iron_mg))); }
+            if h.sodium_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Sodium",
+                    format!("{:.1}mg", h.sodium_mg)
+                ));
+            }
+            if h.potassium_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Potassium",
+                    format!("{:.1}mg", h.potassium_mg)
+                ));
+            }
+            if h.calcium_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Calcium",
+                    format!("{:.1}mg", h.calcium_mg)
+                ));
+            }
+            if h.magnesium_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Magnesium",
+                    format!("{:.1}mg", h.magnesium_mg)
+                ));
+            }
+            if h.zinc_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Zinc",
+                    format!("{:.1}mg", h.zinc_mg)
+                ));
+            }
+            if h.iron_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Iron",
+                    format!("{:.1}mg", h.iron_mg)
+                ));
+            }
 
-            // Other (only non-zero values)
-            if h.fiber_g > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Fiber", format!("{:.1}g", h.fiber_g))); }
-            if h.sugar_g > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Sugar", format!("{:.1}g", h.sugar_g))); }
-            if h.caffeine_mg > 0.0 { table.push_str(&format!("{:<14} | {:<10}\n", "Caffeine", format!("{:.1}mg", h.caffeine_mg))); }
+            if h.fiber_g > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Fiber",
+                    format!("{:.1}g", h.fiber_g)
+                ));
+            }
+            if h.sugar_g > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Sugar",
+                    format!("{:.1}g", h.sugar_g)
+                ));
+            }
+            if h.caffeine_mg > 0.0 {
+                table.push_str(&format!(
+                    "{:<14} | {:<10}\n",
+                    "Caffeine",
+                    format!("{:.1}mg", h.caffeine_mg)
+                ));
+            }
 
             table.push_str("```\n");
             member_report.push_str(&table);
         }
 
-        if let Some(goals) = config
-            .family
-            .members
-            .iter()
-            .find(|m| m.id == h.family_member_id)
-            .and_then(|m| m.nutrition_goals.as_ref())
-        {
+        let goals = member.and_then(|m| m.nutrition_goals.as_ref());
+        if let Some(goals) = goals {
             if let Some(progress) = goals.progress_markdown(
                 h.total_calories_ingested,
                 h.protein_grams,
@@ -2365,9 +2502,48 @@ async fn handle_status(
 
         if !has_activity && !has_sleep && !has_energy && !has_nutrition {
             member_report.push_str("• _No health telemetry logged today._\n");
+            pending.push((member_report, None));
+        } else {
+            let ctx = health_coach::NutritionCoachContext::from_day_summary(name, h, goals);
+            pending.push((member_report, Some(ctx)));
         }
+    }
 
-        bot.send_message(chat_id, member_report)
+    // Parallel Ollama tips for members with health data
+    let mut tips: Vec<Option<String>> = vec![None; pending.len()];
+    let mut set: tokio::task::JoinSet<(usize, Option<String>)> = tokio::task::JoinSet::new();
+    for (idx, (_, ctx_opt)) in pending.iter().enumerate() {
+        if let Some(ctx) = ctx_opt.clone() {
+            // Clone the owned client (not the &ChotuLlm) so the task is 'static.
+            let llm = (*llm).clone();
+            set.spawn(async move {
+                let tip = health_coach::generate_nutrition_coach_tip(&llm, &ctx)
+                    .await
+                    .ok();
+                (idx, tip)
+            });
+        }
+    }
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((idx, tip)) => {
+                if let Some(tip) = tip {
+                    tips[idx] = Some(tip);
+                }
+            }
+            Err(e) => eprintln!("Nutrition coach tip task join failed: {:?}", e),
+        }
+    }
+
+    for (i, (mut report, _)) in pending.into_iter().enumerate() {
+        if let Some(tip) = tips[i].take() {
+            report.push_str("\n• *Coach:* ");
+            report.push_str(&tip);
+            if !tip.ends_with('\n') {
+                report.push('\n');
+            }
+        }
+        bot.send_message(chat_id, report)
             .parse_mode(teloxide::types::ParseMode::Markdown)
             .await?;
     }
@@ -3325,14 +3501,14 @@ async fn dispatch_free_text_intent(
     );
 
     match classification.into_user_intent() {
-        UserIntent::Status => handle_status(bot, chat_id, pool, config).await?,
+        UserIntent::Status => handle_status(bot, chat_id, pool, config, llm).await?,
         UserIntent::Brief => handle_brief(bot, chat_id, pool, config).await?,
         UserIntent::Calendar { window } => {
             handle_cal(bot, chat_id, window, config).await?;
         }
         UserIntent::Trends { days } => {
             let args = days.map(|d| d.to_string()).unwrap_or_default();
-            handle_trends(bot, chat_id, args, pool, config).await?;
+            handle_trends(bot, chat_id, args, pool, config, llm).await?;
         }
         UserIntent::Tasks { filter } => {
             handle_tasks(bot, chat_id, filter, pool, config).await?;

@@ -1,12 +1,16 @@
 use anyhow::{Context, Result};
-use chotu_common::{AppConfig, HealthFamilySummary};
+use chotu_common::{AppConfig, ChotuLlm, HealthFamilySummary};
 use sqlx::SqlitePool;
 
+use crate::coaching::{append_coach_tip, NutritionCoachContext};
+
 /// Builds one Telegram Markdown report per family member covering the last `days` of nutrition/activity.
+/// When `llm` is provided, appends a short local-Ollama coach tip for members with logged data.
 pub async fn build_nutrition_trend_reports(
     pool: &SqlitePool,
     config: &AppConfig,
     days: i64,
+    llm: Option<&ChotuLlm>,
 ) -> Result<Vec<String>> {
     let days = days.clamp(2, 90);
     let start_date = (chrono::Local::now() - chrono::Duration::days(days - 1))
@@ -51,6 +55,7 @@ pub async fn build_nutrition_trend_reports(
         let avg_protein: f64 = member_rows.iter().map(|r| r.protein_grams).sum::<f64>() / n;
         let avg_carbs: f64 = member_rows.iter().map(|r| r.carbs_grams).sum::<f64>() / n;
         let avg_fats: f64 = member_rows.iter().map(|r| r.fats_grams).sum::<f64>() / n;
+        let avg_fiber: f64 = member_rows.iter().map(|r| r.fiber_g).sum::<f64>() / n;
         let avg_steps: f64 = member_rows.iter().map(|r| r.step_count as f64).sum::<f64>() / n;
         let sleep_vals: Vec<f64> = member_rows
             .iter()
@@ -69,6 +74,10 @@ pub async fn build_nutrition_trend_reports(
         let protein_series: Vec<f64> = member_rows.iter().map(|r| r.protein_grams).collect();
         let steps_series: Vec<f64> = member_rows.iter().map(|r| r.step_count as f64).collect();
 
+        let cal_trend = trend_arrow(&cal_series);
+        let protein_trend = trend_arrow(&protein_series);
+        let steps_trend = trend_arrow(&steps_series);
+
         let mut msg = format!(
             "📈 *Nutrition Trends: {}* (last {} days, {} logged)\n\n",
             member.name,
@@ -76,24 +85,25 @@ pub async fn build_nutrition_trend_reports(
             member_rows.len()
         );
         msg.push_str("• *Averages:*\n");
-        msg.push_str(&format!("  - Calories: {:.0} kcal/day {}\n", avg_cal, trend_arrow(&cal_series)));
+        msg.push_str(&format!(
+            "  - Calories: {:.0} kcal/day {}\n",
+            avg_cal, cal_trend
+        ));
         msg.push_str(&format!(
             "  - Protein: {:.1}g {}\n",
-            avg_protein,
-            trend_arrow(&protein_series)
+            avg_protein, protein_trend
         ));
         msg.push_str(&format!("  - Carbs: {:.1}g | Fat: {:.1}g\n", avg_carbs, avg_fats));
         msg.push_str(&format!(
             "  - Steps: {:.0}/day {}\n",
-            avg_steps,
-            trend_arrow(&steps_series)
+            avg_steps, steps_trend
         ));
         if let Some(sleep) = avg_sleep {
             msg.push_str(&format!("  - Sleep: {:.1} hours/night\n", sleep));
         }
 
-        if let Some(goals) = member.nutrition_goals.as_ref() {
-            let avg_fiber: f64 = member_rows.iter().map(|r| r.fiber_g).sum::<f64>() / n;
+        let goals = member.nutrition_goals.as_ref();
+        if let Some(goals) = goals {
             if let Some(progress) = goals.progress_markdown(
                 avg_cal.round() as i32,
                 avg_protein,
@@ -125,6 +135,26 @@ pub async fn build_nutrition_trend_reports(
             ));
         }
         msg.push_str("```\n");
+
+        if let Some(llm) = llm {
+            let ctx = NutritionCoachContext::from_trend_averages(
+                &member.name,
+                days,
+                member_rows.len(),
+                avg_cal,
+                avg_protein,
+                avg_carbs,
+                avg_fats,
+                avg_fiber,
+                avg_steps,
+                avg_sleep,
+                goals,
+                cal_trend,
+                protein_trend,
+                steps_trend,
+            );
+            append_coach_tip(llm, &ctx, &mut msg).await;
+        }
 
         reports.push(msg);
     }
