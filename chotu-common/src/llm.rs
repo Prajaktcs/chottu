@@ -3,6 +3,7 @@ use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
 use rig_core::providers::gemini;
 use rig_core::providers::ollama;
+use rig_core::providers::openrouter;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -786,6 +787,78 @@ notes from the email metadata and body.";
 
         self.extract_structured(system_prompt, &Self::format_email_user_prompt(email))
             .await
+    }
+}
+
+// -------------------------------------------------------------
+// OpenRouter Client
+// -------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct OpenRouterClient {
+    client: openrouter::Client,
+}
+
+impl OpenRouterClient {
+    pub fn new(api_key: impl AsRef<str>) -> Result<Self, LlmError> {
+        let client = openrouter::Client::new(api_key.as_ref())
+            .map_err(|e| LlmError::Client(format!("Failed to init OpenRouter client: {e}")))?;
+        Ok(Self { client })
+    }
+
+    /// Build from `OPENROUTER_API_KEY`.
+    pub fn from_env() -> Result<Self, LlmError> {
+        let api_key = std::env::var("OPENROUTER_API_KEY").map_err(|_| {
+            LlmError::Client("OPENROUTER_API_KEY environment variable is not set".into())
+        })?;
+        if api_key.trim().is_empty() {
+            return Err(LlmError::Client(
+                "OPENROUTER_API_KEY environment variable is empty".into(),
+            ));
+        }
+        Self::new(api_key)
+    }
+
+    /// Plain-text generation via OpenRouter for the given model slug.
+    pub async fn generate_prompt(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<String, LlmError> {
+        let agent = self
+            .client
+            .agent(model)
+            .preamble(system_prompt)
+            .build();
+
+        agent
+            .prompt(user_prompt)
+            .await
+            .map_err(|e| LlmError::Client(e.to_string()))
+    }
+
+    /// Structured extraction via Rig's tool-calling extractor.
+    pub async fn generate_structured<T>(
+        &self,
+        model: &str,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<T, LlmError>
+    where
+        T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+    {
+        let extractor = self
+            .client
+            .extractor::<T>(model)
+            .preamble(system_prompt)
+            .retries(2)
+            .build();
+
+        extractor
+            .extract(user_prompt)
+            .await
+            .map_err(|e| LlmError::Client(e.to_string()))
     }
 }
 

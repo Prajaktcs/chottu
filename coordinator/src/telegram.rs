@@ -18,7 +18,7 @@ use chotu_common::{
     start_redirect_listener, AppConfig, CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient,
     InvestmentPhilosophy, MemoryIndex, UserIntent,
 };
-use finance_advisor::{run_stock_research, StockResearcher};
+use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 use teloxide::net::Download;
 
 #[derive(BotCommands, Clone)]
@@ -48,7 +48,7 @@ pub enum Command {
     #[command(description = "show the current chat ID.")]
     Chat,
     #[command(
-        description = "trigger stock hundred-bagger research. Usage: /research [optional_companies]"
+        description = "shared-universe stock research via OpenRouter. Usage: /research [optional_companies]"
     )]
     Research(String),
     #[command(description = "sync today's health metrics from Google Health.")]
@@ -87,8 +87,19 @@ pub async fn start_telegram_bot(
         .or_else(|_| std::env::var("TELOXIDE_TOKEN"))
         .context("Neither TELEGRAM_BOT_TOKEN nor TELOXIDE_TOKEN environment variable is set")?;
     let bot = Bot::new(token);
-    let gemini_client = GeminiClient::new(gemini_key.clone());
-    let researcher = StockResearcher::new(gemini_key);
+    let gemini_client = GeminiClient::new(gemini_key);
+    let researcher = StockResearcher::from_env();
+    if !researcher.is_configured() {
+        eprintln!(
+            "Telegram Bot: OPENROUTER_API_KEY not set — /research and scheduled stock research disabled."
+        );
+    } else {
+        println!(
+            "Telegram Bot: Stock research ready (shared-universe: {} → judge {})",
+            researcher.panel_display_names(),
+            researcher.judge_model()
+        );
+    }
     let conversation_states: StateMap = Arc::new(RwLock::new(HashMap::new()));
 
     // Spawn proactive evening reflection scheduler if TELEGRAM_CHAT_ID is set
@@ -3575,6 +3586,94 @@ async fn dispatch_free_text_intent(
     Ok(())
 }
 
+fn format_research_progress(event: &ResearchProgress, elapsed_secs: u64) -> String {
+    let elapsed = format_elapsed(elapsed_secs);
+    match event {
+        ResearchProgress::Started {
+            total_stages,
+            seeded,
+            panel,
+            judge,
+        } => {
+            if *seeded {
+                format!(
+                    "🔍 Research started ({total_stages} stages, seeded list).\nScorers: {panel} · Judge: {judge}\n⏱ {elapsed} — this usually takes several minutes."
+                )
+            } else {
+                format!(
+                    "🔍 Research started ({total_stages} stages: propose → universe → score → judge).\nPanel: {panel} · Judge: {judge}\n⏱ {elapsed} — expect several minutes (frontier models in parallel)."
+                )
+            }
+        }
+        ResearchProgress::Proposing {
+            stage,
+            total_stages,
+            model_count,
+        } => format!(
+            "📡 [{stage}/{total_stages}] Proposing tickers with {model_count} models…\n⏱ {elapsed}"
+        ),
+        ResearchProgress::UniverseReady {
+            stage,
+            total_stages,
+            tickers,
+            from_propose,
+        } => {
+            let source = if *from_propose {
+                "from panel proposals"
+            } else {
+                "from your /research args"
+            };
+            format!(
+                "✅ [{stage}/{total_stages}] Shared universe ready ({source}): {}\n⏱ {elapsed}",
+                tickers.join(", ")
+            )
+        }
+        ResearchProgress::Scoring {
+            stage,
+            total_stages,
+            universe_size,
+            model_count,
+        } => format!(
+            "📊 [{stage}/{total_stages}] Scoring {universe_size} names with {model_count} models…\n⏱ {elapsed} — often the longest step."
+        ),
+        ResearchProgress::ScoringDone {
+            stage,
+            total_stages,
+            succeeded,
+            failed,
+        } => {
+            if *failed == 0 {
+                format!(
+                    "✅ [{stage}/{total_stages}] Scoring done ({succeeded} scorers).\n⏱ {elapsed}"
+                )
+            } else {
+                format!(
+                    "⚠️ [{stage}/{total_stages}] Scoring done ({succeeded} ok, {failed} failed).\n⏱ {elapsed}"
+                )
+            }
+        }
+        ResearchProgress::Judging {
+            stage,
+            total_stages,
+            judge,
+        } => format!(
+            "🧠 [{stage}/{total_stages}] Judge ({judge}) synthesizing shortlist…\n⏱ {elapsed}"
+        ),
+        ResearchProgress::Saving {
+            stage,
+            total_stages,
+        } => format!("💾 [{stage}/{total_stages}] Saving report to disk…\n⏱ {elapsed}"),
+    }
+}
+
+fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s elapsed")
+    } else {
+        format!("{}m {}s elapsed", secs / 60, secs % 60)
+    }
+}
+
 async fn run_and_log_stock_research(
     bot: &Bot,
     chat_id: ChatId,
@@ -3583,14 +3682,59 @@ async fn run_and_log_stock_research(
     philosophy: Option<&InvestmentPhilosophy>,
     targets: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let default_philosophy = InvestmentPhilosophy::default();
-    let p = philosophy.unwrap_or(&default_philosophy);
-    let status_msg = format!("🔍 Initiating stock research matching our philosophy (focusing on: {})...", p.description);
-    bot.send_message(chat_id, status_msg).await?;
+    if !researcher.is_configured() {
+        bot.send_message(
+            chat_id,
+            "❌ Stock research requires `OPENROUTER_API_KEY` in `.env`. Gemini is not used for `/research`.",
+        )
+        .await?;
+        return Ok(());
+    }
 
-    let report = run_stock_research(pool, researcher, philosophy, targets)
-        .await
-        .map_err(|e| anyhow::anyhow!("Stock research failed: {:?}", e))?;
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ResearchProgress>(16);
+    let progress_bot = bot.clone();
+    let started = std::time::Instant::now();
+    let progress_task = tokio::spawn(async move {
+        while let Some(event) = progress_rx.recv().await {
+            let msg = format_research_progress(&event, started.elapsed().as_secs());
+            if let Err(e) = progress_bot.send_message(chat_id, msg).await {
+                eprintln!("Telegram Bot: failed to send research progress: {:?}", e);
+            }
+        }
+    });
+
+    let report =
+        match run_stock_research_with_progress(pool, researcher, philosophy, targets, Some(progress_tx))
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Drop sender by ending the match arm after progress_tx moved; channel closes when
+                // run_stock_research returns because progress_tx is dropped inside that call.
+                let _ = progress_task.await;
+                bot.send_message(
+                    chat_id,
+                    format!(
+                        "❌ Stock research failed after {}: {}",
+                        format_elapsed(started.elapsed().as_secs()),
+                        e
+                    ),
+                )
+                .await?;
+                return Err(anyhow::anyhow!("Stock research failed: {:?}", e));
+            }
+        };
+
+    let _ = progress_task.await;
+
+    bot.send_message(
+        chat_id,
+        format!(
+            "✅ Research complete in {}. Sending report…",
+            format_elapsed(started.elapsed().as_secs())
+        ),
+    )
+    .await?;
 
     // Split the report into chunks under 4000 characters to respect Telegram's message limit
     let chunks = split_message(&report, 4000);
