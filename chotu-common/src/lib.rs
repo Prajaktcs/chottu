@@ -39,7 +39,7 @@ pub use ledger::{
     LEDGER_ABS_AMOUNT_HARD_MAX, LEDGER_USD_EQUIV_MAX,
 };
 pub use llm::{
-    ChotuLlm, GeminiClient, LlmError, NutritionEstimation, MissingSyncNutrition,
+    ChotuLlm, GeminiClient, OpenRouterClient, LlmError, NutritionEstimation, MissingSyncNutrition,
     LedgerExtraction, ActionItemExtraction, TravelItineraryExtraction, UpcomingBillExtraction,
     PersonalReferenceExtraction, IntentKind, IntentClassification, UserIntent,
     FoodPhotoAnalysis, FoodPhotoKind,
