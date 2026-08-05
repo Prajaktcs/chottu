@@ -456,6 +456,14 @@ impl StockResearcher {
         for (model, result) in outcomes {
             match result {
                 Ok(report) => {
+                    if let Err(reason) = validate_score_report(universe, &report) {
+                        eprintln!(
+                            "Finance Advisor: score model {} rejected: {}",
+                            model, reason
+                        );
+                        failures.push(format!("{}: {}", model, reason));
+                        continue;
+                    }
                     let raw_json = serde_json::to_string_pretty(&report)
                         .unwrap_or_else(|_| format!("{:?}", report));
                     drafts.push(StageDraft {
@@ -700,6 +708,34 @@ pub fn build_shared_universe(
     Ok(universe)
 }
 
+/// Ensure a score report covers exactly the shared universe (no missing / invented tickers).
+pub fn validate_score_report(
+    universe: &[UniverseEntry],
+    report: &ScoreReport,
+) -> Result<(), String> {
+    let expected: HashSet<String> = universe.iter().map(|e| e.ticker.clone()).collect();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for score in &report.scores {
+        let ticker = normalize_ticker(&score.ticker);
+        if ticker.is_empty() {
+            return Err("score entry has empty ticker".into());
+        }
+        if !expected.contains(&ticker) {
+            return Err(format!("invented ticker not in universe: {ticker}"));
+        }
+        if !seen.insert(ticker.clone()) {
+            return Err(format!("duplicate ticker in score report: {ticker}"));
+        }
+    }
+
+    let missing: Vec<_> = expected.difference(&seen).cloned().collect();
+    if !missing.is_empty() {
+        return Err(format!("missing universe tickers: {}", missing.join(", ")));
+    }
+    Ok(())
+}
+
 fn focus_areas_str(philosophy: &InvestmentPhilosophy) -> String {
     philosophy
         .focus_areas
@@ -884,7 +920,12 @@ pub async fn run_stock_research_with_progress(
         }
     }
 
-    let tickers = extract_tickers(&artifacts.synthesis);
+    let tickers = artifacts
+        .universe
+        .iter()
+        .map(|e| e.ticker.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
     let path_str = file_path.to_string_lossy().to_string();
     let log_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
@@ -1234,6 +1275,84 @@ mod tests {
         // Only 12 unique micro names across 3 models x 4 — exactly at cap.
         let universe = build_shared_universe(&proposes).unwrap();
         assert_eq!(universe.len(), 12);
+    }
+
+    #[test]
+    fn test_validate_score_report() {
+        let universe = vec![
+            UniverseEntry {
+                ticker: "AAA".to_string(),
+                company: "A".to_string(),
+                exchange: None,
+                market_cap_band: Some(MarketCapBand::Micro),
+                proposed_by: vec!["m1".into()],
+                one_line_why: None,
+            },
+            UniverseEntry {
+                ticker: "BBB".to_string(),
+                company: "B".to_string(),
+                exchange: None,
+                market_cap_band: Some(MarketCapBand::Small),
+                proposed_by: vec!["m1".into()],
+                one_line_why: None,
+            },
+        ];
+
+        let ok = ScoreReport {
+            scores: vec![
+                ScoredCandidate {
+                    ticker: "aaa".into(),
+                    company: "A".into(),
+                    fit_score: 8,
+                    conviction: Conviction::High,
+                    thesis: "t".into(),
+                    catalysts: vec![],
+                    risks: vec![],
+                    hundred_bagger_plausible: true,
+                    pass_reason: None,
+                },
+                ScoredCandidate {
+                    ticker: "BBB".into(),
+                    company: "B".into(),
+                    fit_score: 3,
+                    conviction: Conviction::Pass,
+                    thesis: "t".into(),
+                    catalysts: vec![],
+                    risks: vec![],
+                    hundred_bagger_plausible: false,
+                    pass_reason: Some("no".into()),
+                },
+            ],
+        };
+        assert!(validate_score_report(&universe, &ok).is_ok());
+
+        let invented = ScoreReport {
+            scores: vec![
+                ok.scores[0].clone(),
+                ok.scores[1].clone(),
+                ScoredCandidate {
+                    ticker: "ZZZ".into(),
+                    company: "Z".into(),
+                    fit_score: 1,
+                    conviction: Conviction::Pass,
+                    thesis: "t".into(),
+                    catalysts: vec![],
+                    risks: vec![],
+                    hundred_bagger_plausible: false,
+                    pass_reason: None,
+                },
+            ],
+        };
+        assert!(validate_score_report(&universe, &invented)
+            .unwrap_err()
+            .contains("invented"));
+
+        let missing = ScoreReport {
+            scores: vec![ok.scores[0].clone()],
+        };
+        assert!(validate_score_report(&universe, &missing)
+            .unwrap_err()
+            .contains("missing"));
     }
 
     #[test]

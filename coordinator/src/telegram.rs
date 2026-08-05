@@ -3421,15 +3421,11 @@ fn format_research_progress(event: &ResearchProgress, elapsed_secs: u64) -> Stri
         } => {
             if *seeded {
                 format!(
-                    "🔍 Research started ({total_stages} stages, seeded list).\n\
-                     Scorers: {panel} · Judge: {judge}\n\
-                     ⏱ {elapsed} — this usually takes several minutes."
+                    "🔍 Research started ({total_stages} stages, seeded list).\nScorers: {panel} · Judge: {judge}\n⏱ {elapsed} — this usually takes several minutes."
                 )
             } else {
                 format!(
-                    "🔍 Research started ({total_stages} stages: propose → universe → score → judge).\n\
-                     Panel: {panel} · Judge: {judge}\n\
-                     ⏱ {elapsed} — expect several minutes (frontier models in parallel)."
+                    "🔍 Research started ({total_stages} stages: propose → universe → score → judge).\nPanel: {panel} · Judge: {judge}\n⏱ {elapsed} — expect several minutes (frontier models in parallel)."
                 )
             }
         }
@@ -3462,8 +3458,7 @@ fn format_research_progress(event: &ResearchProgress, elapsed_secs: u64) -> Stri
             universe_size,
             model_count,
         } => format!(
-            "📊 [{stage}/{total_stages}] Scoring {universe_size} names with {model_count} models…\n\
-             ⏱ {elapsed} — often the longest step."
+            "📊 [{stage}/{total_stages}] Scoring {universe_size} names with {model_count} models…\n⏱ {elapsed} — often the longest step."
         ),
         ResearchProgress::ScoringDone {
             stage,
