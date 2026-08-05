@@ -2511,10 +2511,11 @@ async fn handle_status(
 
     // Parallel Ollama tips for members with health data
     let mut tips: Vec<Option<String>> = vec![None; pending.len()];
-    let mut set = tokio::task::JoinSet::new();
+    let mut set: tokio::task::JoinSet<(usize, Option<String>)> = tokio::task::JoinSet::new();
     for (idx, (_, ctx_opt)) in pending.iter().enumerate() {
         if let Some(ctx) = ctx_opt.clone() {
-            let llm = llm.clone();
+            // Clone the owned client (not the &ChotuLlm) so the task is 'static.
+            let llm = (*llm).clone();
             set.spawn(async move {
                 let tip = health_coach::generate_nutrition_coach_tip(&llm, &ctx)
                     .await

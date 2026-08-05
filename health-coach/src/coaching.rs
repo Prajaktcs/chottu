@@ -229,9 +229,11 @@ fn strip_think_blocks(text: &str) -> String {
     let mut remaining = text;
     while let Some(start_idx) = remaining.find("<think>") {
         output.push_str(&remaining[..start_idx]);
-        if let Some(end_idx) = remaining.find("</think>") {
-            remaining = &remaining[end_idx + 8..];
+        let after_open = &remaining[start_idx + "<think>".len()..];
+        if let Some(end_idx) = after_open.find("</think>") {
+            remaining = &after_open[end_idx + "</think>".len()..];
         } else {
+            // Unclosed think tag — drop the rest.
             remaining = "";
             break;
         }
@@ -352,6 +354,15 @@ mod tests {
         assert_eq!(
             strip_think_blocks("<think>secret</think>Eat more protein today."),
             "Eat more protein today."
+        );
+    }
+
+    #[test]
+    fn strip_think_blocks_ignores_stray_close_before_open() {
+        // Stray </think> before an open tag must not be used as the block closer.
+        assert_eq!(
+            strip_think_blocks("Keep this.</think><think>drop</think> Tip stays."),
+            "Keep this.</think> Tip stays."
         );
     }
 }
