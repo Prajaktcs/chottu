@@ -3617,14 +3617,24 @@ fn format_research_progress(event: &ResearchProgress, elapsed_secs: u64) -> Stri
             total_stages,
             tickers,
             from_propose,
+            finnhub_filtered,
+            dropped_count,
+            lookup_misses,
         } => {
             let source = if *from_propose {
                 "from panel proposals"
             } else {
                 "from your /research args"
             };
+            let finnhub_note = if *finnhub_filtered {
+                format!(
+                    " · Finnhub verified (dropped {dropped_count}, misses {lookup_misses})"
+                )
+            } else {
+                " · Finnhub off (model-estimated caps)".to_string()
+            };
             format!(
-                "✅ [{stage}/{total_stages}] Shared universe ready ({source}): {}\n⏱ {elapsed}",
+                "✅ [{stage}/{total_stages}] Shared universe ready ({source}){finnhub_note}: {}\n⏱ {elapsed}",
                 tickers.join(", ")
             )
         }

@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use anyhow::Context;
 use chotu_common::{
-    AppConfig, FinancialLedgerEntry, InvestmentPhilosophy, OpenRouterClient, TargetAllocation,
+    AppConfig, CapBand, FinancialLedgerEntry, FinnhubClient, InvestmentPhilosophy,
+    OpenRouterClient, TargetAllocation,
 };
 use futures::future::join_all;
 use schemars::JsonSchema;
@@ -80,8 +81,17 @@ pub struct UniverseEntry {
     pub company: String,
     pub exchange: Option<String>,
     pub market_cap_band: Option<MarketCapBand>,
+    /// Finnhub market cap in USD millions when enriched.
+    pub market_cap_m: Option<f64>,
     pub proposed_by: Vec<String>,
     pub one_line_why: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DroppedUniverseEntry {
+    pub ticker: String,
+    pub company: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +100,8 @@ pub struct ResearchRunArtifacts {
     pub universe: Vec<UniverseEntry>,
     pub propose_drafts: Vec<StageDraft>,
     pub score_drafts: Vec<StageDraft>,
+    pub dropped: Vec<DroppedUniverseEntry>,
+    pub finnhub_used: bool,
 }
 
 /// Stage updates for UX (Telegram, logs, etc.).
@@ -113,6 +125,9 @@ pub enum ResearchProgress {
         total_stages: u32,
         tickers: Vec<String>,
         from_propose: bool,
+        finnhub_filtered: bool,
+        dropped_count: usize,
+        lookup_misses: usize,
     },
     Scoring {
         stage: u32,
@@ -223,6 +238,12 @@ impl StockResearcher {
         let seeded = matches!(targets, Some(t) if !t.trim().is_empty());
         let total_stages: u32 = if seeded { 3 } else { 4 };
         let progress = progress.as_ref();
+        let finnhub = FinnhubClient::from_env().ok();
+        if finnhub.is_none() {
+            eprintln!(
+                "Finance Advisor: FINNHUB_API_KEY not set — using model-estimated market-cap bands."
+            );
+        }
 
         emit_progress(
             progress,
@@ -235,19 +256,9 @@ impl StockResearcher {
         )
         .await;
 
-        let (universe, propose_drafts, mut stage) = if seeded {
+        let (mut universe, propose_drafts, mut stage) = if seeded {
             let t = targets.unwrap();
             let universe = universe_from_targets(t)?;
-            emit_progress(
-                progress,
-                ResearchProgress::UniverseReady {
-                    stage: 1,
-                    total_stages,
-                    tickers: universe.iter().map(|e| e.ticker.clone()).collect(),
-                    from_propose: false,
-                },
-            )
-            .await;
             (universe, Vec::new(), 1u32)
         } else {
             emit_progress(
@@ -260,23 +271,39 @@ impl StockResearcher {
             )
             .await;
             let (drafts, lists) = self.run_propose_stage(client, p).await?;
-            let universe = build_shared_universe(&lists)?;
-            emit_progress(
-                progress,
-                ResearchProgress::UniverseReady {
-                    stage: 2,
-                    total_stages,
-                    tickers: universe.iter().map(|e| e.ticker.clone()).collect(),
-                    from_propose: true,
-                },
-            )
-            .await;
+            // When Finnhub is available it is the authority; otherwise keep model Micro/Small gate.
+            let universe = build_shared_universe(&lists, finnhub.is_none())?;
             (universe, drafts, 2u32)
         };
 
+        let enrich = if let Some(ref fh) = finnhub {
+            enrich_universe_with_finnhub(&mut universe, fh, !seeded).await?
+        } else {
+            EnrichResult::default()
+        };
+
+        emit_progress(
+            progress,
+            ResearchProgress::UniverseReady {
+                stage,
+                total_stages,
+                tickers: universe.iter().map(|e| e.ticker.clone()).collect(),
+                from_propose: !seeded,
+                finnhub_filtered: finnhub.is_some(),
+                dropped_count: enrich.dropped.len(),
+                lookup_misses: enrich.lookup_misses,
+            },
+        )
+        .await;
+
         if universe.is_empty() {
             return Err(anyhow::anyhow!(
-                "Shared universe is empty after filtering; cannot score."
+                "Shared universe is empty after filtering; cannot score. {}",
+                if finnhub.is_some() {
+                    "All proposals failed the Finnhub micro/small gate or profile lookup."
+                } else {
+                    "Check model proposals / market-cap bands."
+                }
             ));
         }
 
@@ -361,6 +388,8 @@ impl StockResearcher {
             universe,
             propose_drafts,
             score_drafts,
+            dropped: enrich.dropped,
+            finnhub_used: finnhub.is_some(),
         })
     }
 
@@ -608,6 +637,7 @@ pub fn universe_from_targets(targets: &str) -> Result<Vec<UniverseEntry>, anyhow
             company: label.to_string(),
             exchange: None,
             market_cap_band: None,
+            market_cap_m: None,
             proposed_by: vec!["user".to_string()],
             one_line_why: Some("Seeded via /research arguments".to_string()),
         });
@@ -625,9 +655,11 @@ pub fn universe_from_targets(targets: &str) -> Result<Vec<UniverseEntry>, anyhow
     Ok(entries)
 }
 
-/// Union proposes with Mid/Large drop, dedupe, round-robin cap.
+/// Union proposes with optional Mid/Large drop, dedupe, round-robin cap.
+/// When `apply_model_band_filter` is false (Finnhub will filter), Mid/Large model guesses are kept.
 pub fn build_shared_universe(
     proposes: &[(String, ProposeList)],
+    apply_model_band_filter: bool,
 ) -> Result<Vec<UniverseEntry>, anyhow::Error> {
     // Per-proposer queues of eligible candidates (already truncated to max 4 upstream).
     let mut queues: Vec<(String, Vec<ProposeCandidate>)> = proposes
@@ -637,10 +669,11 @@ pub fn build_shared_universe(
                 .proposals
                 .iter()
                 .filter(|c| {
-                    matches!(
-                        c.market_cap_band,
-                        MarketCapBand::Micro | MarketCapBand::Small
-                    )
+                    !apply_model_band_filter
+                        || matches!(
+                            c.market_cap_band,
+                            MarketCapBand::Micro | MarketCapBand::Small
+                        )
                 })
                 .cloned()
                 .collect();
@@ -682,6 +715,7 @@ pub fn build_shared_universe(
                             company: cand.company,
                             exchange: Some(cand.exchange),
                             market_cap_band: Some(cand.market_cap_band),
+                            market_cap_m: None,
                             proposed_by: vec![model.clone()],
                             one_line_why: Some(cand.one_line_why),
                         },
@@ -702,10 +736,123 @@ pub fn build_shared_universe(
 
     if universe.is_empty() {
         return Err(anyhow::anyhow!(
-            "Shared universe empty after dropping Mid/Large and deduping proposals."
+            "Shared universe empty after deduping proposals{}.",
+            if apply_model_band_filter {
+                " (model Mid/Large dropped)"
+            } else {
+                ""
+            }
         ));
     }
     Ok(universe)
+}
+
+#[derive(Debug, Default)]
+pub struct EnrichResult {
+    pub dropped: Vec<DroppedUniverseEntry>,
+    pub lookup_misses: usize,
+}
+
+fn cap_band_to_market(band: CapBand) -> MarketCapBand {
+    match band {
+        CapBand::Micro => MarketCapBand::Micro,
+        CapBand::Small => MarketCapBand::Small,
+        CapBand::Mid => MarketCapBand::Mid,
+        CapBand::Large => MarketCapBand::Large,
+    }
+}
+
+/// Enrich universe via Finnhub profile2. Discovery drops Mid/Large/unresolved; seeded keeps all.
+pub async fn enrich_universe_with_finnhub(
+    universe: &mut Vec<UniverseEntry>,
+    client: &FinnhubClient,
+    discovery: bool,
+) -> Result<EnrichResult, anyhow::Error> {
+    let tickers: Vec<String> = universe.iter().map(|e| e.ticker.clone()).collect();
+    let lookups = client.lookup_profiles(&tickers).await;
+    let mut by_ticker: HashMap<String, chotu_common::CompanyProfile> = HashMap::new();
+    let mut lookup_misses = 0usize;
+
+    for (ticker, result) in lookups {
+        match result {
+            Ok(profile) => {
+                by_ticker.insert(normalize_ticker(&ticker), profile);
+            }
+            Err(e) => {
+                eprintln!("Finance Advisor: Finnhub lookup failed for {ticker}: {e}");
+                lookup_misses += 1;
+            }
+        }
+    }
+
+    let mut result = apply_finnhub_profiles(universe, &by_ticker, discovery);
+    result.lookup_misses = lookup_misses;
+    Ok(result)
+}
+
+/// Pure enrich/filter step (unit-testable without HTTP).
+pub fn apply_finnhub_profiles(
+    universe: &mut Vec<UniverseEntry>,
+    by_ticker: &HashMap<String, chotu_common::CompanyProfile>,
+    discovery: bool,
+) -> EnrichResult {
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+
+    for entry in universe.drain(..) {
+        let key = normalize_ticker(&entry.ticker);
+        match by_ticker.get(&key) {
+            Some(profile) => {
+                let band = cap_band_to_market(profile.cap_band);
+                let mut enriched = entry;
+                enriched.company = profile.name.clone();
+                enriched.exchange = Some(profile.exchange.clone());
+                enriched.market_cap_band = Some(band);
+                enriched.market_cap_m = Some(profile.market_cap_m);
+                if !profile.symbol.is_empty() {
+                    enriched.ticker = normalize_ticker(&profile.symbol);
+                }
+
+                if discovery && !matches!(band, MarketCapBand::Micro | MarketCapBand::Small) {
+                    dropped.push(DroppedUniverseEntry {
+                        ticker: enriched.ticker,
+                        company: enriched.company,
+                        reason: format!(
+                            "Finnhub band {:?} (cap ${:.1}M) outside micro/small mandate",
+                            band, profile.market_cap_m
+                        ),
+                    });
+                } else {
+                    kept.push(enriched);
+                }
+            }
+            None => {
+                if discovery {
+                    dropped.push(DroppedUniverseEntry {
+                        ticker: entry.ticker.clone(),
+                        company: entry.company.clone(),
+                        reason: "Finnhub profile not found".to_string(),
+                    });
+                } else {
+                    kept.push(entry);
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+    for entry in kept {
+        if seen.insert(entry.ticker.clone()) {
+            deduped.push(entry);
+        }
+    }
+    *universe = deduped;
+
+    EnrichResult {
+        dropped,
+        lookup_misses: 0,
+    }
 }
 
 /// Ensure a score report covers exactly the shared universe (no missing / invented tickers).
@@ -779,12 +926,17 @@ fn build_score_prompts(
 
     let mut user_prompt = String::from("Score this shared universe (same list for every analyst):\n\n");
     for entry in universe {
+        let cap = entry
+            .market_cap_m
+            .map(|m| format!("${m:.1}M"))
+            .unwrap_or_else(|| "unknown".into());
         user_prompt.push_str(&format!(
-            "- ticker={} company={} exchange={} band={:?} note={}\n",
+            "- ticker={} company={} exchange={} band={:?} market_cap={} note={}\n",
             entry.ticker,
             entry.company,
             entry.exchange.as_deref().unwrap_or("unknown"),
             entry.market_cap_band,
+            cap,
             entry.one_line_why.as_deref().unwrap_or("-")
         ));
     }
@@ -794,19 +946,42 @@ fn build_score_prompts(
     (system_prompt, user_prompt)
 }
 
-fn format_universe_markdown(universe: &[UniverseEntry]) -> String {
+fn format_universe_markdown(
+    universe: &[UniverseEntry],
+    dropped: &[DroppedUniverseEntry],
+    finnhub_used: bool,
+) -> String {
     let mut out = String::from("# Shared research universe\n\n");
+    out.push_str(&format!(
+        "_Finnhub enrichment: {}_\n\n",
+        if finnhub_used { "yes" } else { "no (model bands only)" }
+    ));
     for (i, entry) in universe.iter().enumerate() {
+        let cap = entry
+            .market_cap_m
+            .map(|m| format!("${m:.1}M"))
+            .unwrap_or_else(|| "-".into());
         out.push_str(&format!(
-            "{}. **{}** — {}\n   - proposed_by: {}\n   - band: {:?}\n   - exchange: {}\n   - why: {}\n\n",
+            "{}. **{}** — {}\n   - proposed_by: {}\n   - band: {:?}\n   - market_cap: {}\n   - exchange: {}\n   - why: {}\n\n",
             i + 1,
             entry.ticker,
             entry.company,
             entry.proposed_by.join(", "),
             entry.market_cap_band,
+            cap,
             entry.exchange.as_deref().unwrap_or("-"),
             entry.one_line_why.as_deref().unwrap_or("-")
         ));
+    }
+    if !dropped.is_empty() {
+        out.push_str("## Dropped by Finnhub filter\n\n");
+        for d in dropped {
+            out.push_str(&format!(
+                "- **{}** ({}) — {}\n",
+                d.ticker, d.company, d.reason
+            ));
+        }
+        out.push('\n');
     }
     out
 }
@@ -874,7 +1049,15 @@ pub async fn run_stock_research_with_progress(
 
     let universe_path = target_dir.join(format!("{}-stocks-universe.md", date_str));
     if let Err(e) =
-        tokio::fs::write(&universe_path, format_universe_markdown(&artifacts.universe)).await
+        tokio::fs::write(
+            &universe_path,
+            format_universe_markdown(
+                &artifacts.universe,
+                &artifacts.dropped,
+                artifacts.finnhub_used,
+            ),
+        )
+        .await
     {
         eprintln!(
             "Finance Advisor: failed to write universe file {:?}: {:?}",
@@ -1235,7 +1418,7 @@ mod tests {
             ),
         ];
 
-        let universe = build_shared_universe(&proposes).unwrap();
+        let universe = build_shared_universe(&proposes, true).unwrap();
         let tickers: Vec<_> = universe.iter().map(|e| e.ticker.as_str()).collect();
         // Round-robin: A, B, C, then A, B, ...
         assert_eq!(tickers, vec!["AAA", "DDD", "FFF", "BBB", "CCC"]);
@@ -1244,6 +1427,115 @@ mod tests {
         let aaa = universe.iter().find(|e| e.ticker == "AAA").unwrap();
         assert!(aaa.proposed_by.contains(&"model-a".to_string()));
         assert!(aaa.proposed_by.contains(&"model-b".to_string()));
+    }
+
+    #[test]
+    fn test_build_shared_universe_keeps_mid_without_model_filter() {
+        let proposes = vec![(
+            "m1".to_string(),
+            ProposeList {
+                proposals: vec![
+                    cand("MIC", MarketCapBand::Micro),
+                    cand("MID", MarketCapBand::Mid),
+                ],
+            },
+        )];
+        let universe = build_shared_universe(&proposes, false).unwrap();
+        let tickers: Vec<_> = universe.iter().map(|e| e.ticker.as_str()).collect();
+        assert!(tickers.contains(&"MIC"));
+        assert!(tickers.contains(&"MID"));
+    }
+
+    #[test]
+    fn test_apply_finnhub_profiles_discovery_vs_seeded() {
+        use chotu_common::{CapBand, CompanyProfile};
+
+        let mut universe = vec![
+            UniverseEntry {
+                ticker: "AAA".into(),
+                company: "A".into(),
+                exchange: None,
+                market_cap_band: Some(MarketCapBand::Micro),
+                market_cap_m: None,
+                proposed_by: vec!["m1".into()],
+                one_line_why: None,
+            },
+            UniverseEntry {
+                ticker: "BIG".into(),
+                company: "BigCo".into(),
+                exchange: None,
+                market_cap_band: Some(MarketCapBand::Micro),
+                market_cap_m: None,
+                proposed_by: vec!["m1".into()],
+                one_line_why: None,
+            },
+            UniverseEntry {
+                ticker: "MISS".into(),
+                company: "Missing".into(),
+                exchange: None,
+                market_cap_band: None,
+                market_cap_m: None,
+                proposed_by: vec!["m1".into()],
+                one_line_why: None,
+            },
+        ];
+
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "AAA".into(),
+            CompanyProfile {
+                symbol: "AAA".into(),
+                name: "Alpha Micro".into(),
+                exchange: "NASDAQ".into(),
+                market_cap_m: 120.0,
+                finnhub_industry: None,
+                cap_band: CapBand::Micro,
+            },
+        );
+        profiles.insert(
+            "BIG".into(),
+            CompanyProfile {
+                symbol: "BIG".into(),
+                name: "Big Corp".into(),
+                exchange: "NYSE".into(),
+                market_cap_m: 50_000.0,
+                finnhub_industry: None,
+                cap_band: CapBand::Large,
+            },
+        );
+
+        let discovery = apply_finnhub_profiles(&mut universe, &profiles, true);
+        assert_eq!(universe.len(), 1);
+        assert_eq!(universe[0].ticker, "AAA");
+        assert_eq!(universe[0].company, "Alpha Micro");
+        assert_eq!(universe[0].market_cap_m, Some(120.0));
+        assert_eq!(discovery.dropped.len(), 2);
+
+        let mut seeded = vec![
+            UniverseEntry {
+                ticker: "BIG".into(),
+                company: "BigCo".into(),
+                exchange: None,
+                market_cap_band: None,
+                market_cap_m: None,
+                proposed_by: vec!["user".into()],
+                one_line_why: None,
+            },
+            UniverseEntry {
+                ticker: "MISS".into(),
+                company: "Missing".into(),
+                exchange: None,
+                market_cap_band: None,
+                market_cap_m: None,
+                proposed_by: vec!["user".into()],
+                one_line_why: None,
+            },
+        ];
+        let seeded_result = apply_finnhub_profiles(&mut seeded, &profiles, false);
+        assert_eq!(seeded.len(), 2);
+        assert!(seeded.iter().any(|e| e.ticker == "BIG" && e.market_cap_m == Some(50_000.0)));
+        assert!(seeded.iter().any(|e| e.ticker == "MISS"));
+        assert!(seeded_result.dropped.is_empty());
     }
 
     #[test]
@@ -1273,7 +1565,7 @@ mod tests {
             ),
         ];
         // Only 12 unique micro names across 3 models x 4 — exactly at cap.
-        let universe = build_shared_universe(&proposes).unwrap();
+        let universe = build_shared_universe(&proposes, true).unwrap();
         assert_eq!(universe.len(), 12);
     }
 
@@ -1285,6 +1577,7 @@ mod tests {
                 company: "A".to_string(),
                 exchange: None,
                 market_cap_band: Some(MarketCapBand::Micro),
+                market_cap_m: None,
                 proposed_by: vec!["m1".into()],
                 one_line_why: None,
             },
@@ -1293,6 +1586,7 @@ mod tests {
                 company: "B".to_string(),
                 exchange: None,
                 market_cap_band: Some(MarketCapBand::Small),
+                market_cap_m: None,
                 proposed_by: vec!["m1".into()],
                 one_line_why: None,
             },
