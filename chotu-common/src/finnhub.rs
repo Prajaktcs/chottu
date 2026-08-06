@@ -48,7 +48,7 @@ pub struct CompanyProfile {
     /// Symbol that resolved (may include exchange suffix).
     pub symbol: String,
     pub name: String,
-    pub exchange: String,
+    pub exchange: Option<String>,
     /// Market capitalization in USD millions.
     pub market_cap_m: f64,
     pub finnhub_industry: Option<String>,
@@ -61,6 +61,8 @@ pub enum FinnhubError {
     MissingApiKey,
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("Finnhub HTTP {status} for {symbol}")]
+    HttpStatus { symbol: String, status: u16 },
     #[error("invalid ticker symbol: {0}")]
     InvalidSymbol(String),
     #[error("no Finnhub profile for {0}")]
@@ -151,8 +153,15 @@ impl FinnhubClient {
             .send()
             .await?;
 
-        if !resp.status().is_success() {
+        let status = resp.status();
+        if status.as_u16() == 404 {
             return Err(FinnhubError::NotFound(symbol.to_string()));
+        }
+        if !status.is_success() {
+            return Err(FinnhubError::HttpStatus {
+                symbol: symbol.to_string(),
+                status: status.as_u16(),
+            });
         }
 
         let body: Profile2Response = resp
@@ -172,7 +181,10 @@ impl FinnhubClient {
         Ok(CompanyProfile {
             symbol: resolved,
             name,
-            exchange: body.exchange.unwrap_or_default(),
+            exchange: body
+                .exchange
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             market_cap_m,
             finnhub_industry: body.finnhub_industry.filter(|s| !s.is_empty()),
             cap_band: cap_band_from_millions(market_cap_m),

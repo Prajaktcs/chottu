@@ -806,7 +806,7 @@ pub fn apply_finnhub_profiles(
                 let band = cap_band_to_market(profile.cap_band);
                 let mut enriched = entry;
                 enriched.company = profile.name.clone();
-                enriched.exchange = Some(profile.exchange.clone());
+                enriched.exchange = profile.exchange.clone();
                 enriched.market_cap_band = Some(band);
                 enriched.market_cap_m = Some(profile.market_cap_m);
                 if !profile.symbol.is_empty() {
@@ -1486,7 +1486,7 @@ mod tests {
             CompanyProfile {
                 symbol: "AAA".into(),
                 name: "Alpha Micro".into(),
-                exchange: "NASDAQ".into(),
+                exchange: Some("NASDAQ".into()),
                 market_cap_m: 120.0,
                 finnhub_industry: None,
                 cap_band: CapBand::Micro,
@@ -1497,7 +1497,7 @@ mod tests {
             CompanyProfile {
                 symbol: "BIG".into(),
                 name: "Big Corp".into(),
-                exchange: "NYSE".into(),
+                exchange: Some("NYSE".into()),
                 market_cap_m: 50_000.0,
                 finnhub_industry: None,
                 cap_band: CapBand::Large,
