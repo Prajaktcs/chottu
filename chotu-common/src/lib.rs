@@ -10,6 +10,7 @@ pub mod models;
 pub mod oauth;
 pub mod calendar;
 pub mod open_food_facts;
+pub mod finnhub;
 pub mod quotes;
 pub mod spend_budget;
 
@@ -45,6 +46,10 @@ pub use llm::{
     FoodPhotoAnalysis, FoodPhotoKind,
 };
 pub use open_food_facts::{lookup_barcode, OpenFoodFactsProduct};
+pub use finnhub::{
+    cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,
+    FinnhubError,
+};
 pub use quotes::{fetch_stock_quotes, StockQuote, QuoteError};
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, spawn_background_reindex, MemoryHit,

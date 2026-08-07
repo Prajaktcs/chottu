@@ -65,7 +65,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - `/monthly` spend summaries; `/networth` from cash + holdings (FX-aware when rates are available).
 - Category **spend budgets** (`spend_budgets` in `config.yaml` or `/budget set`): progress via `/budget`, appended on `/monthly`, and mid-month Telegram pushes at 80% / 100%.
 - Portfolio positions sync from dropped statements; optional target allocation buckets in `config.yaml`.
-- `/research` — OpenRouter shared-universe research: multi-propose → shared list → score (GPT-5.6 Sol + Opus 5 + Kimi K3) → Kimi K3 judge. Optional company args seed the universe and skip propose.
+- `/research` — OpenRouter shared-universe research: multi-propose → Finnhub market-cap filter → score (GPT-5.6 Sol + Opus 5 + Kimi K3) → Kimi K3 judge. Optional company args seed the universe and skip propose.
 
 ### Natural-language Telegram UX
 - Slash commands for everything above, **plus** free-text intent routing (“what's today”, “remind me to call the dentist tomorrow 3pm”, “morning brief”, “open tasks”, “net worth”, “trends last 14 days”, “sync health”, …).
@@ -104,7 +104,7 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 - Morning brief + evening reflection journals
 - Local RAG memory over journals, digests, references, tasks
 - Financial ledger, monthly summary, category budgets + spend alerts, net worth from portfolio statements
-- Configurable stock research (OpenRouter: propose → shared universe → score → judge)
+- Configurable stock research (OpenRouter + Finnhub: propose → cap filter → score → judge)
 - Document drop folder for batch CSV/PDF imports
 - Docker image for Linux / cloud deployment
 
@@ -140,6 +140,7 @@ TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_CHAT_ID=your_personal_chat_id
 GEMINI_API_KEY=your_gemini_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
+FINNHUB_API_KEY=your_finnhub_api_key
 
 # Optional: override stock-research models (defaults shown)
 # RESEARCH_PANEL_MODELS=openai/gpt-5.6-sol,anthropic/claude-opus-5,moonshotai/kimi-k3
@@ -154,7 +155,7 @@ CHOTU_OAUTH_CLIENT_SECRET=your_google_gmail_client_secret
 CHOTU_EMAIL_USER=your_email@gmail.com
 ```
 
-`GEMINI_API_KEY` is used for multimodal work (food photos, document ingest, nutrition). `OPENROUTER_API_KEY` powers `/research` (propose → shared universe → score → judge). They are not interchangeable.
+`GEMINI_API_KEY` is used for multimodal work (food photos, document ingest, nutrition). `OPENROUTER_API_KEY` powers `/research` LLMs (propose → score → judge). `FINNHUB_API_KEY` verifies market caps on the shared universe (optional; without it, model-estimated bands are used).
 
 Also edit `config.yaml` (from `config.yaml.example`) for family members, nutrition goals, currency, and investment philosophy.
 
@@ -209,7 +210,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
 | `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/tasks add [member] <title> [due <when>]` (e.g. `due tomorrow 15:00`). Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping Telegram once when due (`TELEGRAM_CHAT_ID`). Reply `unactionable` to an email reminder to ignore similar mail. |
 | `/reflect` | Manually trigger the evening reflection loop. |
-| `/research [companies]` | Shared-universe stock research via OpenRouter (propose → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
+| `/research [companies]` | Shared-universe stock research via OpenRouter + Finnhub (propose → cap filter → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
 | `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
 | `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% Telegram alerts when `TELEGRAM_CHAT_ID` is set. |
