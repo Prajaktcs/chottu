@@ -11,11 +11,13 @@ use tokio::sync::RwLock;
 
 use chotu_common::{
     answer_memory_query, clear_budget_override, compose_calendar_agenda, compute_budget_progress,
-    current_budget_month, display_category, exchange_google_code, fetch_exchange_rates,
-    fetch_stock_quotes, format_budget_progress_markdown, lookup_barcode, mark_budget_alert_sent,
+    config_path, current_budget_month, default_member_id, display_category, exchange_google_code,
+    fetch_exchange_rates, fetch_stock_quotes, format_budget_progress_markdown, has_telegram_delivery,
+    is_telegram_chat_allowed, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
     parse_due_phrase, pending_budget_alerts, save_calendar_refresh_token, save_google_refresh_token,
-    save_health_refresh_token, set_budget_override, spawn_background_reindex, split_task_add_args,
-    start_redirect_listener, AppConfig, CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient,
+    save_health_refresh_token, set_budget_override, set_member_telegram_chat_id,
+    spawn_background_reindex, split_task_add_args, start_redirect_listener, telegram_chat_for_member,
+    telegram_delivery_targets, AppConfig, CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient,
     InvestmentPhilosophy, MemoryIndex, UserIntent,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
@@ -47,6 +49,10 @@ pub enum Command {
     Reflect,
     #[command(description = "show the current chat ID.")]
     Chat,
+    #[command(description = "link this DM to a family member. Usage: /link <member_id>")]
+    Link(String),
+    #[command(description = "show which family member this chat is linked to.")]
+    Whoami,
     #[command(
         description = "shared-universe stock research via OpenRouter. Usage: /research [optional_companies]"
     )]
@@ -76,6 +82,47 @@ pub enum ConversationState {
 }
 
 type StateMap = Arc<RwLock<HashMap<ChatId, ConversationState>>>;
+type SharedConfig = Arc<RwLock<AppConfig>>;
+
+/// Send a household message to every linked member DM (+ optional TELEGRAM_CHAT_ID fallback).
+async fn send_household(bot: &Bot, config: &AppConfig, text: impl Into<String>) {
+    let text = text.into();
+    let targets = telegram_delivery_targets(config);
+    if targets.is_empty() {
+        eprintln!("Telegram Bot: no delivery targets (link a member or set TELEGRAM_CHAT_ID)");
+        return;
+    }
+    for cid in targets {
+        if let Err(e) = bot
+            .send_message(ChatId(cid), text.clone())
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await
+        {
+            eprintln!(
+                "Telegram Bot: household send failed for chat {}: {:?}",
+                cid, e
+            );
+        }
+    }
+}
+
+async fn reject_unlinked_chat(bot: &Bot, chat_id: ChatId) -> Result<(), teloxide::RequestError> {
+    bot.send_message(
+        chat_id,
+        format!(
+            "This chat is not linked to a family member.\n\
+             DM the bot and run `/link <member_id>` (use `/chat` to see this chat id: `{}`).",
+            chat_id
+        ),
+    )
+    .parse_mode(teloxide::types::ParseMode::Markdown)
+    .await?;
+    Ok(())
+}
+
+fn command_bypasses_allowlist(cmd: &Command) -> bool {
+    matches!(cmd, Command::Chat | Command::Link(_))
+}
 
 pub async fn start_telegram_bot(
     pool: SqlitePool,
@@ -101,104 +148,123 @@ pub async fn start_telegram_bot(
         );
     }
     let conversation_states: StateMap = Arc::new(RwLock::new(HashMap::new()));
+    let shared_config: SharedConfig = Arc::new(RwLock::new(config));
 
-    // Spawn proactive evening reflection scheduler if TELEGRAM_CHAT_ID is set
+    // Spawn proactive evening reflection scheduler when any delivery target exists.
     let sched_bot = bot.clone();
     let sched_pool = pool.clone();
     let sched_llm = llm.clone();
     let sched_states = conversation_states.clone();
-    let sched_config = config.clone();
+    let sched_config = shared_config.clone();
     tokio::spawn(async move {
         use chrono::Timelike;
-        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
-            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
-                let chat_id = ChatId(chat_id_num);
-                println!(
-                    "Telegram Bot: Proactive scheduler enabled for ChatId {:?}",
-                    chat_id
-                );
-                let mut last_sent_date = String::new();
-                loop {
-                    let now = chrono::Local::now();
-                    let date_str = now.format("%Y-%m-%d").to_string();
-                    if now.hour() == 21 && now.minute() == 0 && date_str != last_sent_date {
-                        println!("Telegram Bot: Scheduled time (9:00 PM) reached. Pushing evening reflection...");
-                        if let Err(e) = handle_reflect_trigger(
-                            &sched_bot,
-                            chat_id,
-                            &sched_pool,
-                            &sched_llm,
-                            sched_states.clone(),
-                            &sched_config,
-                        )
-                        .await
-                        {
-                            eprintln!("Telegram Bot: failed to push scheduled reflection: {:?}", e);
-                        } else {
-                            last_sent_date = date_str;
-                        }
+        {
+            let cfg = sched_config.read().await;
+            if !has_telegram_delivery(&cfg) {
+                println!("Telegram Bot: no linked chats or TELEGRAM_CHAT_ID. Proactive evening reflections disabled. Use /reflect manually.");
+                return;
+            }
+            println!(
+                "Telegram Bot: Proactive reflection scheduler enabled for targets {:?}",
+                telegram_delivery_targets(&cfg)
+            );
+        }
+        let mut last_sent_date = String::new();
+        loop {
+            let now = chrono::Local::now();
+            let date_str = now.format("%Y-%m-%d").to_string();
+            if now.hour() == 21 && now.minute() == 0 && date_str != last_sent_date {
+                println!("Telegram Bot: Scheduled time (9:00 PM) reached. Pushing evening reflection...");
+                let cfg = sched_config.read().await.clone();
+                let targets = telegram_delivery_targets(&cfg);
+                let mut any_ok = false;
+                for cid in targets {
+                    if let Err(e) = handle_reflect_trigger(
+                        &sched_bot,
+                        ChatId(cid),
+                        &sched_pool,
+                        &sched_llm,
+                        sched_states.clone(),
+                        &cfg,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "Telegram Bot: failed to push scheduled reflection to {}: {:?}",
+                            cid, e
+                        );
+                    } else {
+                        any_ok = true;
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                }
+                if any_ok {
+                    last_sent_date = date_str;
                 }
             }
-        } else {
-            println!("Telegram Bot: TELEGRAM_CHAT_ID not configured. Proactive scheduled evening reflections are disabled. Use /reflect manually.");
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
 
-    // Spawn proactive evening stock research scheduler if TELEGRAM_CHAT_ID is set
+    // Spawn proactive evening stock research scheduler.
     let stock_bot = bot.clone();
     let stock_pool = pool.clone();
     let stock_researcher = researcher.clone();
-    let stock_config = config.clone();
+    let stock_config = shared_config.clone();
     tokio::spawn(async move {
         use chrono::Timelike;
-        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
-            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
-                let chat_id = ChatId(chat_id_num);
+        {
+            let cfg = stock_config.read().await;
+            if !has_telegram_delivery(&cfg) {
                 println!(
-                    "Telegram Bot: Stock researcher scheduled loop enabled for ChatId {:?}",
-                    chat_id
+                    "Telegram Bot: no linked chats or TELEGRAM_CHAT_ID. Scheduled stock research disabled."
                 );
-                let mut last_run_date = String::new();
-                loop {
-                    let now = chrono::Local::now();
-                    let date_str = now.format("%Y-%m-%d").to_string();
-                    // Trigger at 6:00 PM (18:00) every evening
-                    if now.hour() == 18 && now.minute() == 0 && date_str != last_run_date {
-                        println!("Telegram Bot: Scheduled time (6:00 PM) reached. Running evening stock research...");
-                        if let Err(e) = run_and_log_stock_research(
-                            &stock_bot,
-                            chat_id,
-                            &stock_pool,
-                            &stock_researcher,
-                            stock_config.investment_philosophy.as_ref(),
-                            None,
-                        )
-                        .await
-                        {
-                            eprintln!(
-                                "Telegram Bot: failed to run scheduled stock research: {:?}",
-                                e
-                            );
-                        } else {
-                            last_run_date = date_str;
-                        }
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                return;
+            }
+            println!(
+                "Telegram Bot: Stock researcher scheduled loop enabled for targets {:?}",
+                telegram_delivery_targets(&cfg)
+            );
+        }
+        let mut last_run_date = String::new();
+        loop {
+            let now = chrono::Local::now();
+            let date_str = now.format("%Y-%m-%d").to_string();
+            if now.hour() == 18 && now.minute() == 0 && date_str != last_run_date {
+                println!("Telegram Bot: Scheduled time (6:00 PM) reached. Running evening stock research...");
+                let cfg = stock_config.read().await.clone();
+                let targets: Vec<ChatId> = telegram_delivery_targets(&cfg)
+                    .into_iter()
+                    .map(ChatId)
+                    .collect();
+                if targets.is_empty() {
+                    continue;
+                }
+                if let Err(e) = run_and_log_stock_research_multi(
+                    &stock_bot,
+                    &targets,
+                    &stock_pool,
+                    &stock_researcher,
+                    cfg.investment_philosophy.as_ref(),
+                    None,
+                )
+                .await
+                {
+                    eprintln!(
+                        "Telegram Bot: failed to run scheduled stock research: {:?}",
+                        e
+                    );
+                } else {
+                    last_run_date = date_str;
                 }
             }
-        } else {
-            println!(
-                "Telegram Bot: TELEGRAM_CHAT_ID not configured. Scheduled stock research disabled."
-            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
 
-    // Spawn proactive morning brief scheduler if TELEGRAM_CHAT_ID is set
+    // Spawn proactive morning brief scheduler.
     let brief_bot = bot.clone();
     let brief_pool = pool.clone();
-    let brief_config = config.clone();
+    let brief_config = shared_config.clone();
     tokio::spawn(async move {
         use chrono::Timelike;
         let brief_hour: u32 = std::env::var("MORNING_BRIEF_HOUR")
@@ -206,95 +272,103 @@ pub async fn start_telegram_bot(
             .and_then(|v| v.parse().ok())
             .unwrap_or(7)
             .min(23);
-        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
-            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
-                let chat_id = ChatId(chat_id_num);
+        {
+            let cfg = brief_config.read().await;
+            if !has_telegram_delivery(&cfg) {
                 println!(
-                    "Telegram Bot: Morning brief scheduler enabled for ChatId {:?} at {:02}:00",
-                    chat_id, brief_hour
+                    "Telegram Bot: no linked chats or TELEGRAM_CHAT_ID. Scheduled morning brief disabled. Use /brief manually."
                 );
-                let mut last_sent_date = String::new();
-                loop {
-                    let now = chrono::Local::now();
-                    let date_str = now.format("%Y-%m-%d").to_string();
-                    if now.hour() == brief_hour
-                        && now.minute() == 0
-                        && date_str != last_sent_date
+                return;
+            }
+            println!(
+                "Telegram Bot: Morning brief scheduler enabled for targets {:?} at {:02}:00",
+                telegram_delivery_targets(&cfg),
+                brief_hour
+            );
+        }
+        let mut last_sent_date = String::new();
+        loop {
+            let now = chrono::Local::now();
+            let date_str = now.format("%Y-%m-%d").to_string();
+            if now.hour() == brief_hour && now.minute() == 0 && date_str != last_sent_date {
+                println!(
+                    "Telegram Bot: Scheduled time ({:02}:00) reached. Pushing morning brief...",
+                    brief_hour
+                );
+                let cfg = brief_config.read().await.clone();
+                let targets = telegram_delivery_targets(&cfg);
+                let mut any_ok = false;
+                for cid in targets {
+                    if let Err(e) =
+                        handle_brief(&brief_bot, ChatId(cid), &brief_pool, &cfg).await
                     {
-                        println!(
-                            "Telegram Bot: Scheduled time ({:02}:00) reached. Pushing morning brief...",
-                            brief_hour
+                        eprintln!(
+                            "Telegram Bot: failed to push morning brief to {}: {:?}",
+                            cid, e
                         );
-                        if let Err(e) =
-                            handle_brief(&brief_bot, chat_id, &brief_pool, &brief_config).await
-                        {
-                            eprintln!("Telegram Bot: failed to push morning brief: {:?}", e);
-                        } else {
-                            last_sent_date = date_str;
-                        }
+                    } else {
+                        any_ok = true;
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+                }
+                if any_ok {
+                    last_sent_date = date_str;
                 }
             }
-        } else {
-            println!(
-                "Telegram Bot: TELEGRAM_CHAT_ID not configured. Scheduled morning brief disabled. Use /brief manually."
-            );
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
 
     // One-shot timed task reminders (due_at reached, not yet reminded).
     let remind_bot = bot.clone();
     let remind_pool = pool.clone();
+    let remind_config = shared_config.clone();
     tokio::spawn(async move {
-        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
-            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
-                let chat_id = ChatId(chat_id_num);
+        {
+            let cfg = remind_config.read().await;
+            if !has_telegram_delivery(&cfg) {
                 println!(
-                    "Telegram Bot: Task reminder poller enabled for ChatId {:?}",
-                    chat_id
+                    "Telegram Bot: no linked chats or TELEGRAM_CHAT_ID. Timed task reminders disabled."
                 );
-                loop {
-                    if let Err(e) = poll_due_task_reminders(&remind_bot, chat_id, &remind_pool).await
-                    {
-                        eprintln!("Telegram Bot: task reminder poll failed: {:?}", e);
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                }
+                return;
             }
-        } else {
             println!(
-                "Telegram Bot: TELEGRAM_CHAT_ID not configured. Timed task reminders disabled."
+                "Telegram Bot: Task reminder poller enabled for targets {:?}",
+                telegram_delivery_targets(&cfg)
             );
+        }
+        loop {
+            let cfg = remind_config.read().await.clone();
+            if let Err(e) = poll_due_task_reminders(&remind_bot, &remind_pool, &cfg).await {
+                eprintln!("Telegram Bot: task reminder poll failed: {:?}", e);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
 
     // Mid-month category spend alerts at 80% / 100% (deduped per month).
     let budget_bot = bot.clone();
     let budget_pool = pool.clone();
-    let budget_config = config.clone();
+    let budget_config = shared_config.clone();
     tokio::spawn(async move {
-        if let Ok(chat_id_val) = std::env::var("TELEGRAM_CHAT_ID") {
-            if let Ok(chat_id_num) = chat_id_val.parse::<i64>() {
-                let chat_id = ChatId(chat_id_num);
+        {
+            let cfg = budget_config.read().await;
+            if !has_telegram_delivery(&cfg) {
                 println!(
-                    "Telegram Bot: Spend budget alert poller enabled for ChatId {:?}",
-                    chat_id
+                    "Telegram Bot: no linked chats or TELEGRAM_CHAT_ID. Spend budget alerts disabled."
                 );
-                loop {
-                    if let Err(e) =
-                        poll_spend_budget_alerts(&budget_bot, chat_id, &budget_pool, &budget_config)
-                            .await
-                    {
-                        eprintln!("Telegram Bot: spend budget alert poll failed: {:?}", e);
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
-                }
+                return;
             }
-        } else {
             println!(
-                "Telegram Bot: TELEGRAM_CHAT_ID not configured. Spend budget alerts disabled."
+                "Telegram Bot: Spend budget alert poller enabled for targets {:?}",
+                telegram_delivery_targets(&cfg)
             );
+        }
+        loop {
+            let cfg = budget_config.read().await.clone();
+            if let Err(e) = poll_spend_budget_alerts(&budget_bot, &budget_pool, &cfg).await {
+                eprintln!("Telegram Bot: spend budget alert poll failed: {:?}", e);
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
         }
     });
 
@@ -322,7 +396,7 @@ pub async fn start_telegram_bot(
             gemini_client,
             researcher,
             conversation_states,
-            config
+            shared_config
         ])
         .enable_ctrlc_handler()
         .build()
@@ -342,7 +416,7 @@ async fn handle_command(
     gemini_client: GeminiClient,
     researcher: StockResearcher,
     states: StateMap,
-    config: AppConfig,
+    shared_config: SharedConfig,
 ) -> Result<(), teloxide::RequestError> {
     let chat_id = msg.chat.id;
     let username = msg
@@ -355,11 +429,22 @@ async fn handle_command(
         username, chat_id
     );
 
+    {
+        let config = shared_config.read().await;
+        if !command_bypasses_allowlist(&cmd) && !is_telegram_chat_allowed(&config, chat_id.0)
+        {
+            drop(config);
+            return reject_unlinked_chat(&bot, chat_id).await;
+        }
+    }
+
     // Reset reflection state if they send a command
     {
         let mut s = states.write().await;
         s.insert(chat_id, ConversationState::Idle);
     }
+
+    let config = shared_config.read().await.clone();
 
     match cmd {
         Command::Help => {
@@ -393,6 +478,12 @@ async fn handle_command(
         Command::Chat => {
             bot.send_message(chat_id, format!("Current Chat ID: {}", chat_id))
                 .await?;
+        }
+        Command::Link(args) => {
+            handle_link(&bot, chat_id, args, &shared_config).await?;
+        }
+        Command::Whoami => {
+            handle_whoami(&bot, chat_id, &config).await?;
         }
         Command::Research(args) => {
             let targets = if args.trim().is_empty() {
@@ -509,6 +600,104 @@ async fn handle_command(
     Ok(())
 }
 
+async fn handle_link(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: String,
+    shared_config: &SharedConfig,
+) -> Result<(), teloxide::RequestError> {
+    let member_tok = args.trim();
+    if member_tok.is_empty() {
+        let config = shared_config.read().await;
+        let members = config
+            .family
+            .members
+            .iter()
+            .map(|m| format!("- `{}` ({})", m.id, m.name))
+            .collect::<Vec<_>>()
+            .join("\n");
+        bot.send_message(
+            chat_id,
+            format!(
+                "⚠️ Usage: `/link <member_id>`\n\nConfigured members:\n{}",
+                members
+            ),
+        )
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+        return Ok(());
+    }
+
+    let path = config_path();
+    match set_member_telegram_chat_id(&path, member_tok, chat_id.0) {
+        Ok(updated) => {
+            let member = updated
+                .family
+                .members
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(member_tok))
+                .cloned();
+            {
+                let mut cfg = shared_config.write().await;
+                *cfg = updated;
+            }
+            if let Some(m) = member {
+                bot.send_message(
+                    chat_id,
+                    format!(
+                        "✅ Linked this chat (`{}`) to *{}* (`{}`).\n\
+                         Food/tasks without a member id now default to you. \
+                         Use `/whoami` anytime.",
+                        chat_id, escape_md_basic(&m.name), m.id
+                    ),
+                )
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            }
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ Failed to link chat: {}", e))
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn handle_whoami(
+    bot: &Bot,
+    chat_id: ChatId,
+    config: &AppConfig,
+) -> Result<(), teloxide::RequestError> {
+    match member_for_telegram_chat(config, chat_id.0) {
+        Some(m) => {
+            bot.send_message(
+                chat_id,
+                format!(
+                    "You are linked as *{}* (`{}`).\nChat id: `{}`",
+                    escape_md_basic(&m.name),
+                    m.id,
+                    chat_id
+                ),
+            )
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+        }
+        None => {
+            bot.send_message(
+                chat_id,
+                format!(
+                    "This chat (`{}`) is not linked to a family member.\n\
+                     Run `/link <member_id>` to claim it.",
+                    chat_id
+                ),
+            )
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
 async fn handle_food_log(
     bot: &Bot,
     chat_id: ChatId,
@@ -533,7 +722,8 @@ async fn handle_food_log(
         return Ok(());
     }
 
-    let (family_member_id, food_description) = resolve_food_member_and_description(args, config);
+    let (family_member_id, food_description) =
+        resolve_food_member_and_description(args, config, chat_id.0);
     if food_description.is_empty() {
         bot.send_message(
             chat_id,
@@ -576,7 +766,12 @@ async fn handle_food_log(
 }
 
 /// Parse optional leading member id from `/food` args or a photo caption.
-fn resolve_food_member_and_description(args: &str, config: &AppConfig) -> (String, String) {
+/// When omitted, defaults to the member linked to this chat (else primary).
+fn resolve_food_member_and_description(
+    args: &str,
+    config: &AppConfig,
+    chat_id: i64,
+) -> (String, String) {
     let mut parts = args.splitn(2, |c: char| c.is_whitespace());
     let first_word = parts.next().unwrap_or("");
     let rest = parts.next().unwrap_or("").trim();
@@ -587,8 +782,25 @@ fn resolve_food_member_and_description(args: &str, config: &AppConfig) -> (Strin
         }
     }
 
-    let primary_member = &config.family.members[0];
-    (primary_member.id.clone(), args.trim().to_string())
+    (
+        default_member_id(config, chat_id).to_string(),
+        args.trim().to_string(),
+    )
+}
+
+/// Resolve optional `[member_id]` arg; empty → linked/default member for this chat.
+fn resolve_optional_member_arg(args: &str, config: &AppConfig, chat_id: i64) -> String {
+    let member_id = args.trim();
+    if member_id.is_empty() {
+        return default_member_id(config, chat_id).to_string();
+    }
+    config
+        .family
+        .members
+        .iter()
+        .find(|m| m.id.eq_ignore_ascii_case(member_id))
+        .map(|m| m.id.clone())
+        .unwrap_or_else(|| default_member_id(config, chat_id).to_string())
 }
 
 /// Insert food_log, update day totals, optionally push to Google Health, reply macros-first.
@@ -870,19 +1082,7 @@ async fn handle_clear_food(
     pool: &SqlitePool,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
-    let member_id = args.trim();
-    let target_member_id = if member_id.is_empty() {
-        config.family.members[0].id.clone()
-    } else {
-        let mut found = config.family.members[0].id.clone();
-        for m in &config.family.members {
-            if m.id.eq_ignore_ascii_case(member_id) {
-                found = m.id.clone();
-                break;
-            }
-        }
-        found
-    };
+    let target_member_id = resolve_optional_member_arg(&args, config, chat_id.0);
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -971,7 +1171,7 @@ async fn handle_adjust_food(
         return Ok(());
     }
 
-    let mut member_id = config.family.members[0].id.clone();
+    let mut member_id = default_member_id(config, chat_id.0).to_string();
     let mut offset = 0;
 
     // Check if first token matches a member ID
@@ -1142,19 +1342,7 @@ async fn handle_undo_food(
     pool: &SqlitePool,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
-    let member_id = args.trim();
-    let target_member_id = if member_id.is_empty() {
-        config.family.members[0].id.clone()
-    } else {
-        let mut found = config.family.members[0].id.clone();
-        for m in &config.family.members {
-            if m.id.eq_ignore_ascii_case(member_id) {
-                found = m.id.clone();
-                break;
-            }
-        }
-        found
-    };
+    let target_member_id = resolve_optional_member_arg(&args, config, chat_id.0);
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -1600,6 +1788,7 @@ async fn add_manual_task(
         return Ok(());
     };
 
+    let member_id = member_id.or_else(|| Some(default_member_id(config, chat_id.0).to_string()));
     create_manual_task(bot, chat_id, pool, member_id, title, due_raw).await
 }
 
@@ -1715,13 +1904,13 @@ async fn create_manual_task(
 
 async fn poll_due_task_reminders(
     bot: &Bot,
-    chat_id: ChatId,
     pool: &SqlitePool,
+    config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
     let now = chrono::Utc::now();
     let now_s = now.to_rfc3339();
-    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT id, title, due_date, due_at FROM tasks \
+    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, title, due_date, due_at, assigned_to FROM tasks \
          WHERE status = 'open' \
            AND due_at IS NOT NULL \
            AND due_at <= ? \
@@ -1732,7 +1921,7 @@ async fn poll_due_task_reminders(
     .fetch_all(pool)
     .await?;
 
-    for (id, title, due_date, due_at) in rows {
+    for (id, title, due_date, due_at, assigned_to) in rows {
         // Claim first so concurrent pollers cannot double-send.
         let claimed = sqlx::query(
             "UPDATE tasks SET reminded_at = ?, updated_at = ? \
@@ -1775,12 +1964,32 @@ async fn poll_due_task_reminders(
             short_id
         );
 
-        if let Err(e) = bot
-            .send_message(chat_id, msg)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await
-        {
-            eprintln!("Telegram Bot: failed to send task reminder {}: {:?}", id, e);
+        let targets: Vec<i64> = match assigned_to.as_deref() {
+            Some(mid) => match telegram_chat_for_member(config, mid) {
+                Some(cid) => vec![cid],
+                None => telegram_delivery_targets(config),
+            },
+            None => telegram_delivery_targets(config),
+        };
+
+        let mut send_ok = false;
+        for cid in &targets {
+            if let Err(e) = bot
+                .send_message(ChatId(*cid), msg.clone())
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await
+            {
+                eprintln!(
+                    "Telegram Bot: failed to send task reminder {} to {}: {:?}",
+                    id, cid, e
+                );
+            } else {
+                send_ok = true;
+            }
+        }
+
+        if !send_ok {
+            eprintln!("Telegram Bot: failed to send task reminder {}: no delivery", id);
             // Release claim so the next poll can retry.
             if let Err(reset_err) = sqlx::query(
                 "UPDATE tasks SET reminded_at = NULL, updated_at = ? WHERE id = ? AND reminded_at = ?",
@@ -3033,7 +3242,6 @@ async fn send_budget_progress(
 
 async fn poll_spend_budget_alerts(
     bot: &Bot,
-    chat_id: ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
@@ -3062,9 +3270,7 @@ async fn poll_spend_budget_alerts(
         alerts.len(),
         month
     );
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
+    send_household(bot, config, msg).await;
 
     for alert in &alerts {
         if let Err(e) =
@@ -3152,7 +3358,7 @@ async fn handle_message(
     llm: ChotuLlm,
     gemini_client: GeminiClient,
     states: StateMap,
-    config: AppConfig,
+    shared_config: SharedConfig,
 ) -> Result<(), teloxide::RequestError> {
     let chat_id = msg.chat.id;
     let username = msg
@@ -3165,6 +3371,11 @@ async fn handle_message(
         "Telegram Bot: Received message from user '{}' in Chat ID: {:?}. Content: {:?}",
         username, chat_id, text
     );
+
+    let config = shared_config.read().await.clone();
+    if !is_telegram_chat_allowed(&config, chat_id.0) {
+        return reject_unlinked_chat(&bot, chat_id).await;
+    }
 
     // Check if the message is a reply to a previous bot notification
     if let Some(reply_to_msg) = msg.reply_to_message() {
@@ -3377,7 +3588,8 @@ async fn handle_food_photo(
         return Ok(());
     }
 
-    let (member_id, caption_rest) = resolve_food_member_and_description(caption, config);
+    let (member_id, caption_rest) =
+        resolve_food_member_and_description(caption, config, chat_id.0);
 
     let (description, nutrition, source_note) = if let Some(ref barcode) = analysis.barcode {
         match lookup_barcode(barcode).await {
@@ -3529,6 +3741,8 @@ async fn dispatch_free_text_intent(
             title,
             due_raw,
         } => {
+            let member_id =
+                member_id.or_else(|| Some(default_member_id(config, chat_id.0).to_string()));
             create_manual_task(bot, chat_id, pool, member_id, title, due_raw).await?;
         }
         UserIntent::Memory { query } => {
@@ -3692,12 +3906,29 @@ async fn run_and_log_stock_research(
     philosophy: Option<&InvestmentPhilosophy>,
     targets: Option<&str>,
 ) -> Result<(), anyhow::Error> {
+    run_and_log_stock_research_multi(bot, &[chat_id], pool, researcher, philosophy, targets).await
+}
+
+async fn run_and_log_stock_research_multi(
+    bot: &Bot,
+    chat_ids: &[ChatId],
+    pool: &SqlitePool,
+    researcher: &StockResearcher,
+    philosophy: Option<&InvestmentPhilosophy>,
+    targets: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let Some(&progress_chat) = chat_ids.first() else {
+        return Ok(());
+    };
+
     if !researcher.is_configured() {
-        bot.send_message(
-            chat_id,
-            "❌ Stock research requires `OPENROUTER_API_KEY` in `.env`. Gemini is not used for `/research`.",
-        )
-        .await?;
+        for &chat_id in chat_ids {
+            bot.send_message(
+                chat_id,
+                "❌ Stock research requires `OPENROUTER_API_KEY` in `.env`. Gemini is not used for `/research`.",
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -3707,7 +3938,7 @@ async fn run_and_log_stock_research(
     let progress_task = tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
             let msg = format_research_progress(&event, started.elapsed().as_secs());
-            if let Err(e) = progress_bot.send_message(chat_id, msg).await {
+            if let Err(e) = progress_bot.send_message(progress_chat, msg).await {
                 eprintln!("Telegram Bot: failed to send research progress: {:?}", e);
             }
         }
@@ -3719,47 +3950,50 @@ async fn run_and_log_stock_research(
         {
             Ok(r) => r,
             Err(e) => {
-                // Drop sender by ending the match arm after progress_tx moved; channel closes when
-                // run_stock_research returns because progress_tx is dropped inside that call.
                 let _ = progress_task.await;
-                bot.send_message(
-                    chat_id,
-                    format!(
-                        "❌ Stock research failed after {}: {}",
-                        format_elapsed(started.elapsed().as_secs()),
-                        e
-                    ),
-                )
-                .await?;
+                for &chat_id in chat_ids {
+                    bot.send_message(
+                        chat_id,
+                        format!(
+                            "❌ Stock research failed after {}: {}",
+                            format_elapsed(started.elapsed().as_secs()),
+                            e
+                        ),
+                    )
+                    .await?;
+                }
                 return Err(anyhow::anyhow!("Stock research failed: {:?}", e));
             }
         };
 
     let _ = progress_task.await;
 
-    bot.send_message(
-        chat_id,
-        format!(
-            "✅ Research complete in {}. Sending report…",
-            format_elapsed(started.elapsed().as_secs())
-        ),
-    )
-    .await?;
+    for &chat_id in chat_ids {
+        bot.send_message(
+            chat_id,
+            format!(
+                "✅ Research complete in {}. Sending report…",
+                format_elapsed(started.elapsed().as_secs())
+            ),
+        )
+        .await?;
+    }
 
     // Split the report into chunks under 4000 characters to respect Telegram's message limit
     let chunks = split_message(&report, 4000);
     for chunk in chunks {
-        // Try sending each chunk with Markdown, fallback to plain text if parsing fails
-        if let Err(e) = bot
-            .send_message(chat_id, &chunk)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await
-        {
-            eprintln!(
-                "Telegram Bot: failed to send report chunk with Markdown format ({:?}). Falling back to plain text...",
-                e
-            );
-            bot.send_message(chat_id, &chunk).await?;
+        for &chat_id in chat_ids {
+            if let Err(e) = bot
+                .send_message(chat_id, &chunk)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await
+            {
+                eprintln!(
+                    "Telegram Bot: failed to send report chunk with Markdown format ({:?}). Falling back to plain text...",
+                    e
+                );
+                bot.send_message(chat_id, &chunk).await?;
+            }
         }
     }
 
