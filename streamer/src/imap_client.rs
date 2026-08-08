@@ -968,7 +968,8 @@ async fn send_telegram_reminder(task_desc: &str, config: &AppConfig) -> Option<i
         return None;
     }
     let bot = teloxide::Bot::new(token);
-    let message = format!("🔔 *Action Item Reminder*:\n{}", task_desc);
+    // Plain text: task descriptions from email can contain Markdown metacharacters.
+    let message = format!("🔔 Action Item Reminder:\n{}", task_desc);
     use teloxide::requests::Requester;
     let mut last_msg_id = None;
     for cid in targets {
