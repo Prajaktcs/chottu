@@ -990,14 +990,22 @@ mod tests {
     #[test]
     fn test_utc_offset_duration_str_for_local_evening() {
         use chrono::{Local, TimeZone};
+
+        // Construct via Local so the expected UTC instant and offset follow the
+        // host timezone (UTC on CI, often America/New_York on laptops).
         let local = Local
             .with_ymd_and_hms(2026, 8, 2, 21, 49, 32)
             .unwrap();
         let utc = local.with_timezone(&chrono::Utc);
         let offset = utc_offset_duration_str(utc);
-        // EDT is -4h; EST -5h. Either is fine — just not "0s".
-        assert_ne!(offset, "0s", "expected non-zero local offset, got {offset}");
-        assert!(offset.ends_with('s'), "expected duration string, got {offset}");
-        assert_eq!(rfc3339_utc(utc), "2026-08-03T01:49:32.000Z");
+        assert_eq!(
+            offset,
+            format!("{}s", local.offset().local_minus_utc()),
+            "Google Duration must mirror the host Local offset"
+        );
+        assert_eq!(
+            rfc3339_utc(utc),
+            utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
     }
 }
