@@ -19,9 +19,12 @@ pub use due_parse::{
     is_due_for_reminder, parse_due_phrase, split_task_add_args, ParsedDue,
 };
 pub use family::{
-    health_refresh_token_env_key, load_config, resolve_health_refresh_token, AppConfig,
-    FamilyMember, FamilySection, InvestmentPhilosophy, TargetAllocation, AllocationBucket,
-    BucketHolding, SpendBudgets, fetch_exchange_rates, CalendarConfig, NutritionGoals,
+    config_path, default_member_id, has_any_telegram_link, has_telegram_delivery,
+    health_refresh_token_env_key, is_telegram_chat_allowed, load_config, member_for_telegram_chat,
+    resolve_health_refresh_token, set_member_telegram_chat_id, telegram_chat_for_member,
+    telegram_delivery_targets, AppConfig, FamilyMember, FamilySection, InvestmentPhilosophy,
+    TargetAllocation, AllocationBucket, BucketHolding, SpendBudgets, fetch_exchange_rates,
+    CalendarConfig, NutritionGoals,
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,

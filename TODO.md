@@ -30,7 +30,7 @@
 - [x] Calendar read/query UX (“what's today?”, conflicts)
 - [x] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
 - [x] Spend alerts / category budgets
-- [ ] Family multi-user Telegram UX
+- [x] Family multi-user Telegram UX
 - [ ] Meal planning ↔ grocery lists
 
 ### Non-goals

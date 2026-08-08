@@ -49,10 +49,11 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 
 ### Tasks, calendar & morning brief (Coordinator)
 - Tasks from email action items **or** Telegram (`/tasks add`, “remind me to…”); manage via `/tasks` (list, complete, snooze, reassign, reopen).
-- Timed reminders: one Telegram ping when a task’s `due_at` is reached (`TELEGRAM_CHAT_ID` required).
+- Timed reminders: one Telegram ping when a task’s `due_at` is reached (assignee’s linked DM, else household targets).
+- **Per-person Telegram DMs**: each adult runs `/link <member_id>` in a private chat; food/tasks without a member id default to that person. Once any member is linked, unknown chats are rejected (`/chat` and `/link` still work for setup).
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
-- **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals.
+- **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
 - **Evening reflection**: scheduled or `/reflect` — grounds a journal prompt in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
@@ -98,6 +99,7 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 
 - Google Health two-way nutrition sync (per family member)
 - Telegram OAuth onboarding: `/login health <member>`, `/login gmail`, `/login calendar <member>`
+- Per-person Telegram DMs via `/link <member_id>` (food/tasks default to linked member)
 - Gmail IMAP streamer with nine-way local classification
 - Task + bill + travel extraction with optional Calendar writes
 - Food logging via text or photo (barcode / package / plate)
@@ -137,6 +139,8 @@ make setup
 Fill in the credentials inside your `.env` file:
 ```env
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+# Optional shared fallback for household pushes (brief, budgets, stock, reflection).
+# Prefer per-member DMs via /link — see config.yaml telegram_chat_id.
 TELEGRAM_CHAT_ID=your_personal_chat_id
 GEMINI_API_KEY=your_gemini_api_key
 OPENROUTER_API_KEY=your_openrouter_api_key
@@ -157,7 +161,7 @@ CHOTU_EMAIL_USER=your_email@gmail.com
 
 `GEMINI_API_KEY` is used for multimodal work (food photos, document ingest, nutrition). `OPENROUTER_API_KEY` powers `/research` LLMs (propose → score → judge). `FINNHUB_API_KEY` verifies market caps on the shared universe (optional; without it, model-estimated bands are used).
 
-Also edit `config.yaml` (from `config.yaml.example`) for family members, nutrition goals, currency, and investment philosophy.
+Also edit `config.yaml` (from `config.yaml.example`) for family members, nutrition goals, currency, and investment philosophy. Each adult should DM the bot and run `/link <member_id>` so food/tasks default to them and proactive messages reach their inbox.
 
 ### 3. Run the Agent
 Run the supervisor and bot coordinator:
@@ -199,26 +203,28 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/help` | Displays the help text. |
 | `/login <health <member>\|gmail\|calendar <member>>` | Interactive OAuth (Health/Calendar save per-member refresh tokens). |
 | `/sync` | Triggers a manual sync of today's nutrition for every linked Google Health account. |
-| `/food <member_id> <desc>` | Manually log food and push to that member's Google Health account when linked (e.g. `/food praj 2 eggs and toast`). |
-| `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). |
+| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Pushes to that member's Google Health when linked (e.g. `/food 2 eggs` or `/food praj 2 eggs`). |
+| `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). Defaults to linked member. |
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
-| `/clearfood [member_id]` | Clear today's food logs and summary for a member. |
+| `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. |
 | `/status` | Today's status (finance + health, goal progress, short local-Ollama coach tip per member). |
-| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals. Auto-sends at 7:00 local when `TELEGRAM_CHAT_ID` is set (`MORNING_BRIEF_HOUR` to override). |
+| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals. Auto-sends at 7:00 local to all linked DMs (`MORNING_BRIEF_HOUR` to override; `TELEGRAM_CHAT_ID` optional shared fallback). |
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
-| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/tasks add [member] <title> [due <when>]` (e.g. `due tomorrow 15:00`). Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping Telegram once when due (`TELEGRAM_CHAT_ID`). Reply `unactionable` to an email reminder to ignore similar mail. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/tasks add [member] <title> [due <when>]` (defaults assignee to linked member). Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Shared-universe stock research via OpenRouter + Finnhub (propose → cap filter → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
 | `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
-| `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% Telegram alerts when `TELEGRAM_CHAT_ID` is set. |
+| `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% alerts fan out to linked DMs. |
 | `/chat` | View your current Telegram Chat ID. |
+| `/link <member_id>` | Link this private chat to a family member (writes `telegram_chat_id` in `config.yaml`). |
+| `/whoami` | Show which family member this chat is linked to. |
 
 Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
 
-**Food photos:** send a barcode, product package, or plated meal. Optional caption sets member/portion (e.g. `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
+**Food photos:** send a barcode, product package, or plated meal. Caption is optional; without a member id it logs for the linked DM member (e.g. `half the bowl` or `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
 
 ---
 
