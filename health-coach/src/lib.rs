@@ -82,7 +82,7 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                             "Health Coach: Sync complete for {} — {} kcal, {} steps",
                             report.member_id, report.calories, report.steps
                         );
-                        notify_telegram(&report.telegram_markdown()).await;
+                        notify_telegram(&report.telegram_markdown(), &config).await;
                     }
                     last_sync_date = date_str;
                 }
@@ -96,22 +96,29 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
     }
 }
 
-async fn notify_telegram(message: &str) {
-    if let (Ok(token), Ok(chat_id_str)) = (
-        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN")),
-        std::env::var("TELEGRAM_CHAT_ID"),
-    ) {
-        if let Ok(chat_id_num) = chat_id_str.parse::<i64>() {
-            let bot = teloxide::Bot::new(token);
-            use teloxide::prelude::*;
-            #[allow(deprecated)]
-            if let Err(e) = bot
-                .send_message(teloxide::types::ChatId(chat_id_num), message)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await
-            {
-                eprintln!("Health Coach: failed to push sync notification: {:?}", e);
-            }
+async fn notify_telegram(message: &str, config: &chotu_common::AppConfig) {
+    let Ok(token) =
+        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
+    else {
+        return;
+    };
+    let targets = chotu_common::telegram_delivery_targets(config);
+    if targets.is_empty() {
+        return;
+    }
+    let bot = teloxide::Bot::new(token);
+    use teloxide::prelude::*;
+    for cid in targets {
+        #[allow(deprecated)]
+        if let Err(e) = bot
+            .send_message(teloxide::types::ChatId(cid), message)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await
+        {
+            eprintln!(
+                "Health Coach: failed to push sync notification to {}: {:?}",
+                cid, e
+            );
         }
     }
 }

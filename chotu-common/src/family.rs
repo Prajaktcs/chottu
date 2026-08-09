@@ -117,6 +117,10 @@ pub struct FamilyMember {
     /// Optional daily nutrition / activity goals.
     #[serde(default)]
     pub nutrition_goals: Option<NutritionGoals>,
+    /// Telegram private-chat id for this member (per-person DMs).
+    /// Set via `/link <member_id>` or manually in config.yaml.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram_chat_id: Option<i64>,
 }
 
 impl FamilyMember {
@@ -242,6 +246,7 @@ impl Default for AppConfig {
                     role: "adult".to_string(),
                     calendar: None,
                     nutrition_goals: None,
+                    telegram_chat_id: None,
                 }],
             },
             investment_philosophy: Some(InvestmentPhilosophy::default()),
@@ -251,6 +256,143 @@ impl Default for AppConfig {
             email_classifier_prompt_path: None,
         }
     }
+}
+
+/// Member linked to this Telegram chat, if any.
+pub fn member_for_telegram_chat(config: &AppConfig, chat_id: i64) -> Option<&FamilyMember> {
+    config
+        .family
+        .members
+        .iter()
+        .find(|m| m.telegram_chat_id == Some(chat_id))
+}
+
+/// Default family member id for a chat: linked member, else the primary (first) member.
+pub fn default_member_id(config: &AppConfig, chat_id: i64) -> &str {
+    member_for_telegram_chat(config, chat_id)
+        .map(|m| m.id.as_str())
+        .or_else(|| config.family.members.first().map(|m| m.id.as_str()))
+        .unwrap_or("alex")
+}
+
+/// True when at least one member has a linked Telegram chat.
+pub fn has_any_telegram_link(config: &AppConfig) -> bool {
+    config
+        .family
+        .members
+        .iter()
+        .any(|m| m.telegram_chat_id.is_some())
+}
+
+/// When any member is linked, only linked chats (plus the env household fallback) are allowed.
+/// Before the first `/link`, the bot stays open so setup can proceed.
+pub fn is_telegram_chat_allowed(config: &AppConfig, chat_id: i64) -> bool {
+    if !has_any_telegram_link(config) {
+        return true;
+    }
+    if member_for_telegram_chat(config, chat_id).is_some() {
+        return true;
+    }
+    env_telegram_chat_id() == Some(chat_id)
+}
+
+/// Private-chat id linked to `member_id`, if any.
+pub fn telegram_chat_for_member(config: &AppConfig, member_id: &str) -> Option<i64> {
+    config
+        .family
+        .members
+        .iter()
+        .find(|m| m.id.eq_ignore_ascii_case(member_id))
+        .and_then(|m| m.telegram_chat_id)
+}
+
+/// Unique household delivery targets: every linked member chat, plus `TELEGRAM_CHAT_ID` if set
+/// and not already included.
+pub fn telegram_delivery_targets(config: &AppConfig) -> Vec<i64> {
+    let mut targets: Vec<i64> = Vec::new();
+    for m in &config.family.members {
+        if let Some(cid) = m.telegram_chat_id {
+            if !targets.contains(&cid) {
+                targets.push(cid);
+            }
+        }
+    }
+    if let Some(env_cid) = env_telegram_chat_id() {
+        if !targets.contains(&env_cid) {
+            targets.push(env_cid);
+        }
+    }
+    targets
+}
+
+/// True when proactive Telegram delivery has somewhere to go.
+pub fn has_telegram_delivery(config: &AppConfig) -> bool {
+    !telegram_delivery_targets(config).is_empty()
+}
+
+fn env_telegram_chat_id() -> Option<i64> {
+    std::env::var("TELEGRAM_CHAT_ID")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+}
+
+/// Link `chat_id` to `member_id` in `config.yaml` (and clear that chat from any other member).
+/// Returns the updated config on success.
+///
+/// Uses a strict parse (no silent default fallback) so a bad write cannot wipe the file.
+pub fn set_member_telegram_chat_id<P: AsRef<Path>>(
+    path: P,
+    member_id: &str,
+    chat_id: i64,
+) -> Result<AppConfig, String> {
+    let path_ref = path.as_ref();
+    let content = std::fs::read_to_string(path_ref)
+        .map_err(|e| format!("Failed to read {:?}: {e}", path_ref))?;
+    let mut config: AppConfig = serde_yaml::from_str(&content)
+        .map_err(|e| format!("Failed to parse {:?}: {e}", path_ref))?;
+    if config.family.members.is_empty() {
+        return Err(format!("{:?} has no family members", path_ref));
+    }
+
+    let Some(idx) = config
+        .family
+        .members
+        .iter()
+        .position(|m| m.id.eq_ignore_ascii_case(member_id))
+    else {
+        return Err(format!("Unknown member `{member_id}`"));
+    };
+
+    // Refuse hijack: an unknown chat must not steal a member already linked elsewhere.
+    // Idempotent re-link of the same chat is allowed. To move a member, clear
+    // `telegram_chat_id` in config.yaml first.
+    if let Some(existing) = config.family.members[idx].telegram_chat_id {
+        if existing != chat_id {
+            return Err(format!(
+                "Member `{member_id}` is already linked to chat `{existing}`. \
+                 Clear that member's `telegram_chat_id` in config.yaml, then retry `/link`."
+            ));
+        }
+        return Ok(config);
+    }
+
+    for (i, m) in config.family.members.iter_mut().enumerate() {
+        if i == idx {
+            m.telegram_chat_id = Some(chat_id);
+        } else if m.telegram_chat_id == Some(chat_id) {
+            m.telegram_chat_id = None;
+        }
+    }
+
+    let yaml = serde_yaml::to_string(&config)
+        .map_err(|e| format!("Failed to serialize config.yaml: {e}"))?;
+    std::fs::write(path_ref, yaml).map_err(|e| format!("Failed to write {:?}: {e}", path_ref))?;
+    Ok(config)
+}
+
+/// Path used for config load/save (`CHOTU_CONFIG_PATH` or `config.yaml`).
+pub fn config_path() -> String {
+    std::env::var("CHOTU_CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string())
 }
 
 pub async fn fetch_exchange_rates(base_currency: &str) -> std::collections::HashMap<String, f64> {
@@ -405,6 +547,7 @@ mod tests {
                 email: "alex@example.com".to_string(),
             }),
             nutrition_goals: None,
+            telegram_chat_id: None,
         };
         assert_eq!(member.calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
         assert_eq!(member.health_refresh_token_env_key(), "HEALTH_REFRESH_TOKEN_ALEX");
@@ -529,6 +672,7 @@ target_allocation:
             role: "adult".to_string(),
             calendar: None,
             nutrition_goals: None,
+            telegram_chat_id: None,
         });
         assert_eq!(
             health_refresh_token_env_key("jordan"),
@@ -560,5 +704,130 @@ target_allocation:
                 });
             });
         });
+    }
+
+    fn two_member_config() -> AppConfig {
+        let mut config = AppConfig::default();
+        config.family.members[0].telegram_chat_id = Some(111);
+        config.family.members.push(FamilyMember {
+            id: "jordan".to_string(),
+            name: "Jordan".to_string(),
+            role: "adult".to_string(),
+            calendar: None,
+            nutrition_goals: None,
+            telegram_chat_id: Some(222),
+        });
+        config
+    }
+
+    #[test]
+    fn test_member_for_telegram_chat_and_default() {
+        let config = two_member_config();
+        assert_eq!(
+            member_for_telegram_chat(&config, 111).map(|m| m.id.as_str()),
+            Some("alex")
+        );
+        assert_eq!(
+            member_for_telegram_chat(&config, 222).map(|m| m.id.as_str()),
+            Some("jordan")
+        );
+        assert!(member_for_telegram_chat(&config, 999).is_none());
+        assert_eq!(default_member_id(&config, 222), "jordan");
+        assert_eq!(default_member_id(&config, 999), "alex");
+    }
+
+    #[test]
+    fn test_allowlist_open_until_first_link() {
+        let open = AppConfig::default();
+        assert!(!has_any_telegram_link(&open));
+        assert!(is_telegram_chat_allowed(&open, 999));
+
+        let linked = two_member_config();
+        assert!(has_any_telegram_link(&linked));
+        assert!(is_telegram_chat_allowed(&linked, 111));
+        assert!(is_telegram_chat_allowed(&linked, 222));
+        assert!(!is_telegram_chat_allowed(&linked, 999));
+    }
+
+    #[test]
+    fn test_allowlist_includes_env_household_fallback() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let linked = two_member_config();
+        with_env_var("TELEGRAM_CHAT_ID", Some("333"), || {
+            assert!(is_telegram_chat_allowed(&linked, 333));
+            let targets = telegram_delivery_targets(&linked);
+            assert_eq!(targets, vec![111, 222, 333]);
+        });
+    }
+
+    #[test]
+    fn test_delivery_targets_dedupe_env_overlap() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let linked = two_member_config();
+        with_env_var("TELEGRAM_CHAT_ID", Some("111"), || {
+            assert_eq!(telegram_delivery_targets(&linked), vec![111, 222]);
+        });
+    }
+
+    #[test]
+    fn test_set_member_telegram_chat_id_persists_and_moves() {
+        let yaml_content = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+    - id: jordan
+      name: Jordan
+      role: adult
+currency: "CAD"
+"#;
+        let mut tmp_file = NamedTempFile::new().unwrap();
+        write!(tmp_file, "{}", yaml_content).unwrap();
+
+        let updated =
+            set_member_telegram_chat_id(tmp_file.path(), "jordan", 555).expect("link jordan");
+        assert_eq!(
+            telegram_chat_for_member(&updated, "jordan"),
+            Some(555)
+        );
+        assert!(telegram_chat_for_member(&updated, "alex").is_none());
+
+        // Same chat may reassign from jordan → alex (clears jordan).
+        let moved =
+            set_member_telegram_chat_id(tmp_file.path(), "alex", 555).expect("move link to alex");
+        assert_eq!(telegram_chat_for_member(&moved, "alex"), Some(555));
+        assert!(telegram_chat_for_member(&moved, "jordan").is_none());
+
+        let reloaded = load_config(tmp_file.path());
+        assert_eq!(telegram_chat_for_member(&reloaded, "alex"), Some(555));
+
+        // Idempotent re-link of the same chat.
+        let again =
+            set_member_telegram_chat_id(tmp_file.path(), "alex", 555).expect("idempotent");
+        assert_eq!(telegram_chat_for_member(&again, "alex"), Some(555));
+
+        // Different chat must not hijack an already-linked member.
+        let hijack = set_member_telegram_chat_id(tmp_file.path(), "alex", 999);
+        assert!(hijack.is_err());
+        assert!(hijack.unwrap_err().contains("already linked"));
+        let still = load_config(tmp_file.path());
+        assert_eq!(telegram_chat_for_member(&still, "alex"), Some(555));
+    }
+
+    #[test]
+    fn test_load_telegram_chat_id_from_yaml() {
+        let yaml_content = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+      telegram_chat_id: 424242
+"#;
+        let mut tmp_file = NamedTempFile::new().unwrap();
+        write!(tmp_file, "{}", yaml_content).unwrap();
+        let loaded = load_config(tmp_file.path());
+        assert_eq!(loaded.family.members[0].telegram_chat_id, Some(424242));
     }
 }

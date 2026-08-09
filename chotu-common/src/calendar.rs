@@ -348,6 +348,28 @@ pub fn default_calendar_timezone() -> String {
     std::env::var("CHOTU_TIMEZONE").unwrap_or_else(|_| "America/Toronto".to_string())
 }
 
+/// Schedules a timed block starting at `start` UTC, lasting `duration_minutes`.
+/// Returns the Google event ID.
+pub async fn schedule_at(
+    client: &GoogleCalendarClient,
+    title: &str,
+    description: Option<&str>,
+    start: DateTime<Utc>,
+    duration_minutes: i64,
+) -> Result<String, CalendarError> {
+    use chrono::Duration;
+
+    let timezone = default_calendar_timezone();
+    let end = start + Duration::minutes(clamp_event_duration_minutes(duration_minutes));
+    client
+        .create_event(title, description, start, end, &timezone)
+        .await
+}
+
+fn clamp_event_duration_minutes(duration_minutes: i64) -> i64 {
+    duration_minutes.max(15)
+}
+
 /// Schedules a timed block on a member's calendar starting at local 09:00 on `date_yyyy_mm_dd`
 /// (or tomorrow if `None`), lasting `duration_minutes`. Returns the Google event ID.
 pub async fn schedule_timed_block(
@@ -359,7 +381,6 @@ pub async fn schedule_timed_block(
 ) -> Result<String, CalendarError> {
     use chrono::{Duration, Local, NaiveDate, NaiveTime, TimeZone};
 
-    let timezone = default_calendar_timezone();
     let local_today = Local::now().date_naive();
     let target_date = match date_yyyy_mm_dd {
         Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|source| {
@@ -382,11 +403,8 @@ pub async fn schedule_timed_block(
             return Err(CalendarError::InvalidLocalDateTime(start_naive));
         }
     };
-    let end = start + Duration::minutes(duration_minutes.max(15));
 
-    client
-        .create_event(title, description, start, end, &timezone)
-        .await
+    schedule_at(client, title, description, start, duration_minutes).await
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────────
@@ -450,5 +468,12 @@ mod tests {
             error,
             CalendarError::InvalidDate { input, .. } if input == "not-a-date"
         ));
+    }
+
+    #[test]
+    fn clamp_event_duration_minutes_enforces_minimum() {
+        assert_eq!(clamp_event_duration_minutes(5), 15);
+        assert_eq!(clamp_event_duration_minutes(15), 15);
+        assert_eq!(clamp_event_duration_minutes(30), 30);
     }
 }

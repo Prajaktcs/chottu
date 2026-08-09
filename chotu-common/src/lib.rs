@@ -1,6 +1,7 @@
 pub mod agenda;
 pub mod database;
 pub mod due_parse;
+pub mod food_parse;
 pub mod family;
 pub mod google_health;
 pub mod ledger;
@@ -14,14 +15,19 @@ pub mod finnhub;
 pub mod quotes;
 pub mod spend_budget;
 
-pub use database::init_db;
+pub use database::{complete_all_open_tasks, init_db};
 pub use due_parse::{
-    is_due_for_reminder, parse_due_phrase, split_task_add_args, ParsedDue,
+    is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
+    split_task_add_args, ParsedDue,
 };
+pub use food_parse::{resolve_food_log_timing, FoodLogTiming};
 pub use family::{
-    health_refresh_token_env_key, load_config, resolve_health_refresh_token, AppConfig,
-    FamilyMember, FamilySection, InvestmentPhilosophy, TargetAllocation, AllocationBucket,
-    BucketHolding, SpendBudgets, fetch_exchange_rates, CalendarConfig, NutritionGoals,
+    config_path, default_member_id, has_any_telegram_link, has_telegram_delivery,
+    health_refresh_token_env_key, is_telegram_chat_allowed, load_config, member_for_telegram_chat,
+    resolve_health_refresh_token, set_member_telegram_chat_id, telegram_chat_for_member,
+    telegram_delivery_targets, AppConfig, FamilyMember, FamilySection, InvestmentPhilosophy,
+    TargetAllocation, AllocationBucket, BucketHolding, SpendBudgets, fetch_exchange_rates,
+    CalendarConfig, NutritionGoals,
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
@@ -29,7 +35,8 @@ pub use agenda::{
     CalendarConflict, CalendarWindow, FamilyCalendarError, FamilyEventsFetch,
 };
 pub use calendar::{
-    build_calendar_client, default_calendar_timezone, schedule_timed_block, CalendarError,
+    build_calendar_client, default_calendar_timezone, schedule_at, schedule_timed_block,
+    CalendarError,
     CalendarEvent, GoogleCalendarClient,
 };
 pub use google_health::{
@@ -43,7 +50,7 @@ pub use llm::{
     ChotuLlm, GeminiClient, OpenRouterClient, LlmError, NutritionEstimation, MissingSyncNutrition,
     LedgerExtraction, ActionItemExtraction, TravelItineraryExtraction, UpcomingBillExtraction,
     PersonalReferenceExtraction, IntentKind, IntentClassification, UserIntent,
-    FoodPhotoAnalysis, FoodPhotoKind,
+    FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind,
 };
 pub use open_food_facts::{lookup_barcode, OpenFoodFactsProduct};
 pub use finnhub::{

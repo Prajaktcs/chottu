@@ -451,7 +451,7 @@ where
                         }
 
                         let id = uuid::Uuid::new_v4().to_string();
-                        let telegram_msg_id = send_telegram_reminder(&task_desc).await;
+                        let telegram_msg_id = send_telegram_reminder(&task_desc, config).await;
 
                         sqlx::query(
                             "INSERT OR IGNORE INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, status, source, message_id, telegram_message_id, email_sender, email_subject, calendar_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
@@ -955,31 +955,41 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
     output.trim().to_string()
 }
 
-async fn send_telegram_reminder(task_desc: &str) -> Option<i32> {
-    if let (Ok(token), Ok(chat_id_str)) = (
-        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN")),
-        std::env::var("TELEGRAM_CHAT_ID"),
-    ) {
-        if let Ok(chat_id_num) = chat_id_str.parse::<i64>() {
-            let bot = teloxide::Bot::new(token);
-            let message = format!("🔔 *Action Item Reminder*:\n{}", task_desc);
-            use teloxide::requests::Requester;
-            match bot.send_message(teloxide::types::ChatId(chat_id_num), message).await {
-                Ok(msg) => {
-                    println!("Action item reminder sent to Telegram.");
-                    return Some(msg.id.0);
-                }
-                Err(e) => {
-                    eprintln!("Failed to send action item reminder to Telegram: {:?}", e);
-                }
-            }
-        } else {
-            eprintln!("Failed to parse TELEGRAM_CHAT_ID as i64: {}", chat_id_str);
-        }
-    } else {
+async fn send_telegram_reminder(task_desc: &str, config: &AppConfig) -> Option<i32> {
+    let Ok(token) =
+        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
+    else {
         println!("Telegram credentials not fully configured; skipping notification push.");
+        return None;
+    };
+    let targets = chotu_common::telegram_delivery_targets(config);
+    if targets.is_empty() {
+        println!("Telegram delivery targets empty; skipping notification push.");
+        return None;
     }
-    None
+    let bot = teloxide::Bot::new(token);
+    // Plain text: task descriptions from email can contain Markdown metacharacters.
+    let message = format!("🔔 Action Item Reminder:\n{}", task_desc);
+    use teloxide::requests::Requester;
+    let mut last_msg_id = None;
+    for cid in targets {
+        match bot
+            .send_message(teloxide::types::ChatId(cid), message.clone())
+            .await
+        {
+            Ok(msg) => {
+                println!("Action item reminder sent to Telegram chat {}.", cid);
+                last_msg_id = Some(msg.id.0);
+            }
+            Err(e) => {
+                eprintln!(
+                    "Failed to send action item reminder to {}: {:?}",
+                    cid, e
+                );
+            }
+        }
+    }
+    last_msg_id
 }
 
 fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, Vec<u8>)>) {

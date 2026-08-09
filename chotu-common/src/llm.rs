@@ -130,6 +130,18 @@ pub enum IntentKind {
     Unknown,
 }
 
+/// Meal text + optional resolved log day/time from `/food` or photo captions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+pub struct FoodLogContext {
+    pub food_description: String,
+    /// YYYY-MM-DD when the user named a day; omit for today.
+    #[serde(default)]
+    pub food_date: Option<String>,
+    /// HH:MM local when the user named a meal/time.
+    #[serde(default)]
+    pub food_time: Option<String>,
+}
+
 /// Structured free-text intent classification from local Ollama.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct IntentClassification {
@@ -152,9 +164,15 @@ pub struct IntentClassification {
     /// For FOOD / TASK_ADD: family member id when mentioned.
     #[serde(default)]
     pub member_id: Option<String>,
-    /// For FOOD: meal description text.
+    /// For FOOD: meal description text (food only; no date framing).
     #[serde(default)]
     pub food_description: Option<String>,
+    /// For FOOD: resolved local civil day as YYYY-MM-DD when the user named a day.
+    #[serde(default)]
+    pub food_date: Option<String>,
+    /// For FOOD: resolved local time as HH:MM when the user named a meal/time.
+    #[serde(default)]
+    pub food_time: Option<String>,
     /// For MONTHLY: YYYY-MM when mentioned.
     #[serde(default)]
     pub month: Option<String>,
@@ -184,6 +202,10 @@ pub enum UserIntent {
     Food {
         member_id: Option<String>,
         description: String,
+        /// YYYY-MM-DD when the user named a day; None → log for today.
+        date: Option<String>,
+        /// HH:MM local when the user named a meal/time; None → now (today) or noon (other day).
+        time: Option<String>,
     },
     Networth,
     Monthly { yyyy_mm: Option<String> },
@@ -264,6 +286,14 @@ impl IntentClassification {
                     UserIntent::Food {
                         member_id: self.member_id.filter(|s| !s.trim().is_empty()),
                         description,
+                        date: self
+                            .food_date
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
+                        time: self
+                            .food_time
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty()),
                     }
                 }
             }
@@ -313,7 +343,7 @@ Intents:\
 - TASK_ADD: create a new task or reminder; put the title in task_title, optional member_id, and optional due_raw (e.g. \"tomorrow 3pm\", \"friday\", \"2026-08-10\"). Examples: \"remind me to call the dentist tomorrow\", \"add task buy milk\", \"todo: pay rent Friday\".\
 - MEMORY: recall/search over journals, newsletter digests, personal references, or past tasks; put the question in memory_query (e.g. \"what was that Thai recipe\", \"did I write about the interview\", \"find my note on homelab\").\
 - SYNC: pull Google Health / nutrition sync now.\
-- FOOD: log a meal; put member_id when named and the meal text in food_description.\
+- FOOD: log a meal; put member_id when named and the meal text in food_description (food only). When the user names when they ate it, resolve to food_date (YYYY-MM-DD) and optional food_time (HH:MM 24h local) using Today's local date from the user message — e.g. \"yesterday\" / \"last night\" / \"Friday\" become concrete dates; \"dinner\" ≈ 19:00, \"breakfast\" ≈ 08:00, \"lunch\" ≈ 12:30. Omit food_date/food_time when logging for now/today with no specific meal time.\
 - NETWORTH: portfolio / net worth questions.\
 - MONTHLY: monthly spending summary; set month as YYYY-MM if given.\
 - BUDGET: category spend budgets / how much left this month (e.g. \"budget\", \"how's food budget\", \"am I over on shopping\").\
@@ -331,6 +361,7 @@ Rules:\
 - Prefer MONTHLY for overall spend summary / category totals for a month.\
 - Prefer STATUS for health/finance status without an agenda ask.\
 - Never invent a food_description; if intent is FOOD but meal text is missing, use UNKNOWN with a clarify_question.\
+- Resolve relative food days/times into food_date/food_time; never leave relative words like \"yesterday\" in food_date — always YYYY-MM-DD. Omit food_date when the meal is for today / unspecified.\
 - Never invent memory_query; if intent is MEMORY but the question is missing, use UNKNOWN with a clarify_question.\
 - Never invent task_title; if intent is TASK_ADD but title is missing, use UNKNOWN with a clarify_question.\
 - member_id must be one of the provided family member ids when set.\
@@ -767,13 +798,39 @@ in YYYY-MM-DD form from the email metadata and body.";
         } else {
             family_member_ids.join(", ")
         };
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let user_prompt = format!(
-            "Family member ids: {}\nUser message: {}\n",
+            "Today's local date: {}\nFamily member ids: {}\nUser message: {}\n",
+            today,
             members,
             text.trim()
         );
         self.extract_structured(INTENT_CLASSIFIER_SYSTEM_PROMPT, &user_prompt)
             .await
+    }
+
+    /// Resolve meal text + optional log day/time from a food description (for `/food`).
+    pub async fn extract_food_log_context(
+        &self,
+        text: &str,
+    ) -> Result<FoodLogContext, LlmError> {
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        let system_prompt = "\
+You extract food-log fields from a short user message.\
+\
+Return:\
+- food_description: the food/meal text only (no date/time framing words).\
+- food_date: YYYY-MM-DD when the user named a day (resolve relative phrases using Today's local date); omit or null when logging for today / unspecified.\
+- food_time: HH:MM 24-hour local when the user named a clock time or meal-of-day (breakfast≈08:00, lunch≈12:30, dinner/supper≈19:00, snack≈15:00); omit when unspecified.\
+\
+Never invent food that was not mentioned. Never leave relative words in food_date — always YYYY-MM-DD.\
+";
+        let user_prompt = format!(
+            "Today's local date: {}\nUser message: {}\n",
+            today,
+            text.trim()
+        );
+        self.extract_structured(system_prompt, &user_prompt).await
     }
 
     /// Extracts personal reference details from an email using local Ollama.
@@ -1407,6 +1464,22 @@ mod tests {
             UserIntent::Food {
                 member_id: Some("alex".to_string()),
                 description: "2 eggs and toast".to_string(),
+                date: None,
+                time: None,
+            }
+        );
+
+        let food_yesterday: IntentClassification = serde_json::from_str(
+            r#"{"intent":"FOOD","food_description":"pasta and salad","food_date":"2026-08-07","food_time":"19:00","reason":"backdated meal"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            food_yesterday.into_user_intent(),
+            UserIntent::Food {
+                member_id: None,
+                description: "pasta and salad".to_string(),
+                date: Some("2026-08-07".to_string()),
+                time: Some("19:00".to_string()),
             }
         );
 

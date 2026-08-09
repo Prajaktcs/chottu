@@ -524,10 +524,55 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Mark every open/snoozed task as done. Returns `(id, title)` for each completed task
+/// (empty when there was nothing to complete).
+pub async fn complete_all_open_tasks(
+    pool: &SqlitePool,
+    now_rfc3339: &str,
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, title FROM tasks \
+         WHERE status IN ('open', 'snoozed') \
+         ORDER BY due_date IS NULL, due_date ASC, created_at ASC",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if !rows.is_empty() {
+        sqlx::query(
+            "UPDATE tasks SET status = 'done', updated_at = ? \
+             WHERE status IN ('open', 'snoozed')",
+        )
+        .bind(now_rfc3339)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    async fn insert_task(pool: &SqlitePool, id: &str, title: &str, status: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source) \
+             VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 'manual')",
+        )
+        .bind(id)
+        .bind(&now)
+        .bind(&now)
+        .bind(title)
+        .bind(status)
+        .execute(pool)
+        .await
+        .expect("insert task");
+    }
 
     #[tokio::test]
     async fn fresh_db_tasks_has_modern_columns() {
@@ -573,5 +618,40 @@ mod tests {
         .execute(&pool)
         .await
         .expect("manual task insert should succeed on fresh DB");
+    }
+
+    #[tokio::test]
+    async fn complete_all_open_tasks_marks_open_and_snoozed_only() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("complete_all.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        insert_task(&pool, "t-open", "change fob battery", "open").await;
+        insert_task(&pool, "t-snooze", "call dentist", "snoozed").await;
+        insert_task(&pool, "t-done", "already done", "done").await;
+        insert_task(&pool, "t-ignored", "ignored mail", "ignored").await;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let completed = complete_all_open_tasks(&pool, &now).await.unwrap();
+        assert_eq!(completed.len(), 2);
+        let titles: std::collections::HashSet<_> =
+            completed.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(titles.contains("change fob battery"));
+        assert!(titles.contains("call dentist"));
+
+        let statuses: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, status FROM tasks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let map: std::collections::HashMap<_, _> = statuses.into_iter().collect();
+        assert_eq!(map["t-open"], "done");
+        assert_eq!(map["t-snooze"], "done");
+        assert_eq!(map["t-done"], "done");
+        assert_eq!(map["t-ignored"], "ignored");
+
+        // Second call is a no-op.
+        let again = complete_all_open_tasks(&pool, &now).await.unwrap();
+        assert!(again.is_empty());
     }
 }
