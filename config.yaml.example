@@ -38,9 +38,11 @@ family:
 #   CALENDAR_REFRESH_TOKEN_JORDAN=...
 #
 # Per-member Telegram DMs: each adult DMs the bot and runs `/link <member_id>`.
-# That writes `telegram_chat_id` here. Household pushes (brief, budgets, stock,
-# reflection) fan out to all linked chats; `TELEGRAM_CHAT_ID` remains an optional
-# shared fallback. Once any member is linked, unknown chats are rejected.
+# That writes `telegram_chat_id` here. `/link` will not overwrite a member already
+# linked to a different chat — clear `telegram_chat_id` first to move. Household
+# pushes (brief, budgets, stock, reflection) fan out to all linked chats;
+# `TELEGRAM_CHAT_ID` remains an optional shared fallback. Once any member is
+# linked, unknown chats are rejected.
 #
 # Optional: CHOTU_TIMEZONE=America/Toronto (used when auto-scheduling tasks/bills)
 

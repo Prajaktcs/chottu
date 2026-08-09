@@ -219,7 +219,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
 | `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% alerts fan out to linked DMs. |
 | `/chat` | View your current Telegram Chat ID. |
-| `/link <member_id>` | Link this private chat to a family member (writes `telegram_chat_id` in `config.yaml`). |
+| `/link <member_id>` | Link this private chat to a family member (writes `telegram_chat_id` in `config.yaml`). Refuses if that member is already linked to a different chat — clear `telegram_chat_id` in config first to move. |
 | `/whoami` | Show which family member this chat is linked to. |
 
 Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "yesterday's dinner was pasta", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.

@@ -121,7 +121,7 @@ async fn reject_unlinked_chat(bot: &Bot, chat_id: ChatId) -> Result<(), teloxide
         chat_id,
         format!(
             "This chat is not linked to a family member.\n\
-             DM the bot and run `/link <member_id>` (use `/chat` to see this chat id: `{}`).",
+DM the bot and run `/link <member_id>` (use `/chat` to see this chat id: `{}`).",
             chat_id
         ),
     )
@@ -632,8 +632,8 @@ async fn handle_link(
                     chat_id,
                     format!(
                         "✅ Linked this chat (`{}`) to *{}* (`{}`).\n\
-                         Food/tasks without a member id now default to you. \
-                         Use `/whoami` anytime.",
+Food/tasks without a member id now default to you. \
+Use `/whoami` anytime.",
                         chat_id, escape_md_basic(&m.name), m.id
                     ),
                 )
@@ -673,7 +673,7 @@ async fn handle_whoami(
                 chat_id,
                 format!(
                     "This chat (`{}`) is not linked to a family member.\n\
-                     Run `/link <member_id>` to claim it.",
+Run `/link <member_id>` to claim it.",
                     chat_id
                 ),
             )

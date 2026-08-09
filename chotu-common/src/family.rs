@@ -363,6 +363,19 @@ pub fn set_member_telegram_chat_id<P: AsRef<Path>>(
         return Err(format!("Unknown member `{member_id}`"));
     };
 
+    // Refuse hijack: an unknown chat must not steal a member already linked elsewhere.
+    // Idempotent re-link of the same chat is allowed. To move a member, clear
+    // `telegram_chat_id` in config.yaml first.
+    if let Some(existing) = config.family.members[idx].telegram_chat_id {
+        if existing != chat_id {
+            return Err(format!(
+                "Member `{member_id}` is already linked to chat `{existing}`. \
+                 Clear that member's `telegram_chat_id` in config.yaml, then retry `/link`."
+            ));
+        }
+        return Ok(config);
+    }
+
     for (i, m) in config.family.members.iter_mut().enumerate() {
         if i == idx {
             m.telegram_chat_id = Some(chat_id);
@@ -780,6 +793,7 @@ currency: "CAD"
         );
         assert!(telegram_chat_for_member(&updated, "alex").is_none());
 
+        // Same chat may reassign from jordan → alex (clears jordan).
         let moved =
             set_member_telegram_chat_id(tmp_file.path(), "alex", 555).expect("move link to alex");
         assert_eq!(telegram_chat_for_member(&moved, "alex"), Some(555));
@@ -787,6 +801,18 @@ currency: "CAD"
 
         let reloaded = load_config(tmp_file.path());
         assert_eq!(telegram_chat_for_member(&reloaded, "alex"), Some(555));
+
+        // Idempotent re-link of the same chat.
+        let again =
+            set_member_telegram_chat_id(tmp_file.path(), "alex", 555).expect("idempotent");
+        assert_eq!(telegram_chat_for_member(&again, "alex"), Some(555));
+
+        // Different chat must not hijack an already-linked member.
+        let hijack = set_member_telegram_chat_id(tmp_file.path(), "alex", 999);
+        assert!(hijack.is_err());
+        assert!(hijack.unwrap_err().contains("already linked"));
+        let still = load_config(tmp_file.path());
+        assert_eq!(telegram_chat_for_member(&still, "alex"), Some(555));
     }
 
     #[test]
