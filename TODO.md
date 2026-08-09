@@ -31,7 +31,9 @@
 - [x] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
 - [x] Spend alerts / category budgets
 - [x] Family multi-user Telegram UX
+- [x] Fitness coach loop: `fitness_goals` + weekly `/plan` + exercise persistence + outcome-aware tips/brief
 - [ ] Meal planning ↔ grocery lists
+- [ ] Medical-record–aware coaching (private local ingest only; never commit or fan-out across family DMs; user-confirmed constraints → macros/plan; never diagnose)
 
 ### Non-goals
 - Outbound email / SMTP / creating drafts or replies

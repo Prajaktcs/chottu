@@ -16,6 +16,23 @@ family:
         fats_g: 70
         fiber_g: 30
         steps: 8000
+      # Optional long-horizon fitness outcome + training policy.
+      # Keep real goals in your private config.yaml (gitignored) — never commit
+      # personal health details. Linked Telegram DMs only see *your* nutrition/training.
+      fitness_goals:
+        intent: "example outcome (replace locally)"
+        target_date: "2027-06-01"
+        focus: "recomp"             # cut | bulk | recomp | endurance | general
+        sessions_per_week: 4
+        session_minutes: 45
+        equipment: "gym"            # home | gym | mixed
+        # User-authored limits only (NOT medical records / diagnoses).
+        constraints:
+          - "example constraint (replace locally)"
+        weekly_targets:
+          strength_sessions: 3
+          cardio_minutes: 90
+          active_calories: 400      # daily floor when set
     - id: jordan
       name: Jordan
       role: adult
@@ -29,7 +46,7 @@ family:
     - id: sam
       name: Sam
       role: kid
-      # no calendar / nutrition_goals / telegram = no calendar / goals / personal DM
+      # no calendar / nutrition_goals / fitness_goals / telegram = no calendar / goals / personal DM
 
 # Note: Per-member Google Calendar refresh tokens are stored in .env, not here.
 # After running /login calendar <member_id> in Telegram, the following will be

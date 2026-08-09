@@ -153,6 +153,14 @@ pub async fn build_nutrition_trend_reports(
                 protein_trend,
                 steps_trend,
             );
+            let ctx = crate::coach_enrich::enrich_coach_context(
+                pool,
+                config,
+                &member.id,
+                ctx,
+                None,
+            )
+            .await;
             append_coach_tip(llm, &ctx, &mut msg).await;
         }
 

@@ -27,7 +27,7 @@ pub use family::{
     resolve_health_refresh_token, set_member_telegram_chat_id, telegram_chat_for_member,
     telegram_delivery_targets, AppConfig, FamilyMember, FamilySection, InvestmentPhilosophy,
     TargetAllocation, AllocationBucket, BucketHolding, SpendBudgets, fetch_exchange_rates,
-    CalendarConfig, NutritionGoals,
+    CalendarConfig, FitnessGoals, FitnessWeeklyTargets, NutritionGoals,
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,

@@ -107,6 +107,100 @@ fn progress_bar(pct: f64) -> String {
     format!("[{}{}]", "█".repeat(filled), "░".repeat(10 - filled))
 }
 
+/// Optional weekly training targets under [`FitnessGoals`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FitnessWeeklyTargets {
+    pub strength_sessions: Option<i32>,
+    pub cardio_minutes: Option<i32>,
+    /// Daily active-calorie floor when set.
+    pub active_calories: Option<i32>,
+}
+
+/// Long-horizon outcome + training policy (complements daily [`NutritionGoals`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct FitnessGoals {
+    /// Outcome phrasing, e.g. "lean beach body / visible abs".
+    pub intent: Option<String>,
+    /// Target date as YYYY-MM-DD.
+    pub target_date: Option<String>,
+    /// cut | bulk | recomp | endurance | general
+    pub focus: Option<String>,
+    pub sessions_per_week: Option<i32>,
+    pub session_minutes: Option<i32>,
+    /// home | gym | mixed
+    pub equipment: Option<String>,
+    /// User-authored limits (not medical records). Forward hook for later.
+    #[serde(default)]
+    pub constraints: Vec<String>,
+    #[serde(default)]
+    pub weekly_targets: Option<FitnessWeeklyTargets>,
+}
+
+impl FitnessGoals {
+    pub fn is_empty(&self) -> bool {
+        self.intent.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self.target_date.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self.focus.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self.sessions_per_week.is_none()
+            && self.session_minutes.is_none()
+            && self.equipment.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+            && self.constraints.iter().all(|c| c.trim().is_empty())
+            && self
+                .weekly_targets
+                .as_ref()
+                .map(|t| {
+                    t.strength_sessions.is_none()
+                        && t.cardio_minutes.is_none()
+                        && t.active_calories.is_none()
+                })
+                .unwrap_or(true)
+    }
+
+    /// Days from `as_of` until `target_date` (negative if past). None if unset/invalid.
+    pub fn days_until_target(&self, as_of: chrono::NaiveDate) -> Option<i64> {
+        let raw = self.target_date.as_ref()?.trim();
+        let target = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+        Some((target - as_of).num_days())
+    }
+
+    /// Short Markdown block for briefs / status (countdown + intent).
+    pub fn outcome_markdown(&self, as_of: chrono::NaiveDate) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut lines = Vec::new();
+        if let Some(intent) = self.intent.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            lines.push(format!("Outcome: {}", intent));
+        }
+        if let Some(days) = self.days_until_target(as_of) {
+            if days > 0 {
+                lines.push(format!("{} days to target ({})", days, self.target_date.as_deref().unwrap_or("")));
+            } else if days == 0 {
+                lines.push("Target day is today".to_string());
+            } else {
+                lines.push(format!(
+                    "Target date {} was {} days ago",
+                    self.target_date.as_deref().unwrap_or(""),
+                    -days
+                ));
+            }
+        }
+        if let Some(focus) = self.focus.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            lines.push(format!("Focus: {}", focus));
+        }
+        if lines.is_empty() {
+            return None;
+        }
+        let mut out = String::from("• *Fitness:*\n");
+        for line in lines {
+            out.push_str("  - ");
+            out.push_str(&line);
+            out.push('\n');
+        }
+        Some(out)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FamilyMember {
     pub id: String,
@@ -117,6 +211,9 @@ pub struct FamilyMember {
     /// Optional daily nutrition / activity goals.
     #[serde(default)]
     pub nutrition_goals: Option<NutritionGoals>,
+    /// Optional long-horizon fitness outcome + training policy.
+    #[serde(default)]
+    pub fitness_goals: Option<FitnessGoals>,
     /// Telegram private-chat id for this member (per-person DMs).
     /// Set via `/link <member_id>` or manually in config.yaml.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,6 +343,7 @@ impl Default for AppConfig {
                     role: "adult".to_string(),
                     calendar: None,
                     nutrition_goals: None,
+                    fitness_goals: None,
                     telegram_chat_id: None,
                 }],
             },
@@ -547,6 +645,7 @@ mod tests {
                 email: "alex@example.com".to_string(),
             }),
             nutrition_goals: None,
+            fitness_goals: None,
             telegram_chat_id: None,
         };
         assert_eq!(member.calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
@@ -571,6 +670,19 @@ family:
         fats_g: 70
         fiber_g: 30
         steps: 8000
+      fitness_goals:
+        intent: "lean beach body"
+        target_date: "2027-06-01"
+        focus: "recomp"
+        sessions_per_week: 4
+        session_minutes: 45
+        equipment: "gym"
+        constraints:
+          - "prefer low-impact cardio"
+        weekly_targets:
+          strength_sessions: 3
+          cardio_minutes: 90
+          active_calories: 400
     - id: jordan
       name: Jordan
       role: adult
@@ -620,8 +732,23 @@ target_allocation:
         assert_eq!(goals.protein_g, Some(160.0));
         assert_eq!(goals.steps, Some(8000));
         assert!(loaded.family.members[2].nutrition_goals.is_none());
+        let fitness = loaded.family.members[0].fitness_goals.as_ref().unwrap();
+        assert_eq!(fitness.intent.as_deref(), Some("lean beach body"));
+        assert_eq!(fitness.target_date.as_deref(), Some("2027-06-01"));
+        assert_eq!(fitness.sessions_per_week, Some(4));
+        assert_eq!(
+            fitness
+                .weekly_targets
+                .as_ref()
+                .and_then(|t| t.strength_sessions),
+            Some(3)
+        );
+        assert!(loaded.family.members[2].fitness_goals.is_none());
         // Sam has no calendar
         assert!(loaded.family.members[2].calendar.is_none());
+
+        let as_of = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
+        assert_eq!(fitness.days_until_target(as_of), Some(296));
 
         let budgets = loaded.spend_budgets.as_ref().unwrap();
         assert_eq!(budgets.categories.get("Food"), Some(&800.0));
@@ -655,6 +782,25 @@ target_allocation:
     }
 
     #[test]
+    fn test_fitness_outcome_markdown() {
+        let goals = FitnessGoals {
+            intent: Some("beach body".into()),
+            target_date: Some("2027-06-01".into()),
+            focus: Some("recomp".into()),
+            sessions_per_week: None,
+            session_minutes: None,
+            equipment: None,
+            constraints: vec![],
+            weekly_targets: None,
+        };
+        let as_of = chrono::NaiveDate::from_ymd_opt(2026, 8, 9).unwrap();
+        let md = goals.outcome_markdown(as_of).unwrap();
+        assert!(md.contains("beach body"));
+        assert!(md.contains("296 days to target"));
+        assert!(md.contains("Focus: recomp"));
+    }
+
+    #[test]
     fn test_load_missing_config_fallback() {
         let loaded = load_config("non_existent_file.yaml");
         assert_eq!(loaded.family.members.len(), 1);
@@ -672,6 +818,7 @@ target_allocation:
             role: "adult".to_string(),
             calendar: None,
             nutrition_goals: None,
+            fitness_goals: None,
             telegram_chat_id: None,
         });
         assert_eq!(
@@ -715,6 +862,7 @@ target_allocation:
             role: "adult".to_string(),
             calendar: None,
             nutrition_goals: None,
+            fitness_goals: None,
             telegram_chat_id: Some(222),
         });
         config

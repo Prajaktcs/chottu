@@ -1,4 +1,4 @@
-//! Morning brief: calendar, open tasks, bills due, yesterday's nutrition vs goals.
+//! Morning brief: calendar, open tasks, bills due, yesterday's nutrition vs goals, training.
 
 use chrono::{Duration, Local};
 use chotu_common::{
@@ -22,7 +22,15 @@ struct BriefBillRow {
 }
 
 /// Assemble a Markdown morning brief for Telegram.
-pub async fn compose_morning_brief(pool: &SqlitePool, config: &AppConfig) -> String {
+///
+/// When `for_member_id` is set (linked personal DM), nutrition and training
+/// sections include **only that member** so fitness goals / health metrics stay
+/// private to them. Household shared chats (`None`) keep the family-wide view.
+pub async fn compose_morning_brief(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    for_member_id: Option<&str>,
+) -> String {
     let now = Local::now();
     let today = now.format("%Y-%m-%d").to_string();
     let yesterday = (now.date_naive() - Duration::days(1))
@@ -31,6 +39,16 @@ pub async fn compose_morning_brief(pool: &SqlitePool, config: &AppConfig) -> Str
     let weekday = now.format("%A, %b %d, %Y");
 
     let mut out = format!("☀️ *Morning Brief* — {}\n", weekday);
+    if let Some(mid) = for_member_id {
+        if let Some(m) = config
+            .family
+            .members
+            .iter()
+            .find(|m| m.id.eq_ignore_ascii_case(mid))
+        {
+            out.push_str(&format!("_Private for {}_\n", escape_md(&m.name)));
+        }
+    }
 
     out.push_str("\n📅 *Today*\n");
     out.push_str(&format_brief_calendar_section(config, &today).await);
@@ -42,7 +60,12 @@ pub async fn compose_morning_brief(pool: &SqlitePool, config: &AppConfig) -> Str
     out.push_str(&format_bills_section(pool, &today).await);
 
     out.push_str(&format!("\n🥗 *Nutrition* (yesterday {})\n", yesterday));
-    out.push_str(&format_nutrition_section(pool, config, &yesterday).await);
+    out.push_str(&format_nutrition_section(pool, config, &yesterday, for_member_id).await);
+
+    out.push_str("\n🏋️ *Training*\n");
+    out.push_str(
+        &format_training_section(pool, config, now.date_naive(), &yesterday, for_member_id).await,
+    );
 
     out
 }
@@ -180,6 +203,7 @@ async fn format_nutrition_section(
     pool: &SqlitePool,
     config: &AppConfig,
     yesterday: &str,
+    for_member_id: Option<&str>,
 ) -> String {
     let healths: Vec<HealthFamilySummary> = match sqlx::query_as::<_, HealthFamilySummary>(
         "SELECT * FROM health_family_summary WHERE date = ?",
@@ -204,6 +228,11 @@ async fn format_nutrition_section(
     let mut any = false;
 
     for member in &config.family.members {
+        if let Some(only) = for_member_id {
+            if !member.id.eq_ignore_ascii_case(only) {
+                continue;
+            }
+        }
         let h = by_id.remove(&member.id);
         let goals = member.nutrition_goals.as_ref();
 
@@ -266,6 +295,62 @@ async fn format_nutrition_section(
 
     if !any {
         lines.push_str("_No nutrition logged yesterday._\n");
+    }
+    lines
+}
+
+async fn format_training_section(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    today: chrono::NaiveDate,
+    yesterday: &str,
+    for_member_id: Option<&str>,
+) -> String {
+    let week_start = health_coach::week_start_monday(today)
+        .format("%Y-%m-%d")
+        .to_string();
+    let mut lines = String::new();
+    let mut any = false;
+
+    for member in &config.family.members {
+        if let Some(only) = for_member_id {
+            if !member.id.eq_ignore_ascii_case(only) {
+                continue;
+            }
+        }
+        let Some(fitness) = member.fitness_goals.as_ref().filter(|g| !g.is_empty()) else {
+            continue;
+        };
+        any = true;
+
+        let planned_line = match health_coach::load_weekly_plan(pool, &member.id, &week_start).await
+        {
+            Ok(Some(stored)) => health_coach::session_for_date_from_stored(&stored, today).map(|p| {
+                let notes = p.notes.trim();
+                if notes.is_empty() {
+                    format!("{} ({})", p.weekday, p.kind.as_str())
+                } else {
+                    format!("{} ({}): {}", p.weekday, p.kind.as_str(), notes)
+                }
+            }),
+            _ => None,
+        };
+
+        let yesterday_ex = health_coach::exercises_for_day(pool, &member.id, yesterday)
+            .await
+            .unwrap_or_default();
+
+        lines.push_str(&format!("• *{}*\n", escape_md(&member.name)));
+        lines.push_str(&health_coach::fitness_brief_lines(
+            fitness,
+            today,
+            planned_line.as_deref(),
+            &yesterday_ex,
+        ));
+    }
+
+    if !any {
+        lines.push_str("_No fitness_goals configured — add them in config.yaml, then `/plan`._\n");
     }
     lines
 }

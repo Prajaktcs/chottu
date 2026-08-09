@@ -1,20 +1,31 @@
 use anyhow::Result;
 use sqlx::SqlitePool;
 
+mod coach_enrich;
 mod coaching;
+mod fitness_plan;
 mod sync;
 mod trends;
 
+pub use coach_enrich::{enrich_coach_context, fitness_brief_lines};
 pub use coaching::{
-    append_coach_tip, generate_nutrition_coach_tip, NutritionCoachContext,
+    append_coach_tip, generate_fitness_coach_tip, generate_nutrition_coach_tip,
+    FitnessCoachContext, NutritionCoachContext,
+};
+pub use fitness_plan::{
+    count_strengthish_sessions, current_week_start_str, generate_and_store_weekly_plan,
+    load_weekly_plan, parse_plan_json, render_plan_markdown, session_for_date,
+    session_for_date_from_stored, week_start_monday, weekday_name, PlanDay, PlanDayKind,
+    StoredWeeklyPlan, WeeklyFitnessPlan,
 };
 pub use sync::{
-    credentials_configured, delete_google_nutrition_logs, external_nutrition_base,
-    google_data_point_ids_for_day, google_health_client_for_member, google_health_client_from_env,
-    member_health_credentials_configured, push_food_log_to_google, push_pending_food_logs,
-    rebuild_summary_from_food_log, sum_food_log_for_day, sum_unsynced_food_log_for_day,
-    sync_configured_members_today, sync_member_for_date, sync_primary_today,
-    write_summary_nutrition, DayNutritionTotals, HealthSyncReport,
+    credentials_configured, delete_google_nutrition_logs, exercises_for_day, exercises_for_range,
+    external_nutrition_base, google_data_point_ids_for_day, google_health_client_for_member,
+    google_health_client_from_env, member_health_credentials_configured, push_food_log_to_google,
+    push_pending_food_logs, rebuild_summary_from_food_log, replace_exercise_log_for_day,
+    sum_food_log_for_day, sum_unsynced_food_log_for_day, sync_configured_members_today,
+    sync_member_for_date, sync_primary_today, write_summary_nutrition, DayNutritionTotals,
+    HealthSyncReport,
 };
 pub use trends::build_nutrition_trend_reports;
 
@@ -82,7 +93,8 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                             "Health Coach: Sync complete for {} — {} kcal, {} steps",
                             report.member_id, report.calories, report.steps
                         );
-                        notify_telegram(&report.telegram_markdown(), &config).await;
+                        notify_member_telegram(&report.telegram_markdown(), &config, &report.member_id)
+                            .await;
                     }
                     last_sync_date = date_str;
                 }
@@ -96,13 +108,27 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
     }
 }
 
-async fn notify_telegram(message: &str, config: &chotu_common::AppConfig) {
+/// Deliver a member's health sync only to their linked DM (never other adults' chats).
+async fn notify_member_telegram(
+    message: &str,
+    config: &chotu_common::AppConfig,
+    member_id: &str,
+) {
     let Ok(token) =
         std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
     else {
         return;
     };
-    let targets = chotu_common::telegram_delivery_targets(config);
+    let targets: Vec<i64> =
+        if let Some(cid) = chotu_common::telegram_chat_for_member(config, member_id) {
+            vec![cid]
+        } else if !chotu_common::has_any_telegram_link(config) {
+            // Pre-/link single-user setups: optional TELEGRAM_CHAT_ID fallback.
+            chotu_common::telegram_delivery_targets(config)
+        } else {
+            // Other members are linked; do not broadcast this person's metrics into their DMs.
+            Vec::new()
+        };
     if targets.is_empty() {
         return;
     }
