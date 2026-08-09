@@ -50,6 +50,7 @@ pub fn parse_due_phrase(raw: &str) -> Option<ParsedDue> {
 /// - `buy milk`
 /// - `praj buy milk`
 /// - `buy milk due tomorrow 3pm`
+/// - `change battery for fob by today 3 pm`
 /// - `praj call dentist due friday 15:00`
 pub fn split_task_add_args(
     args: &str,
@@ -90,11 +91,19 @@ pub fn split_task_add_args(
 }
 
 fn split_due_marker(args: &str) -> Option<(&str, &str)> {
-    // Case-insensitive " due " separator (last occurrence wins).
+    // Case-insensitive due separator; rightmost of due/by/before wins.
     let lower = args.to_lowercase();
-    let idx = lower.rfind(" due ")?;
+    let mut best: Option<(usize, usize)> = None; // (index, separator length)
+    for sep in [" due ", " by ", " before "] {
+        if let Some(idx) = lower.rfind(sep) {
+            if best.map(|(bi, _)| idx > bi).unwrap_or(true) {
+                best = Some((idx, sep.len()));
+            }
+        }
+    }
+    let (idx, sep_len) = best?;
     let before = &args[..idx];
-    let after = &args[idx + 5..];
+    let after = &args[idx + sep_len..];
     if before.trim().is_empty() || after.trim().is_empty() {
         return None;
     }
@@ -233,6 +242,38 @@ pub fn is_due_for_reminder(due_at: &str, reminded_at: Option<&str>, now: chrono:
     due.with_timezone(&Utc) <= now
 }
 
+/// Known `/tasks` list status filter tokens (not task titles).
+pub fn is_known_task_status_filter(tok: &str) -> bool {
+    matches!(
+        tok.to_lowercase().as_str(),
+        "all" | "done" | "completed" | "ignored" | "snoozed" | "open"
+    )
+}
+
+/// True when `/tasks …` / `/task …` args look like creating a task rather than listing.
+///
+/// List shapes: empty (handled by caller), single status/member, or status↔member pair.
+pub fn looks_like_task_add_query(tokens: &[&str], member_ids: &[String]) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let is_member = |tok: &str| {
+        member_ids
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case(tok))
+    };
+    match tokens {
+        [a] => !is_known_task_status_filter(a) && !is_member(a),
+        [a, b] => {
+            let list_shape = (is_known_task_status_filter(a) && is_member(b))
+                || (is_member(a) && is_known_task_status_filter(b))
+                || (is_known_task_status_filter(a) && is_known_task_status_filter(b));
+            !list_shape
+        }
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,6 +292,61 @@ mod tests {
         assert_eq!(m.as_deref(), Some("praj"));
         assert_eq!(title, "call dentist");
         assert_eq!(due.as_deref(), Some("tomorrow 3pm"));
+
+        let (m, title, due) =
+            split_task_add_args("change battery for fob by today 3 pm", &members).unwrap();
+        assert!(m.is_none());
+        assert_eq!(title, "change battery for fob");
+        assert_eq!(due.as_deref(), Some("today 3 pm"));
+
+        let (m, title, due) =
+            split_task_add_args("submit form before friday 9am", &members).unwrap();
+        assert!(m.is_none());
+        assert_eq!(title, "submit form");
+        assert_eq!(due.as_deref(), Some("friday 9am"));
+
+        // Rightmost separator wins when both appear.
+        let (_, title, due) =
+            split_task_add_args("stand by door due tomorrow 10am", &members).unwrap();
+        assert_eq!(title, "stand by door");
+        assert_eq!(due.as_deref(), Some("tomorrow 10am"));
+    }
+
+    #[test]
+    fn test_looks_like_task_add_query() {
+        let members = vec!["praj".to_string(), "alex".to_string()];
+        assert!(!looks_like_task_add_query(&[], &members));
+        assert!(!looks_like_task_add_query(&["open"], &members));
+        assert!(!looks_like_task_add_query(&["praj"], &members));
+        assert!(!looks_like_task_add_query(&["open", "praj"], &members));
+        assert!(!looks_like_task_add_query(&["praj", "snoozed"], &members));
+        assert!(!looks_like_task_add_query(&["all", "completed"], &members));
+
+        assert!(looks_like_task_add_query(&["buy"], &members));
+        assert!(looks_like_task_add_query(&["buy", "milk"], &members));
+        assert!(looks_like_task_add_query(
+            &["change", "battery", "for", "fob", "by", "today", "3", "pm"],
+            &members
+        ));
+        // Member + title (not a list filter pair) → add.
+        assert!(looks_like_task_add_query(&["praj", "milk"], &members));
+    }
+
+    #[test]
+    fn test_parse_due_today_3_pm_spaced() {
+        let parsed = parse_due_phrase("today 3 pm").unwrap();
+        let due = chrono::DateTime::parse_from_rfc3339(&parsed.due_at).unwrap();
+        assert_eq!(due.with_timezone(&Local).hour(), 15);
+        assert_eq!(parsed.due_date, Local::now().date_naive().format("%Y-%m-%d").to_string());
+    }
+
+    #[test]
+    fn test_parse_due_before_friday_9am() {
+        let parsed = parse_due_phrase("friday 9am").unwrap();
+        let due = chrono::DateTime::parse_from_rfc3339(&parsed.due_at).unwrap();
+        let local = due.with_timezone(&Local);
+        assert_eq!(local.hour(), 9);
+        assert_eq!(local.minute(), 0);
     }
 
     #[test]

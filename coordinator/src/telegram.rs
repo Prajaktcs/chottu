@@ -10,15 +10,18 @@ use teloxide::utils::command::BotCommands;
 use tokio::sync::RwLock;
 
 use chotu_common::{
-    answer_memory_query, clear_budget_override, compose_calendar_agenda, compute_budget_progress,
-    config_path, current_budget_month, default_member_id, display_category, exchange_google_code,
-    fetch_exchange_rates, fetch_stock_quotes, format_budget_progress_markdown, has_telegram_delivery,
-    is_telegram_chat_allowed, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
-    parse_due_phrase, pending_budget_alerts, save_calendar_refresh_token, save_google_refresh_token,
-    save_health_refresh_token, set_budget_override, set_member_telegram_chat_id,
-    spawn_background_reindex, split_task_add_args, start_redirect_listener, telegram_chat_for_member,
-    telegram_delivery_targets, AppConfig, CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient,
-    InvestmentPhilosophy, MemoryIndex, UserIntent,
+    answer_memory_query, build_calendar_client, clear_budget_override, complete_all_open_tasks,
+    compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
+    default_member_id, display_category, exchange_google_code, fetch_exchange_rates,
+    fetch_stock_quotes, format_budget_progress_markdown, has_telegram_delivery,
+    is_telegram_chat_allowed, looks_like_task_add_query,
+    lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat, parse_due_phrase,
+    pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
+    save_google_refresh_token, save_health_refresh_token, schedule_at, set_budget_override,
+    set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
+    start_redirect_listener, telegram_chat_for_member, telegram_delivery_targets, AppConfig,
+    CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient, InvestmentPhilosophy, MemoryIndex,
+    UserIntent,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 use teloxide::net::Download;
@@ -41,8 +44,10 @@ pub enum Command {
     Cal(String),
     #[command(description = "show multi-day nutrition trends. Usage: /trends [days]")]
     Trends(String),
-    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks add [member] <title> [due <when>]; /tasks complete|snooze|reassign|open <id> ...")]
+    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks add [member] <title> [due|by <when>]; /tasks complete <id|all>; /tasks snooze|reassign|open <id> ...")]
     Tasks(String),
+    #[command(description = "add a task (alias). Usage: /task <title> [by|due <when>]")]
+    Task(String),
     #[command(description = "search personal memory (journals, digests, references, tasks). Usage: /memory <question> | /memory reindex")]
     Memory(String),
     #[command(description = "trigger evening reflection loop.")]
@@ -422,7 +427,7 @@ async fn handle_command(
                 .await?;
         }
         Command::Food(args) => {
-            handle_food_log(&bot, chat_id, args, &pool, &gemini_client, &config).await?;
+            handle_food_log(&bot, chat_id, args, &pool, &llm, &gemini_client, &config).await?;
         }
         Command::Status => {
             handle_status(&bot, chat_id, &pool, &config, &llm).await?;
@@ -436,7 +441,7 @@ async fn handle_command(
         Command::Trends(args) => {
             handle_trends(&bot, chat_id, args, &pool, &config, &llm).await?;
         }
-        Command::Tasks(args) => {
+        Command::Tasks(args) | Command::Task(args) => {
             handle_tasks(&bot, chat_id, args, &pool, &config).await?;
         }
         Command::Memory(args) => {
@@ -684,6 +689,7 @@ async fn handle_food_log(
     chat_id: ChatId,
     args: String,
     pool: &SqlitePool,
+    llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
@@ -717,22 +723,71 @@ async fn handle_food_log(
         return Ok(());
     }
 
+    // Let the LLM resolve relative days/times ("yesterday's dinner…") into YYYY-MM-DD / HH:MM.
+    let (description, food_date, food_time) =
+        match llm.extract_food_log_context(&food_description).await {
+            Ok(ctx) => {
+                let desc = if ctx.food_description.trim().is_empty() {
+                    food_description.clone()
+                } else {
+                    ctx.food_description.trim().to_string()
+                };
+                (desc, ctx.food_date, ctx.food_time)
+            }
+            Err(e) => {
+                eprintln!(
+                    "Food log context extract failed (falling back to raw text/today): {:?}",
+                    e
+                );
+                (food_description.clone(), None, None)
+            }
+        };
+
+    log_food_for_member(
+        bot,
+        chat_id,
+        pool,
+        gemini_client,
+        config,
+        &family_member_id,
+        &description,
+        food_date.as_deref(),
+        food_time.as_deref(),
+    )
+    .await
+}
+
+/// Estimate nutrition and persist a food log for an optional resolved day/time.
+async fn log_food_for_member(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    gemini_client: &GeminiClient,
+    config: &AppConfig,
+    family_member_id: &str,
+    food_description: &str,
+    food_date: Option<&str>,
+    food_time: Option<&str>,
+) -> Result<(), teloxide::RequestError> {
+    let timing = resolve_food_log_timing(food_date, food_time);
+
     bot.send_message(
         chat_id,
         format!("Estimating nutrition for {}...", family_member_id),
     )
     .await?;
 
-    match gemini_client.approximate_nutrition(&food_description).await {
+    match gemini_client.approximate_nutrition(food_description).await {
         Ok(est) => {
             persist_food_estimation(
                 bot,
                 chat_id,
                 pool,
                 config,
-                &family_member_id,
-                &food_description,
+                family_member_id,
+                food_description,
                 &est,
+                &timing,
             )
             .await?;
         }
@@ -793,10 +848,15 @@ async fn persist_food_estimation(
     family_member_id: &str,
     food_description: &str,
     est: &chotu_common::NutritionEstimation,
+    timing: &chotu_common::FoodLogTiming,
 ) -> Result<(), teloxide::RequestError> {
     let log_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now();
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let log_ts = timing.timestamp;
+    let date_str = timing.date.clone();
+    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let yesterday_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
 
     if let Err(e) = sqlx::query(
         "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
@@ -809,7 +869,7 @@ async fn persist_food_estimation(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&log_id)
-    .bind(now)
+    .bind(log_ts)
     .bind(family_member_id)
     .bind(food_description)
     .bind(est.total_calories)
@@ -852,7 +912,7 @@ async fn persist_food_estimation(
             Ok(client) => {
                 let pending = chotu_common::FoodLog {
                     id: log_id.clone(),
-                    timestamp: now,
+                    timestamp: log_ts,
                     family_member_id: family_member_id.to_string(),
                     raw_text_description: food_description.to_string(),
                     estimated_calories: est.total_calories,
@@ -1026,18 +1086,33 @@ async fn persist_food_estimation(
         format!("\n• {}", notable.join(" · "))
     };
 
+    let day_label = if date_str == today_str {
+        "Today".to_string()
+    } else if date_str == yesterday_str {
+        "Yesterday".to_string()
+    } else {
+        date_str.clone()
+    };
+
     let day_line = match day_totals {
         Some((cal, p, c, f)) => format!(
-            "\n\n*Today:* {} kcal · {:.0}g P / {:.0}g C / {:.0}g F",
-            cal, p, c, f
+            "\n\n*{}:* {} kcal · {:.0}g P / {:.0}g C / {:.0}g F",
+            day_label, cal, p, c, f
         ),
         None => String::new(),
     };
 
+    let when_note = if timing.date_was_explicit && date_str != today_str {
+        format!(" ({})", day_label)
+    } else {
+        String::new()
+    };
+
     let msg_text = format!(
-        "✅ Logged for *{}*: _{}_\n\
+        "✅ Logged for *{}*{}: _{}_\n\
          • {} kcal · {:.1}g P / {:.1}g C / {:.1}g F ({}){}{}{}",
         family_member_id,
+        when_note,
         food_description,
         est.total_calories,
         est.protein_grams,
@@ -1477,18 +1552,26 @@ async fn handle_tasks(
             return add_manual_task(bot, chat_id, pool, config, &rest).await;
         }
         "complete" => {
-            return match second {
-                Some(id) if id.len() >= 4 => mark_task_complete(bot, chat_id, pool, id).await,
+            return match second.map(|s| s.to_lowercase()) {
+                Some(ref s) if s == "all" => {
+                    mark_all_tasks_complete(bot, chat_id, pool).await
+                }
+                Some(ref id) if id.len() >= 4 => {
+                    mark_task_complete(bot, chat_id, pool, id).await
+                }
                 _ => {
                     bot.send_message(
                         chat_id,
-                        "⚠️ Usage: `/tasks complete <id>`",
+                        "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all`",
                     )
                     .parse_mode(teloxide::types::ParseMode::Markdown)
                     .await?;
                     Ok(())
                 }
             };
+        }
+        "done" if second.is_some_and(|s| s.eq_ignore_ascii_case("all")) => {
+            return mark_all_tasks_complete(bot, chat_id, pool).await;
         }
         "done" if second.is_some_and(looks_like_task_id_prefix) => {
             return mark_task_complete(bot, chat_id, pool, second.unwrap()).await;
@@ -1560,6 +1643,13 @@ async fn handle_tasks(
             return reopen_task(bot, chat_id, pool, second.unwrap()).await;
         }
         _ => {}
+    }
+
+    // `/task change battery…` or `/tasks buy milk by tomorrow` — treat as add when
+    // args aren't a plain list filter (status / member / status+member).
+    let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
+    if looks_like_task_add_query(&tokens, &member_ids) {
+        return add_manual_task(bot, chat_id, pool, config, args.trim()).await;
     }
 
     let mut status_filter = "open";
@@ -1665,7 +1755,7 @@ async fn handle_tasks(
 
     if label == "open" || label == "open/snoozed" || label == "snoozed" {
         msg.push_str(
-            "\n_Actions:_ `/tasks add [member] <title> [due <when>]` · `/tasks complete <id>` · \
+            "\n_Actions:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all>` · \
              `/tasks snooze <id> [days]` · `/tasks reassign <id> <member>` · `/tasks open <id>`\n\
              _Dismiss email tasks:_ reply `unactionable` to the original reminder.",
         );
@@ -1761,8 +1851,8 @@ async fn add_manual_task(
     let Some((member_id, title, due_raw)) = split_task_add_args(args, &member_ids) else {
         bot.send_message(
             chat_id,
-            "⚠️ Usage: `/tasks add [member] <title> [due <when>]`\n\
-             Examples: `/tasks add buy milk` · `/tasks add praj call dentist due tomorrow 15:00`",
+            "⚠️ Usage: `/tasks add [member] <title> [due|by <when>]`\n\
+             Examples: `/task change battery for fob by today 3 pm` · `/tasks add praj call dentist due tomorrow 15:00`",
         )
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
@@ -1770,13 +1860,14 @@ async fn add_manual_task(
     };
 
     let member_id = member_id.or_else(|| Some(default_member_id(config, chat_id.0).to_string()));
-    create_manual_task(bot, chat_id, pool, member_id, title, due_raw).await
+    create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await
 }
 
 async fn create_manual_task(
     bot: &Bot,
     chat_id: ChatId,
     pool: &SqlitePool,
+    config: &AppConfig,
     member_id: Option<String>,
     title: String,
     due_raw: Option<String>,
@@ -1824,14 +1915,66 @@ async fn create_manual_task(
         None => None,
     };
 
+    let mut calendar_event_id: Option<String> = None;
+    let mut calendar_note: Option<&'static str> = None;
+    if let Some(ref due) = parsed_due {
+        if let Some(ref mid) = member_id {
+            if let Some(member) = config.family.members.iter().find(|m| &m.id == mid) {
+                match build_calendar_client(member) {
+                    Some(cal_client) => {
+                        match chrono::DateTime::parse_from_rfc3339(&due.due_at) {
+                            Ok(due_dt) => {
+                                let start = due_dt.with_timezone(&chrono::Utc);
+                                match schedule_at(
+                                    &cal_client,
+                                    &title,
+                                    Some("Created via Telegram"),
+                                    start,
+                                    30,
+                                )
+                                .await
+                                {
+                                    Ok(event_id) => {
+                                        println!(
+                                            "Telegram Bot: scheduled task on calendar: {}",
+                                            event_id
+                                        );
+                                        calendar_event_id = Some(event_id);
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "Telegram Bot: failed to schedule task on calendar: {:?}",
+                                            e
+                                        );
+                                        calendar_note = Some("calendar schedule failed");
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "Telegram Bot: invalid due_at for calendar: {:?}",
+                                    e
+                                );
+                                calendar_note = Some("calendar schedule failed");
+                            }
+                        }
+                    }
+                    None => {
+                        calendar_note = Some("calendar not linked");
+                    }
+                }
+            }
+        }
+    }
+
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let due_date = parsed_due.as_ref().map(|p| p.due_date.clone());
     let due_at = parsed_due.as_ref().map(|p| p.due_at.clone());
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 'manual')",
+        "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source, calendar_event_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 'manual', ?)",
     )
     .bind(&id)
     .bind(&now)
@@ -1840,6 +1983,7 @@ async fn create_manual_task(
     .bind(member_id.as_deref())
     .bind(due_date.as_deref())
     .bind(due_at.as_deref())
+    .bind(calendar_event_id.as_deref())
     .execute(pool)
     .await
     {
@@ -1873,6 +2017,11 @@ async fn create_manual_task(
         } else {
             msg.push_str(&format!(" · due {}", due));
         }
+    }
+    if calendar_event_id.is_some() {
+        msg.push_str(" · 📅 calendar");
+    } else if let Some(note) = calendar_note {
+        msg.push_str(&format!(" · _{}_", note));
     }
 
     bot.send_message(chat_id, msg)
@@ -2033,6 +2182,49 @@ async fn mark_task_complete(
     .await?;
 
     refresh_task_memory(pool, &id).await;
+    Ok(())
+}
+
+/// Mark every open/snoozed task done (clears the current backlog).
+async fn mark_all_tasks_complete(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+) -> Result<(), teloxide::RequestError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = match complete_all_open_tasks(pool, &now).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to mark all tasks done: {:?}", e);
+            bot.send_message(chat_id, "❌ Database error updating tasks.")
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if rows.is_empty() {
+        bot.send_message(chat_id, "✅ No open or snoozed tasks to complete.")
+            .await?;
+        return Ok(());
+    }
+
+    let count = rows.len();
+    let mut msg = format!("✅ Marked *{}* task{} done:\n", count, if count == 1 { "" } else { "s" });
+    for (i, (_id, title)) in rows.iter().enumerate() {
+        if i >= 15 {
+            msg.push_str(&format!("_…and {} more_", count - 15));
+            break;
+        }
+        msg.push_str(&format!("• {}\n", escape_md_basic(title)));
+    }
+
+    bot.send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+
+    for (id, _) in &rows {
+        refresh_task_memory(pool, id).await;
+    }
     Ok(())
 }
 
@@ -3486,7 +3678,7 @@ async fn handle_message(
             }
         }
     } else if msg.photo().is_some() {
-        handle_food_photo(&bot, chat_id, &msg, &pool, &gemini_client, &config).await?;
+        handle_food_photo(&bot, chat_id, &msg, &pool, &llm, &gemini_client, &config).await?;
     } else {
         dispatch_free_text_intent(
             &bot,
@@ -3509,6 +3701,7 @@ async fn handle_food_photo(
     chat_id: ChatId,
     msg: &Message,
     pool: &SqlitePool,
+    llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
@@ -3650,6 +3843,22 @@ async fn handle_food_photo(
     .parse_mode(teloxide::types::ParseMode::Markdown)
     .await?;
 
+    // Caption may backdate the meal ("yesterday's dinner"); resolve via LLM when present.
+    let timing = if caption_rest.trim().is_empty() {
+        resolve_food_log_timing(None, None)
+    } else {
+        match llm.extract_food_log_context(&caption_rest).await {
+            Ok(ctx) => resolve_food_log_timing(ctx.food_date.as_deref(), ctx.food_time.as_deref()),
+            Err(e) => {
+                eprintln!(
+                    "Food photo caption timing extract failed (using now): {:?}",
+                    e
+                );
+                resolve_food_log_timing(None, None)
+            }
+        }
+    };
+
     persist_food_estimation(
         bot,
         chat_id,
@@ -3658,6 +3867,7 @@ async fn handle_food_photo(
         &member_id,
         &description,
         &nutrition,
+        &timing,
     )
     .await?;
 
@@ -3729,7 +3939,7 @@ async fn dispatch_free_text_intent(
         } => {
             let member_id =
                 member_id.or_else(|| Some(default_member_id(config, chat_id.0).to_string()));
-            create_manual_task(bot, chat_id, pool, member_id, title, due_raw).await?;
+            create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
         }
         UserIntent::Memory { query } => {
             handle_memory(bot, chat_id, query, pool, llm, gemini_client).await?;
@@ -3746,12 +3956,24 @@ async fn dispatch_free_text_intent(
         UserIntent::Food {
             member_id,
             description,
+            date,
+            time,
         } => {
-            let args = match member_id {
-                Some(id) => format!("{} {}", id, description),
-                None => description,
-            };
-            handle_food_log(bot, chat_id, args, pool, gemini_client, config).await?;
+            let family_member_id = member_id.unwrap_or_else(|| {
+                default_member_id(config, chat_id.0).to_string()
+            });
+            log_food_for_member(
+                bot,
+                chat_id,
+                pool,
+                gemini_client,
+                config,
+                &family_member_id,
+                &description,
+                date.as_deref(),
+                time.as_deref(),
+            )
+            .await?;
         }
         UserIntent::Networth => {
             handle_networth(bot, chat_id, pool, config).await?;

@@ -203,7 +203,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/help` | Displays the help text. |
 | `/login <health <member>\|gmail\|calendar <member>>` | Interactive OAuth (Health/Calendar save per-member refresh tokens). |
 | `/sync` | Triggers a manual sync of today's nutrition for every linked Google Health account. |
-| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Pushes to that member's Google Health when linked (e.g. `/food 2 eggs` or `/food praj 2 eggs`). |
+| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Relative days/times in the text are resolved (e.g. `/food yesterday's dinner pasta`). Pushes to that member's Google Health when linked. |
 | `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). Defaults to linked member. |
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
 | `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. |
@@ -212,7 +212,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
-| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/tasks add [member] <title> [due <when>]` (defaults assignee to linked member). Actions: `/tasks complete <id>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Actions: `/tasks complete <id\|all>`, `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Shared-universe stock research via OpenRouter + Finnhub (propose → cap filter → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
@@ -222,7 +222,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/link <member_id>` | Link this private chat to a family member (writes `telegram_chat_id` in `config.yaml`). |
 | `/whoami` | Show which family member this chat is linked to. |
 
-Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
+Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "yesterday's dinner was pasta", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
 
 **Food photos:** send a barcode, product package, or plated meal. Caption is optional; without a member id it logs for the linked DM member (e.g. `half the bowl` or `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
 
