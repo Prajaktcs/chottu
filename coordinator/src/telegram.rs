@@ -2236,7 +2236,10 @@ async fn mark_all_tasks_complete(
                 msg.push_str(&format!("_…and {} more_\n", count - 10));
                 break;
             }
-            msg.push_str(&format!("• {}\n", escape_md_basic(title)));
+            msg.push_str(&format!(
+                "• {}\n",
+                escape_md_basic(&truncate_chars(title, 80))
+            ));
         }
         msg.push_str(
             "\nReply `/tasks complete all confirm` to proceed \
@@ -2287,7 +2290,10 @@ async fn mark_all_tasks_complete(
             msg.push_str(&format!("_…and {} more_", count - 15));
             break;
         }
-        msg.push_str(&format!("• {}\n", escape_md_basic(title)));
+        msg.push_str(&format!(
+            "• {}\n",
+            escape_md_basic(&truncate_chars(title, 80))
+        ));
     }
 
     bot.send_message(chat_id, msg)
