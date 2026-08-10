@@ -15,7 +15,7 @@ pub mod finnhub;
 pub mod quotes;
 pub mod spend_budget;
 
-pub use database::{complete_all_open_tasks, init_db};
+pub use database::{complete_all_open_tasks, init_db, list_completable_open_tasks};
 pub use due_parse::{
     is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
     split_task_add_args, ParsedDue,

@@ -14,7 +14,7 @@ use chotu_common::{
     compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
     default_member_id, display_category, exchange_google_code, fetch_exchange_rates,
     fetch_stock_quotes, format_budget_progress_markdown, has_telegram_delivery,
-    is_telegram_chat_allowed, looks_like_task_add_query,
+    is_telegram_chat_allowed, list_completable_open_tasks, looks_like_task_add_query,
     lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat, parse_due_phrase,
     pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
     save_google_refresh_token, save_health_refresh_token, schedule_at, set_budget_override,
@@ -46,7 +46,7 @@ pub enum Command {
     Cal(String),
     #[command(description = "show multi-day nutrition trends. Usage: /trends [days]")]
     Trends(String),
-    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks add [member] <title> [due|by <when>]; /tasks complete <id|all>; /tasks snooze|reassign|open <id> ...")]
+    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks add [member] <title> [due|by <when>]; /tasks complete <id|all|all confirm>; /tasks snooze|reassign|open <id> ...")]
     Tasks(String),
     #[command(description = "add a task (alias). Usage: /task <title> [by|due <when>]")]
     Task(String),
@@ -1561,7 +1561,8 @@ async fn handle_tasks(
         "complete" => {
             return match second.map(|s| s.to_lowercase()) {
                 Some(ref s) if s == "all" => {
-                    mark_all_tasks_complete(bot, chat_id, pool).await
+                    let confirm = third.is_some_and(|t| t.eq_ignore_ascii_case("confirm"));
+                    mark_all_tasks_complete(bot, chat_id, pool, config, confirm).await
                 }
                 Some(ref id) if id.len() >= 4 => {
                     mark_task_complete(bot, chat_id, pool, id).await
@@ -1569,7 +1570,8 @@ async fn handle_tasks(
                 _ => {
                     bot.send_message(
                         chat_id,
-                        "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all`",
+                        "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all` \
+                         (linked DM: yours + unassigned; household: add `confirm`)",
                     )
                     .parse_mode(teloxide::types::ParseMode::Markdown)
                     .await?;
@@ -1578,7 +1580,8 @@ async fn handle_tasks(
             };
         }
         "done" if second.is_some_and(|s| s.eq_ignore_ascii_case("all")) => {
-            return mark_all_tasks_complete(bot, chat_id, pool).await;
+            let confirm = third.is_some_and(|t| t.eq_ignore_ascii_case("confirm"));
+            return mark_all_tasks_complete(bot, chat_id, pool, config, confirm).await;
         }
         "done" if second.is_some_and(looks_like_task_id_prefix) => {
             return mark_task_complete(bot, chat_id, pool, second.unwrap()).await;
@@ -1762,7 +1765,7 @@ async fn handle_tasks(
 
     if label == "open" || label == "open/snoozed" || label == "snoozed" {
         msg.push_str(
-            "\n_Actions:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all>` · \
+            "\n_Actions:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all|all confirm>` · \
              `/tasks snooze <id> [days]` · `/tasks reassign <id> <member>` · `/tasks open <id>`\n\
              _Dismiss email tasks:_ reply `unactionable` to the original reminder.",
         );
@@ -2192,14 +2195,64 @@ async fn mark_task_complete(
     Ok(())
 }
 
-/// Mark every open/snoozed task done (clears the current backlog).
+/// Mark open/snoozed tasks done.
+///
+/// Linked personal DMs: only that member's tasks + unassigned (immediate).
+/// Household / unlinked chats: preview unless `confirm` is true.
 async fn mark_all_tasks_complete(
     bot: &Bot,
     chat_id: ChatId,
     pool: &SqlitePool,
+    config: &AppConfig,
+    confirm: bool,
 ) -> Result<(), teloxide::RequestError> {
+    let linked_member = member_for_telegram_chat(config, chat_id.0);
+    let assignee_filter = linked_member.map(|m| m.id.as_str());
+
+    // Household wipe requires an explicit confirm step.
+    if linked_member.is_none() && !confirm {
+        let rows = match list_completable_open_tasks(pool, None).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Failed to preview complete-all tasks: {:?}", e);
+                bot.send_message(chat_id, "❌ Database error listing tasks.")
+                    .await?;
+                return Ok(());
+            }
+        };
+        if rows.is_empty() {
+            bot.send_message(chat_id, "✅ No open or snoozed tasks to complete.")
+                .await?;
+            return Ok(());
+        }
+        let count = rows.len();
+        let mut msg = format!(
+            "⚠️ This will mark *{}* open/snoozed task{} done *household-wide*.\n\n",
+            count,
+            if count == 1 { "" } else { "s" }
+        );
+        for (i, (_id, title)) in rows.iter().enumerate() {
+            if i >= 10 {
+                msg.push_str(&format!("_…and {} more_\n", count - 10));
+                break;
+            }
+            msg.push_str(&format!(
+                "• {}\n",
+                escape_md_basic(&truncate_chars(title, 80))
+            ));
+        }
+        msg.push_str(
+            "\nReply `/tasks complete all confirm` to proceed \
+             (linked DMs only clear your tasks + unassigned).",
+        );
+        bot.send_message(chat_id, msg)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+        return Ok(());
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
-    let rows = match complete_all_open_tasks(pool, &now).await {
+    let rows = match complete_all_open_tasks(pool, &now, assignee_filter).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to mark all tasks done: {:?}", e);
@@ -2210,19 +2263,37 @@ async fn mark_all_tasks_complete(
     };
 
     if rows.is_empty() {
-        bot.send_message(chat_id, "✅ No open or snoozed tasks to complete.")
-            .await?;
+        let empty_msg = if linked_member.is_some() {
+            "✅ No open or snoozed tasks of yours (or unassigned) to complete."
+        } else {
+            "✅ No open or snoozed tasks to complete."
+        };
+        bot.send_message(chat_id, empty_msg).await?;
         return Ok(());
     }
 
     let count = rows.len();
-    let mut msg = format!("✅ Marked *{}* task{} done:\n", count, if count == 1 { "" } else { "s" });
+    let mut msg = if linked_member.is_some() {
+        format!(
+            "✅ Marked *{}* of your open/snoozed tasks (and unassigned) done:\n",
+            count
+        )
+    } else {
+        format!(
+            "✅ Marked *{}* open/snoozed task{} done household-wide:\n",
+            count,
+            if count == 1 { "" } else { "s" }
+        )
+    };
     for (i, (_id, title)) in rows.iter().enumerate() {
         if i >= 15 {
             msg.push_str(&format!("_…and {} more_", count - 15));
             break;
         }
-        msg.push_str(&format!("• {}\n", escape_md_basic(title)));
+        msg.push_str(&format!(
+            "• {}\n",
+            escape_md_basic(&truncate_chars(title, 80))
+        ));
     }
 
     bot.send_message(chat_id, msg)
