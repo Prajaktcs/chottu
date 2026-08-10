@@ -1,5 +1,8 @@
 # Project Chotu To-Do List
 
+## Strengthen existing (see STRENGTHEN.md)
+- Prefer hardening shipped surfaces over new domains; work the checklist in [`STRENGTHEN.md`](STRENGTHEN.md) one PR at a time.
+
 ## Nutrition & Health Coach
 - [x] For the agent to send status reports or trends on how the nutrition is going
 - [x] Investigate if there is anything that we need to adjust in the nutrition phase
