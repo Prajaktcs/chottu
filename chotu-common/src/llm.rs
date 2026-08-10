@@ -920,9 +920,8 @@ impl OpenRouterClient {
 
     /// Structured extraction via Rig's tool-calling extractor.
     ///
-    /// Uses `tool_choice: auto` (not Rig's default `required`) because some
-    /// OpenRouter providers — notably Alibaba Qwen thinking models — reject
-    /// `tool_choice: required` while reasoning is enabled.
+    /// Qwen thinking models on Alibaba reject `tool_choice: required`, so those
+    /// use `auto`. Other OpenRouter models keep Rig's `required` default.
     pub async fn generate_structured<T>(
         &self,
         model: &str,
@@ -932,11 +931,17 @@ impl OpenRouterClient {
     where
         T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
     {
+        let tool_choice = if model.starts_with("qwen/") {
+            ToolChoice::Auto
+        } else {
+            ToolChoice::Required
+        };
+
         let extractor = self
             .client
             .extractor::<T>(model)
             .preamble(system_prompt)
-            .tool_choice(ToolChoice::Auto)
+            .tool_choice(tool_choice)
             .retries(2)
             .build();
 
