@@ -349,7 +349,7 @@ pub async fn append_coach_tip(llm: &ChotuLlm, ctx: &FitnessCoachContext, report:
             }
         }
         Err(e) => {
-            eprintln!("Nutrition coach tip failed for {}: {:?}", ctx.member_name, e);
+            eprintln!("Fitness coach tip failed for {}: {:?}", ctx.member_name, e);
         }
     }
 }

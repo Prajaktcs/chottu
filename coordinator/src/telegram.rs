@@ -2404,30 +2404,30 @@ async fn handle_trends(
     )
     .await?;
 
-    match health_coach::build_nutrition_trend_reports(pool, config, days, Some(llm)).await {
+    let only_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    match health_coach::build_nutrition_trend_reports(
+        pool,
+        config,
+        days,
+        Some(llm),
+        only_member_id,
+    )
+    .await
+    {
         Ok(reports) => {
-            let only_name = member_for_telegram_chat(config, chat_id.0).map(|m| m.name.clone());
-            let mut sent = 0usize;
-            for report in reports {
-                if let Some(ref name) = only_name {
-                    // Reports are titled "📈 *Nutrition Trends: {name}* ..."
-                    let needle = format!("*Nutrition Trends: {}*", name);
-                    if !report.contains(&needle) {
-                        continue;
-                    }
-                }
-                bot.send_message(chat_id, report)
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
-                    .await?;
-                sent += 1;
-            }
-            if sent == 0 {
+            if reports.is_empty() {
                 bot.send_message(
                     chat_id,
                     "_No trends to show for your linked member in this window._",
                 )
                 .parse_mode(teloxide::types::ParseMode::Markdown)
                 .await?;
+            } else {
+                for report in reports {
+                    bot.send_message(chat_id, report)
+                        .parse_mode(teloxide::types::ParseMode::Markdown)
+                        .await?;
+                }
             }
         }
         Err(e) => {

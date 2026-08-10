@@ -488,17 +488,22 @@ pub async fn sync_member_for_date(
     Ok(report)
 }
 
-/// Replace Google Health exercise rows for one member/day.
+/// Replace Google Health exercise rows for one member/day (atomic delete+insert).
 pub async fn replace_exercise_log_for_day(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
     exercises: &[String],
 ) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin exercise_log transaction")?;
+
     sqlx::query("DELETE FROM exercise_log WHERE family_member_id = ? AND date = ? AND source = 'google_health'")
         .bind(member_id)
         .bind(date)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .context("Failed to clear exercise_log for day")?;
 
@@ -515,10 +520,14 @@ pub async fn replace_exercise_log_for_day(
         .bind(date)
         .bind(member_id)
         .bind(trimmed)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .with_context(|| format!("Failed to insert exercise_log row for {}", member_id))?;
     }
+
+    tx.commit()
+        .await
+        .context("Failed to commit exercise_log transaction")?;
     Ok(())
 }
 

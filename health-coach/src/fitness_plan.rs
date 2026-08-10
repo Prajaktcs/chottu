@@ -381,7 +381,7 @@ pub async fn generate_and_store_weekly_plan(
         week_averages(pool, member_id, &hist_start, &hist_end).await?;
     let recent = crate::sync::exercises_for_range(pool, member_id, &hist_start, &hist_end)
         .await
-        .unwrap_or_default();
+        .context("Failed to load recent exercises for weekly plan")?;
 
     let user_prompt = build_plan_user_prompt(
         &member.name,

@@ -6,11 +6,13 @@ use crate::coaching::{append_coach_tip, NutritionCoachContext};
 
 /// Builds one Telegram Markdown report per family member covering the last `days` of nutrition/activity.
 /// When `llm` is provided, appends a short local-Ollama coach tip for members with logged data.
+/// When `only_member_id` is set, returns at most that member's report (privacy for linked DMs).
 pub async fn build_nutrition_trend_reports(
     pool: &SqlitePool,
     config: &AppConfig,
     days: i64,
     llm: Option<&ChotuLlm>,
+    only_member_id: Option<&str>,
 ) -> Result<Vec<String>> {
     let days = days.clamp(2, 90);
     let start_date = (chrono::Local::now() - chrono::Duration::days(days - 1))
@@ -33,6 +35,11 @@ pub async fn build_nutrition_trend_reports(
     let mut reports = Vec::new();
 
     for member in &config.family.members {
+        if let Some(only) = only_member_id {
+            if !member.id.eq_ignore_ascii_case(only) {
+                continue;
+            }
+        }
         let member_rows: Vec<&HealthFamilySummary> = rows
             .iter()
             .filter(|r| r.family_member_id == member.id)
