@@ -9,6 +9,12 @@ use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub mod bench;
+pub use bench::{
+    compare_scorers, evaluate_scorer, format_metrics_table, parse_score_draft, BenchComparison,
+    FixtureName, FixtureRole, ResearchFixture, ScorerMetrics,
+};
+
 pub const DEFAULT_PANEL_MODELS: &[&str] = &[
     "openai/gpt-5.6-sol",
     "anthropic/claude-opus-5",
@@ -188,6 +194,16 @@ impl StockResearcher {
         }
     }
 
+    /// Build with an explicit panel + judge (e.g. A/B harnesses). Uses `OPENROUTER_API_KEY`.
+    pub fn with_models(panel_models: Vec<String>, judge_model: String) -> Self {
+        let client = OpenRouterClient::from_env().ok();
+        Self {
+            client,
+            panel_models,
+            judge_model,
+        }
+    }
+
     pub fn is_configured(&self) -> bool {
         self.client.is_some()
     }
@@ -227,6 +243,31 @@ impl StockResearcher {
         philosophy: Option<&InvestmentPhilosophy>,
         progress: Option<tokio::sync::mpsc::Sender<ResearchProgress>>,
     ) -> Result<ResearchRunArtifacts, anyhow::Error> {
+        self.research_pipeline(targets, philosophy, progress, true, 2)
+            .await
+    }
+
+    /// Seeded score-only path for local model benches (skips judge; allows a single scorer).
+    pub async fn perform_score_only_with_artifacts(
+        &self,
+        targets: &str,
+        philosophy: Option<&InvestmentPhilosophy>,
+    ) -> Result<ResearchRunArtifacts, anyhow::Error> {
+        if targets.trim().is_empty() {
+            anyhow::bail!("score-only research requires seeded targets");
+        }
+        self.research_pipeline(Some(targets), philosophy, None, false, 1)
+            .await
+    }
+
+    async fn research_pipeline(
+        &self,
+        targets: Option<&str>,
+        philosophy: Option<&InvestmentPhilosophy>,
+        progress: Option<tokio::sync::mpsc::Sender<ResearchProgress>>,
+        run_judge: bool,
+        min_scorers: usize,
+    ) -> Result<ResearchRunArtifacts, anyhow::Error> {
         let client = self.client.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "OPENROUTER_API_KEY is not set. Add it to `.env` to enable multi-model stock research."
@@ -236,7 +277,17 @@ impl StockResearcher {
         let default_philosophy = InvestmentPhilosophy::default();
         let p = philosophy.unwrap_or(&default_philosophy);
         let seeded = matches!(targets, Some(t) if !t.trim().is_empty());
-        let total_stages: u32 = if seeded { 3 } else { 4 };
+        let total_stages: u32 = if !run_judge {
+            if seeded {
+                2
+            } else {
+                3
+            }
+        } else if seeded {
+            3
+        } else {
+            4
+        };
         let progress = progress.as_ref();
         let finnhub = FinnhubClient::from_env().ok();
         if finnhub.is_none() {
@@ -251,7 +302,11 @@ impl StockResearcher {
                 total_stages,
                 seeded,
                 panel: self.panel_display_names(),
-                judge: short_model_label(&self.judge_model),
+                judge: if run_judge {
+                    short_model_label(&self.judge_model)
+                } else {
+                    "skipped".into()
+                },
             },
         )
         .await;
@@ -331,9 +386,10 @@ impl StockResearcher {
         )
         .await;
 
-        if score_drafts.len() < 2 {
+        if score_drafts.len() < min_scorers {
             return Err(anyhow::anyhow!(
-                "Stock research needs at least 2 successful scorers; got {}. Failures: {}",
+                "Stock research needs at least {} successful scorer(s); got {}. Failures: {}",
+                min_scorers,
                 score_drafts.len(),
                 if score_failures.is_empty() {
                     "none".to_string()
@@ -343,23 +399,25 @@ impl StockResearcher {
             ));
         }
 
-        stage += 1;
-        emit_progress(
-            progress,
-            ResearchProgress::Judging {
-                stage,
-                total_stages,
-                judge: short_model_label(&self.judge_model),
-            },
-        )
-        .await;
+        let mut full = if run_judge {
+            stage += 1;
+            emit_progress(
+                progress,
+                ResearchProgress::Judging {
+                    stage,
+                    total_stages,
+                    judge: short_model_label(&self.judge_model),
+                },
+            )
+            .await;
 
-        let synthesis = self
-            .run_judge(client, p, &universe, &score_drafts)
-            .await
-            .context("Judge synthesis failed")?;
+            self.run_judge(client, p, &universe, &score_drafts)
+                .await
+                .context("Judge synthesis failed")?
+        } else {
+            "(judge skipped — score-only run)".to_string()
+        };
 
-        let mut full = synthesis;
         full.push_str("\n\n---\n_Universe:_ ");
         full.push_str(
             &universe
@@ -376,8 +434,12 @@ impl StockResearcher {
                 .collect::<Vec<_>>()
                 .join(", "),
         );
-        full.push_str(" · _Judge:_ ");
-        full.push_str(&short_model_label(&self.judge_model));
+        if run_judge {
+            full.push_str(" · _Judge:_ ");
+            full.push_str(&short_model_label(&self.judge_model));
+        } else {
+            full.push_str(" · _Judge:_ skipped");
+        }
         if !score_failures.is_empty() {
             full.push_str("\n_Failed scorers:_ ");
             full.push_str(&score_failures.join("; "));

@@ -1,0 +1,77 @@
+{
+  "version": 1,
+  "description": "Gold universe for hundred-bagger / micro-small-cap philosophy. Used by research_bench for repeatable model comparison. Labels are relative expectations, not investment advice.",
+  "philosophy_note": "Clear-pass names should be rejected or ranked last. Clear-interest names should outrank clear-pass. Contested names are informational only (not scored against gold).",
+  "names": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc.",
+      "role": "clear_pass",
+      "expected_conviction": ["Pass", "Low"],
+      "notes": "Mega-cap compounder; no plausible 100x from here under the mandate."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corporation",
+      "role": "clear_pass",
+      "expected_conviction": ["Pass", "Low"],
+      "notes": "Mega-cap; should not clear a micro/small hundred-bagger screen."
+    },
+    {
+      "ticker": "BRK.B",
+      "company": "Berkshire Hathaway Class B",
+      "role": "clear_pass",
+      "expected_conviction": ["Pass", "Low"],
+      "notes": "Quality large-cap; wrong sleeve for satellite 100-bagger hunt."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile",
+      "role": "clear_interest",
+      "expected_conviction": ["High", "Medium", "Low"],
+      "notes": "Small/speculative space connectivity; belongs in aspirational screen even if risky."
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab",
+      "role": "clear_interest",
+      "expected_conviction": ["High", "Medium", "Low"],
+      "notes": "Small-cap launch / space systems; mandate-aligned optionality."
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines",
+      "role": "clear_interest",
+      "expected_conviction": ["High", "Medium", "Low"],
+      "notes": "Micro/small lunar services; high risk but screen-relevant."
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire",
+      "role": "clear_interest",
+      "expected_conviction": ["High", "Medium", "Low"],
+      "notes": "Small-cap space infrastructure; should outrank mega-caps on fit."
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI",
+      "role": "contested",
+      "expected_conviction": ["High", "Medium", "Low", "Pass"],
+      "notes": "Contested AI name — useful for qualitative read, excluded from gold pairwise metrics."
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IonQ",
+      "role": "contested",
+      "expected_conviction": ["High", "Medium", "Low", "Pass"],
+      "notes": "Contested quantum narrative; not used for pass/interest accuracy."
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation",
+      "role": "contested",
+      "expected_conviction": ["High", "Medium", "Low", "Pass"],
+      "notes": "eVTOL contested; informational only for bench."
+    }
+  ]
+}

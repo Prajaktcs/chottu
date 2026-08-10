@@ -832,6 +832,7 @@ dependencies = [
  "anyhow",
  "chotu-common",
  "chrono",
+ "dotenvy",
  "futures",
  "schemars",
  "serde",

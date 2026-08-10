@@ -154,6 +154,12 @@ FINNHUB_API_KEY=your_finnhub_api_key
 # RESEARCH_PANEL_MODELS=openai/gpt-5.6-sol,anthropic/claude-opus-5,moonshotai/kimi-k3
 # RESEARCH_JUDGE_MODEL=moonshotai/kimi-k3
 
+# Compare future panel scorers locally (gold fixture; run on your laptop):
+#   cargo run -p finance-advisor --bin research_bench -- --dry-run
+#   cargo run -p finance-advisor --bin research_bench -- \
+#     --baseline openai/gpt-5.6-sol --candidate qwen/qwen3.8-max --trials 2
+# See evals/research/README.md
+
 # Optional: Google Health/Gmail Client IDs for OAuth integration
 FITBIT_CLIENT_ID=your_google_cloud_client_id
 FITBIT_CLIENT_SECRET=your_google_cloud_client_secret
