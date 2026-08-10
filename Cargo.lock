@@ -1167,11 +1167,14 @@ dependencies = [
  "anyhow",
  "chotu-common",
  "chrono",
+ "chrono-tz",
+ "schemars",
  "serde",
  "serde_json",
  "sqlx",
  "teloxide",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

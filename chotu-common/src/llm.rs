@@ -126,6 +126,7 @@ pub enum IntentKind {
     Monthly,
     Budget,
     Memory,
+    Plan,
     Help,
     Unknown,
 }
@@ -179,6 +180,9 @@ pub struct IntentClassification {
     /// For MEMORY: the recall/search question text.
     #[serde(default)]
     pub memory_query: Option<String>,
+    /// For PLAN: true when the user wants a fresh weekly training plan.
+    #[serde(default)]
+    pub plan_regenerate: Option<bool>,
     /// For UNKNOWN: one short clarifying question for the user.
     #[serde(default)]
     pub clarify_question: Option<String>,
@@ -211,6 +215,8 @@ pub enum UserIntent {
     Monthly { yyyy_mm: Option<String> },
     Budget,
     Memory { query: String },
+    /// Weekly training plan; `regenerate` forces `/plan new`.
+    Plan { regenerate: bool },
     Help,
     Unknown { clarify_question: String },
 }
@@ -319,11 +325,13 @@ impl IntentClassification {
                     UserIntent::Memory { query }
                 }
             }
+            IntentKind::Plan => UserIntent::Plan {
+                regenerate: self.plan_regenerate.unwrap_or(false),
+            },
             IntentKind::Help => UserIntent::Help,
             IntentKind::Unknown => UserIntent::Unknown {
                 clarify_question: self.clarify_question.unwrap_or_else(|| {
-                    "I didn't catch that — try asking for calendar, brief, status, tasks, remind me, memory, food log, sync, trends, net worth, monthly spend, or budget."
-
+                    "I didn't catch that — try asking for calendar, brief, status, tasks, remind me, memory, training plan, food log, sync, trends, net worth, monthly spend, or budget."
                         .to_string()
                 }),
             },
@@ -342,6 +350,7 @@ Intents:\
 - TASKS: list or manage existing tasks; put filter/action text in tasks_args (e.g. \"open\", \"all\", \"snoozed\", \"complete abc123\").\
 - TASK_ADD: create a new task or reminder; put the title in task_title, optional member_id, and optional due_raw (e.g. \"tomorrow 3pm\", \"friday\", \"2026-08-10\"). Examples: \"remind me to call the dentist tomorrow\", \"add task buy milk\", \"todo: pay rent Friday\".\
 - MEMORY: recall/search over journals, newsletter digests, personal references, or past tasks; put the question in memory_query (e.g. \"what was that Thai recipe\", \"did I write about the interview\", \"find my note on homelab\").\
+- PLAN: weekly training / workout plan; set plan_regenerate true for regenerate / new plan / redo plan. Examples: \"what's today's workout\", \"show my training plan\", \"regenerate plan\", \"beach body plan\".\
 - SYNC: pull Google Health / nutrition sync now.\
 - FOOD: log a meal; put member_id when named and the meal text in food_description (food only). When the user names when they ate it, resolve to food_date (YYYY-MM-DD) and optional food_time (HH:MM 24h local) using Today's local date from the user message — e.g. \"yesterday\" / \"last night\" / \"Friday\" become concrete dates; \"dinner\" ≈ 19:00, \"breakfast\" ≈ 08:00, \"lunch\" ≈ 12:30. Omit food_date/food_time when logging for now/today with no specific meal time.\
 - NETWORTH: portfolio / net worth questions.\
@@ -355,6 +364,7 @@ Rules:\
 - Prefer TASK_ADD for \"remind me\", \"add task\", \"todo:\", creating a new reminder/task.\
 - Prefer TASKS for listing or managing existing tasks (open/complete/snooze/reassign), not creating.\
 - Prefer MEMORY for recall/search questions about notes, journals, digests, recipes, or \"did I write/save...\".\
+- Prefer PLAN for training plan / today's workout / regenerate weekly fitness plan asks.\
 - Prefer CALENDAR for agenda / schedule / conflicts / what's on today / tomorrow / this week (not the full brief).\
 - Prefer BRIEF only for explicit morning brief / full digest phrasing.\
 - Prefer BUDGET for category budget progress / overspend questions (not the full monthly ledger summary).\
@@ -651,6 +661,18 @@ impl ChotuLlm {
             .map_err(|e| LlmError::Client(e.to_string()))?;
 
         Ok(response)
+    }
+
+    /// Public structured extraction against the configured Ollama model.
+    pub async fn extract_typed<T>(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<T, LlmError>
+    where
+        T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+    {
+        self.extract_structured(system_prompt, user_prompt).await
     }
 
     /// Structured extraction via Rig's tool-calling extractor.
@@ -1556,6 +1578,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(budget.into_user_intent(), UserIntent::Budget);
+
+        let plan: IntentClassification = serde_json::from_str(
+            r#"{"intent":"PLAN","reason":"show training plan"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.into_user_intent(),
+            UserIntent::Plan { regenerate: false }
+        );
+
+        let plan_new: IntentClassification = serde_json::from_str(
+            r#"{"intent":"PLAN","plan_regenerate":true,"reason":"redo week"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            plan_new.into_user_intent(),
+            UserIntent::Plan { regenerate: true }
+        );
 
         let unknown: IntentClassification = serde_json::from_str(
             r#"{"intent":"UNKNOWN","clarify_question":"Did you mean status or tasks?","reason":"ambiguous"}"#,

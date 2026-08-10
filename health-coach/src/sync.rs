@@ -456,6 +456,10 @@ pub async fn sync_member_for_date(
     .await
     .context("Failed to update health_family_summary in database")?;
 
+    replace_exercise_log_for_day(pool, member_id, date, &exercises)
+        .await
+        .context("Failed to persist exercise_log for sync day")?;
+
     let report = HealthSyncReport {
         member_id: member_id.to_string(),
         date: date.to_string(),
@@ -482,6 +486,89 @@ pub async fn sync_member_for_date(
     };
 
     Ok(report)
+}
+
+/// Replace Google Health exercise rows for one member/day (atomic delete+insert).
+pub async fn replace_exercise_log_for_day(
+    pool: &SqlitePool,
+    member_id: &str,
+    date: &str,
+    exercises: &[String],
+) -> Result<()> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin exercise_log transaction")?;
+
+    sqlx::query("DELETE FROM exercise_log WHERE family_member_id = ? AND date = ? AND source = 'google_health'")
+        .bind(member_id)
+        .bind(date)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to clear exercise_log for day")?;
+
+    for desc in exercises {
+        let trimmed = desc.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO exercise_log (id, date, family_member_id, description, source) VALUES (?, ?, ?, ?, 'google_health')",
+        )
+        .bind(&id)
+        .bind(date)
+        .bind(member_id)
+        .bind(trimmed)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("Failed to insert exercise_log row for {}", member_id))?;
+    }
+
+    tx.commit()
+        .await
+        .context("Failed to commit exercise_log transaction")?;
+    Ok(())
+}
+
+/// Exercise descriptions logged for a member on a civil day.
+pub async fn exercises_for_day(
+    pool: &SqlitePool,
+    member_id: &str,
+    date: &str,
+) -> Result<Vec<String>> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT description FROM exercise_log \
+         WHERE family_member_id = ? AND date = ? \
+         ORDER BY created_at ASC, id ASC",
+    )
+    .bind(member_id)
+    .bind(date)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query exercise_log")?;
+    Ok(rows.into_iter().map(|(d,)| d).collect())
+}
+
+/// Exercise descriptions for a member between `start_date` and `end_date` inclusive.
+pub async fn exercises_for_range(
+    pool: &SqlitePool,
+    member_id: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<(String, String)>> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT date, description FROM exercise_log \
+         WHERE family_member_id = ? AND date >= ? AND date <= ? \
+         ORDER BY date ASC, created_at ASC",
+    )
+    .bind(member_id)
+    .bind(start_date)
+    .bind(end_date)
+    .fetch_all(pool)
+    .await
+    .context("Failed to query exercise_log range")?;
+    Ok(rows)
 }
 
 /// Aggregated nutrition from `food_log` (and the non-`food_log` "external" base

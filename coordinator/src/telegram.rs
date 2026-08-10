@@ -38,6 +38,8 @@ pub enum Command {
     Food(String),
     #[command(description = "show today's status report.")]
     Status,
+    #[command(description = "weekly training plan. Usage: /plan | /plan new")]
+    Plan(String),
     #[command(description = "morning brief: calendar, tasks, bills, nutrition.")]
     Brief,
     #[command(description = "calendar agenda. Usage: /cal [today|tomorrow|week]")]
@@ -347,7 +349,8 @@ pub async fn start_telegram_bot(
         }
     });
 
-    // Scheduled Google Health sync is owned by the Health Coach agent (8:45 PM).
+    // Scheduled Google Health sync is owned by the Health Coach agent
+    // (8:45 PM local + 11:00 PM ET late steps sync / nudge).
     println!("Telegram Bot: Google Health scheduled sync is handled by the Health Coach agent.");
 
     // Background catch-up for local memory RAG index (journals / digests / refs / tasks).
@@ -431,6 +434,9 @@ async fn handle_command(
         }
         Command::Status => {
             handle_status(&bot, chat_id, &pool, &config, &llm).await?;
+        }
+        Command::Plan(args) => {
+            handle_plan(&bot, chat_id, args, &pool, &config, &llm).await?;
         }
         Command::Brief => {
             handle_brief(&bot, chat_id, &pool, &config).await?;
@@ -2399,12 +2405,30 @@ async fn handle_trends(
     )
     .await?;
 
-    match health_coach::build_nutrition_trend_reports(pool, config, days, Some(llm)).await {
+    let only_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    match health_coach::build_nutrition_trend_reports(
+        pool,
+        config,
+        days,
+        Some(llm),
+        only_member_id,
+    )
+    .await
+    {
         Ok(reports) => {
-            for report in reports {
-                bot.send_message(chat_id, report)
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
-                    .await?;
+            if reports.is_empty() {
+                bot.send_message(
+                    chat_id,
+                    "_No trends to show for your linked member in this window._",
+                )
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            } else {
+                for report in reports {
+                    bot.send_message(chat_id, report)
+                        .parse_mode(teloxide::types::ParseMode::Markdown)
+                        .await?;
+                }
             }
         }
         Err(e) => {
@@ -2426,10 +2450,125 @@ async fn handle_brief(
     bot.send_message(chat_id, "☀️ Building morning brief...")
         .await?;
 
-    let report = crate::brief::compose_morning_brief(pool, config).await;
+    // Linked DMs get private nutrition/training; shared household chat sees family-wide.
+    let for_member = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
     bot.send_message(chat_id, report)
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
+    Ok(())
+}
+
+async fn handle_plan(
+    bot: &Bot,
+    chat_id: ChatId,
+    args: String,
+    pool: &SqlitePool,
+    config: &AppConfig,
+    llm: &ChotuLlm,
+) -> Result<(), teloxide::RequestError> {
+    let regenerate = matches!(
+        args.trim().to_lowercase().as_str(),
+        "new" | "regen" | "regenerate" | "refresh" | "redo"
+    );
+    if !args.trim().is_empty() && !regenerate {
+        bot.send_message(
+            chat_id,
+            "Usage: `/plan` (show this week) or `/plan new` (regenerate).",
+        )
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+        return Ok(());
+    }
+
+    let member_id = default_member_id(config, chat_id.0).to_string();
+    let member = config
+        .family
+        .members
+        .iter()
+        .find(|m| m.id.eq_ignore_ascii_case(&member_id));
+    if member
+        .and_then(|m| m.fitness_goals.as_ref())
+        .map(|g| g.is_empty())
+        .unwrap_or(true)
+    {
+        bot.send_message(
+            chat_id,
+            format!(
+                "⚠️ No `fitness_goals` for *{}* in config.yaml yet.\n\
+                 Add intent / target_date / sessions_per_week, then try `/plan` again.",
+                member_id
+            ),
+        )
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+        return Ok(());
+    }
+
+    let week_start = health_coach::current_week_start_str();
+    if !regenerate {
+        if let Ok(Some(stored)) =
+            health_coach::load_weekly_plan(pool, &member_id, &week_start).await
+        {
+            let mut msg = stored.plan_md.clone();
+            let today = chrono::Local::now().date_naive();
+            if let Some(session) = health_coach::session_for_date_from_stored(&stored, today) {
+                let notes = session.notes.trim();
+                msg.push_str("\n📌 *Today:* ");
+                if notes.is_empty() {
+                    msg.push_str(session.kind.as_str());
+                } else {
+                    msg.push_str(&format!("{} — {}", session.kind.as_str(), notes));
+                }
+                msg.push('\n');
+            }
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            return Ok(());
+        }
+    }
+
+    bot.send_message(
+        chat_id,
+        if regenerate {
+            "🏋️ Regenerating this week's training plan (local Ollama)…"
+        } else {
+            "🏋️ Building this week's training plan (local Ollama)…"
+        },
+    )
+    .await?;
+
+    match health_coach::generate_and_store_weekly_plan(pool, llm, config, &member_id, &week_start)
+        .await
+    {
+        Ok(stored) => {
+            let mut msg = stored.plan_md;
+            let today = chrono::Local::now().date_naive();
+            if let Ok(plan) = health_coach::parse_plan_json(&stored.plan_json) {
+                if let Some(session) =
+                    health_coach::session_for_date(&stored.week_start, &plan, today)
+                {
+                    let notes = session.notes.trim();
+                    msg.push_str("\n📌 *Today:* ");
+                    if notes.is_empty() {
+                        msg.push_str(session.kind.as_str());
+                    } else {
+                        msg.push_str(&format!("{} — {}", session.kind.as_str(), notes));
+                    }
+                    msg.push('\n');
+                }
+            }
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+        }
+        Err(e) => {
+            eprintln!("Training plan generation failed: {:?}", e);
+            bot.send_message(chat_id, format!("❌ Could not build plan: {}", e))
+                .await?;
+        }
+    }
     Ok(())
 }
 
@@ -2654,10 +2793,17 @@ async fn handle_status(
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
 
-    // 2. Build per-member health reports, then coach tips in parallel
+    // 2. Build per-member health reports, then coach tips in parallel.
+    // Linked personal DMs only see their own health/fitness (goals stay private).
+    let status_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.clone());
     let mut pending: Vec<(String, Option<health_coach::NutritionCoachContext>)> = Vec::new();
 
     for h in &healths {
+        if let Some(ref only) = status_member_id {
+            if !h.family_member_id.eq_ignore_ascii_case(only) {
+                continue;
+            }
+        }
         let member = config
             .family
             .members
@@ -2673,7 +2819,11 @@ async fn handle_status(
         let has_sleep = h.sleep_hours.is_some();
         let has_energy = h.perceived_energy.is_some();
 
-        if has_activity || has_sleep || has_energy {
+        let exercises = health_coach::exercises_for_day(pool, &h.family_member_id, &date_str)
+            .await
+            .unwrap_or_default();
+
+        if has_activity || has_sleep || has_energy || !exercises.is_empty() {
             member_report.push_str("• *Activity & Wellness*:\n");
             if has_activity {
                 member_report.push_str(&format!(
@@ -2687,7 +2837,22 @@ async fn handle_status(
             if let Some(energy) = h.perceived_energy {
                 member_report.push_str(&format!("  - Energy Level: {}/10\n", energy));
             }
+            if !exercises.is_empty() {
+                member_report.push_str("  - Exercises:\n");
+                for e in exercises.iter().take(6) {
+                    member_report.push_str(&format!("    • {}\n", e));
+                }
+            }
             member_report.push_str("\n");
+        }
+
+        if let Some(fitness) = member.and_then(|m| m.fitness_goals.as_ref()).filter(|g| !g.is_empty())
+        {
+            let today = chrono::Local::now().date_naive();
+            if let Some(block) = fitness.outcome_markdown(today) {
+                member_report.push_str(&block);
+                member_report.push('\n');
+            }
         }
 
         let has_nutrition = h.total_calories_ingested > 0
@@ -2893,11 +3058,25 @@ async fn handle_status(
             }
         }
 
-        if !has_activity && !has_sleep && !has_energy && !has_nutrition {
+        let has_fitness = member
+            .and_then(|m| m.fitness_goals.as_ref())
+            .map(|g| !g.is_empty())
+            .unwrap_or(false);
+
+        if !has_activity && !has_sleep && !has_energy && !has_nutrition && exercises.is_empty() && !has_fitness
+        {
             member_report.push_str("• _No health telemetry logged today._\n");
             pending.push((member_report, None));
         } else {
             let ctx = health_coach::NutritionCoachContext::from_day_summary(name, h, goals);
+            let ctx = health_coach::enrich_coach_context(
+                pool,
+                config,
+                &h.family_member_id,
+                ctx,
+                Some(&date_str),
+            )
+            .await;
             pending.push((member_report, Some(ctx)));
         }
     }
@@ -3922,6 +4101,14 @@ async fn dispatch_free_text_intent(
     match classification.into_user_intent() {
         UserIntent::Status => handle_status(bot, chat_id, pool, config, llm).await?,
         UserIntent::Brief => handle_brief(bot, chat_id, pool, config).await?,
+        UserIntent::Plan { regenerate } => {
+            let args = if regenerate {
+                "new".to_string()
+            } else {
+                String::new()
+            };
+            handle_plan(bot, chat_id, args, pool, config, llm).await?;
+        }
         UserIntent::Calendar { window } => {
             handle_cal(bot, chat_id, window, config).await?;
         }
@@ -4223,9 +4410,44 @@ async fn sync_google_health_nutrition(
 
     match health_coach::sync_configured_members_today(pool, Some(gemini_client), config).await {
         Ok(reports) => {
-            for report in reports {
+            let only_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.clone());
+            let mut shown = 0usize;
+            for report in &reports {
+                if let Some(ref only) = only_id {
+                    if !report.member_id.eq_ignore_ascii_case(only) {
+                        continue;
+                    }
+                }
                 bot.send_message(chat_id, report.telegram_markdown())
                     .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                shown += 1;
+            }
+            if let Some(ref only) = only_id {
+                if shown == 0 {
+                    bot.send_message(
+                        chat_id,
+                        format!(
+                            "✅ Sync finished for the household, but no Google Health data for *{}* \
+                             (link Health with `/login health {}`).",
+                            only, only
+                        ),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                } else if reports.len() > 1 {
+                    bot.send_message(
+                        chat_id,
+                        format!(
+                            "_Synced {} member(s); showing only your private metrics._",
+                            reports.len()
+                        ),
+                    )
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await?;
+                }
+            } else if reports.is_empty() {
+                bot.send_message(chat_id, "_Sync finished — no member reports._")
                     .await?;
             }
         }

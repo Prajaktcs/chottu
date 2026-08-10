@@ -39,13 +39,14 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Deduplicates ledger rows, archives processed files, and keeps the SQLite store tidy.
 
 ### Family health & nutrition (Health Coach)
-- Multi-member household profiles (`config.yaml`: adults/kids, optional per-member nutrition goals).
-- Two-way **Google Health** sync: pull daily calories/macros/activity; push Telegram-logged meals back per linked member.
+- Multi-member household profiles (`config.yaml`: adults/kids, optional per-member nutrition + fitness goals).
+- Two-way **Google Health** sync: pull daily calories/macros/activity/exercises; push Telegram-logged meals back per linked member. Evening sync ~8:45 local; **late steps sync ~11:00 PM ET** (override with `HEALTH_LATE_SYNC_HOUR` / `HEALTH_LATE_SYNC_TZ`) with a private nudge toward the daily step goal (config `nutrition_goals.steps`, default 10 000).
 - Log food by text (`/food`), plain-language chat (“log 2 eggs for praj”), or **photo**:
   - Barcode → [Open Food Facts](https://world.openfoodfacts.org/)
   - Package / plated meal → Gemini vision
 - Adjust, undo, or clear today’s food; overnight scheduled sync merges Telegram meals with Google Health instead of overwriting.
-- Daily `/status` and multi-day `/trends` with goal progress when goals are configured; each member report ends with a short local-Ollama coach tip grounded in the logged metrics.
+- Daily `/status` and multi-day `/trends` with goal progress when goals are configured; each member report ends with a short local-Ollama coach tip grounded in metrics, exercises, and long-horizon `fitness_goals` (e.g. beach body by a target date).
+- Weekly training plans via `/plan` (Ollama, stored per member/week); morning brief includes today’s session and days-to-target.
 
 ### Tasks, calendar & morning brief (Coordinator)
 - Tasks from email action items **or** Telegram (`/tasks add`, “remind me to…”); manage via `/tasks` (list, complete, snooze, reassign, reopen).
@@ -53,7 +54,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - **Per-person Telegram DMs**: each adult runs `/link <member_id>` in a private chat; food/tasks without a member id default to that person. Once any member is linked, unknown chats are rejected (`/chat` and `/link` still work for setup).
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
-- **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
+- **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals, and training (outcome countdown + today’s planned session) — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
 - **Evening reflection**: scheduled or `/reflect` — grounds a journal prompt in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
@@ -75,6 +76,8 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 
 ### Privacy & platform posture
 - **Local-first**: SQLite (`chotu.db`), local Ollama for triage/memory/reflection; cloud only where multimodal (Gemini) or multi-model research (OpenRouter) needs it.
+- **Private goals & health**: `config.yaml` and `.env` are gitignored. Put real `nutrition_goals` / `fitness_goals` / constraints only in your local `config.yaml` — not in the public example. Linked personal Telegram DMs receive **only that member’s** nutrition, training plan, coach tips, sync details, and trends; other adults’ fitness goals are not fan‑out to the household.
+- **Future medical records** (planned): private local ingest only; never committed or shared across family DMs; coach may use user-confirmed constraints, not diagnoses.
 - **Zero-`unsafe` Rust** workspace policy (see `ARCHITECTURE.md`).
 - Runs as a Cargo workspace supervisor (`make run`) or via Docker on non-macOS hosts.
 
@@ -86,7 +89,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 | :--- | :--- |
 | **Streamer** | Live Gmail IMAP triage → ledger, tasks, bills, travel, digests, trash |
 | **Janitor** | `~/chotu_drop/` CSV/PDF ingestion + ledger hygiene |
-| **Health Coach** | Scheduled Google Health sync + nutrition/activity summaries |
+| **Health Coach** | Scheduled Google Health sync, nutrition/activity summaries, weekly `/plan`, outcome-aware coaching |
 | **Coordinator** | Telegram bot, morning brief, evening reflection, OAuth login |
 | **Finance Advisor** | Portfolio/net-worth helpers + stock research |
 | **chotu-evals** | Golden-set evals for classifier / prompt regressions |
@@ -103,6 +106,7 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 - Gmail IMAP streamer with nine-way local classification
 - Task + bill + travel extraction with optional Calendar writes
 - Food logging via text or photo (barcode / package / plate)
+- Fitness goals + weekly `/plan` + outcome-aware coach tips (exercises from Google Health sync)
 - Morning brief + evening reflection journals
 - Local RAG memory over journals, digests, references, tasks
 - Financial ledger, monthly summary, category budgets + spend alerts, net worth from portfolio statements
@@ -161,7 +165,7 @@ CHOTU_EMAIL_USER=your_email@gmail.com
 
 `GEMINI_API_KEY` is used for multimodal work (food photos, document ingest, nutrition). `OPENROUTER_API_KEY` powers `/research` LLMs (propose → score → judge). `FINNHUB_API_KEY` verifies market caps on the shared universe (optional; without it, model-estimated bands are used).
 
-Also edit `config.yaml` (from `config.yaml.example`) for family members, nutrition goals, currency, and investment philosophy. Each adult should DM the bot and run `/link <member_id>` so food/tasks default to them and proactive messages reach their inbox.
+Also edit `config.yaml` (from `config.yaml.example`) for family members, nutrition/fitness goals, currency, and investment philosophy. Each adult should DM the bot and run `/link <member_id>` so food/tasks default to them and proactive messages reach their inbox.
 
 ### 3. Run the Agent
 Run the supervisor and bot coordinator:
@@ -207,8 +211,9 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). Defaults to linked member. |
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
 | `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. |
-| `/status` | Today's status (finance + health, goal progress, short local-Ollama coach tip per member). |
-| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals. Auto-sends at 7:00 local to all linked DMs (`MORNING_BRIEF_HOUR` to override; `TELEGRAM_CHAT_ID` optional shared fallback). |
+| `/status` | Today's status (finance + health, exercises, fitness outcome progress, short local-Ollama coach tip per member). |
+| `/plan [new]` | Show this week's training plan (generate if missing). `/plan new` regenerates from `fitness_goals` + recent activity via local Ollama. |
+| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals, training countdown/session. Auto-sends at 7:00 local to all linked DMs (`MORNING_BRIEF_HOUR` to override; `TELEGRAM_CHAT_ID` optional shared fallback). |
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
@@ -222,7 +227,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/link <member_id>` | Link this private chat to a family member (writes `telegram_chat_id` in `config.yaml`). Refuses if that member is already linked to a different chat — clear `telegram_chat_id` in config first to move. |
 | `/whoami` | Show which family member this chat is linked to. |
 
-Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what was that recipe I saved", "log 2 eggs for praj", "yesterday's dinner was pasta", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
+Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what's today's workout", "show my training plan", "regenerate plan", "what was that recipe I saved", "log 2 eggs for praj", "yesterday's dinner was pasta", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
 
 **Food photos:** send a barcode, product package, or plated meal. Caption is optional; without a member id it logs for the linked DM member (e.g. `half the bowl` or `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
 
