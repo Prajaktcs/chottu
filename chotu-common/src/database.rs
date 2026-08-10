@@ -524,29 +524,67 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
-/// Mark every open/snoozed task as done. Returns `(id, title)` for each completed task
+/// List open/snoozed tasks that would be completed by [`complete_all_open_tasks`].
+///
+/// When `assignee_filter` is `Some(member_id)`, only tasks assigned to that member
+/// or unassigned (`assigned_to IS NULL`) are included — matching the task-list
+/// member filter.
+pub async fn list_completable_open_tasks(
+    pool: &SqlitePool,
+    assignee_filter: Option<&str>,
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, title FROM tasks WHERE status IN ('open', 'snoozed')",
+    );
+    if let Some(member_id) = assignee_filter {
+        qb.push(" AND (assigned_to = ");
+        qb.push_bind(member_id);
+        qb.push(" OR assigned_to IS NULL)");
+    }
+    qb.push(" ORDER BY due_date IS NULL, due_date ASC, created_at ASC");
+    qb.build_query_as::<(String, String)>()
+        .fetch_all(pool)
+        .await
+}
+
+/// Mark open/snoozed tasks as done. Returns `(id, title)` for each completed task
 /// (empty when there was nothing to complete).
+///
+/// When `assignee_filter` is `Some(member_id)`, only that member's tasks plus
+/// unassigned tasks are completed. When `None`, every open/snoozed task is completed.
 pub async fn complete_all_open_tasks(
     pool: &SqlitePool,
     now_rfc3339: &str,
+    assignee_filter: Option<&str>,
 ) -> Result<Vec<(String, String)>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT id, title FROM tasks \
-         WHERE status IN ('open', 'snoozed') \
-         ORDER BY due_date IS NULL, due_date ASC, created_at ASC",
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let rows = {
+        let mut qb = sqlx::QueryBuilder::new(
+            "SELECT id, title FROM tasks WHERE status IN ('open', 'snoozed')",
+        );
+        if let Some(member_id) = assignee_filter {
+            qb.push(" AND (assigned_to = ");
+            qb.push_bind(member_id);
+            qb.push(" OR assigned_to IS NULL)");
+        }
+        qb.push(" ORDER BY due_date IS NULL, due_date ASC, created_at ASC");
+        qb.build_query_as::<(String, String)>()
+            .fetch_all(&mut *tx)
+            .await?
+    };
 
     if !rows.is_empty() {
-        sqlx::query(
-            "UPDATE tasks SET status = 'done', updated_at = ? \
-             WHERE status IN ('open', 'snoozed')",
-        )
-        .bind(now_rfc3339)
-        .execute(&mut *tx)
-        .await?;
+        let mut qb = sqlx::QueryBuilder::new(
+            "UPDATE tasks SET status = 'done', updated_at = ",
+        );
+        qb.push_bind(now_rfc3339);
+        qb.push(" WHERE status IN ('open', 'snoozed')");
+        if let Some(member_id) = assignee_filter {
+            qb.push(" AND (assigned_to = ");
+            qb.push_bind(member_id);
+            qb.push(" OR assigned_to IS NULL)");
+        }
+        qb.build().execute(&mut *tx).await?;
     }
 
     tx.commit().await?;
@@ -559,15 +597,26 @@ mod tests {
     use tempfile::TempDir;
 
     async fn insert_task(pool: &SqlitePool, id: &str, title: &str, status: &str) {
+        insert_task_assigned(pool, id, title, status, None).await;
+    }
+
+    async fn insert_task_assigned(
+        pool: &SqlitePool,
+        id: &str,
+        title: &str,
+        status: &str,
+        assigned_to: Option<&str>,
+    ) {
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
             "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source) \
-             VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, 'manual')",
+             VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, 'manual')",
         )
         .bind(id)
         .bind(&now)
         .bind(&now)
         .bind(title)
+        .bind(assigned_to)
         .bind(status)
         .execute(pool)
         .await
@@ -632,7 +681,10 @@ mod tests {
         insert_task(&pool, "t-ignored", "ignored mail", "ignored").await;
 
         let now = chrono::Utc::now().to_rfc3339();
-        let completed = complete_all_open_tasks(&pool, &now).await.unwrap();
+        let preview = list_completable_open_tasks(&pool, None).await.unwrap();
+        assert_eq!(preview.len(), 2);
+
+        let completed = complete_all_open_tasks(&pool, &now, None).await.unwrap();
         assert_eq!(completed.len(), 2);
         let titles: std::collections::HashSet<_> =
             completed.iter().map(|(_, t)| t.as_str()).collect();
@@ -651,7 +703,39 @@ mod tests {
         assert_eq!(map["t-ignored"], "ignored");
 
         // Second call is a no-op.
-        let again = complete_all_open_tasks(&pool, &now).await.unwrap();
+        let again = complete_all_open_tasks(&pool, &now, None).await.unwrap();
         assert!(again.is_empty());
+    }
+
+    #[tokio::test]
+    async fn complete_all_open_tasks_respects_assignee_filter() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("complete_all_scoped.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        insert_task_assigned(&pool, "t-alex", "alex task", "open", Some("alex")).await;
+        insert_task_assigned(&pool, "t-jordan", "jordan task", "open", Some("jordan")).await;
+        insert_task_assigned(&pool, "t-unassigned", "shared chore", "snoozed", None).await;
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let completed = complete_all_open_tasks(&pool, &now, Some("alex"))
+            .await
+            .unwrap();
+        let titles: std::collections::HashSet<_> =
+            completed.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(completed.len(), 2);
+        assert!(titles.contains("alex task"));
+        assert!(titles.contains("shared chore"));
+        assert!(!titles.contains("jordan task"));
+
+        let statuses: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, status FROM tasks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let map: std::collections::HashMap<_, _> = statuses.into_iter().collect();
+        assert_eq!(map["t-alex"], "done");
+        assert_eq!(map["t-unassigned"], "done");
+        assert_eq!(map["t-jordan"], "open");
     }
 }

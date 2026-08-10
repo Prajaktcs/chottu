@@ -23,15 +23,17 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 2. Safer `/tasks complete all`
-- [ ] Scope to assignee / “mine only” when invoked from a linked personal DM
-- [ ] Require confirmation before a household-wide wipe
-- [ ] Avoid completing another member’s open/snoozed backlog by accident
+- [x] Scope to assignee / “mine only” when invoked from a linked personal DM
+- [x] Require confirmation before a household-wide wipe
+- [x] Avoid completing another member’s open/snoozed backlog by accident
 
 **Why:** Today it completes every open/snoozed row household-wide with no confirmation or assignee filter.
 
 **Effort:** S
 
 **Files:** `coordinator/src/telegram.rs` (`mark_all_tasks_complete`), `chotu-common/src/database.rs` (`complete_all_open_tasks`)
+
+**Done:** Linked DMs complete `assigned_to = me OR NULL` immediately; household/unlinked chats preview then require `/tasks complete all confirm`.
 
 ---
 
@@ -124,6 +126,6 @@ Not prioritized, but known thin spots:
 
 ## Suggested order
 
-Max quality per week: **1 → 2 → 3 → 4 → 5 → 6 → 7 → 8**.
+Max quality per week: **3 → 4 → 5 → 6 → 7 → 8** (items 1–2 done).
 
-Items 2–4 are a natural “quick wins” PR if you want privacy/reliability before the larger fitness schema work.
+Items 3–4 are a natural “quick wins” PR if you want privacy/reliability before larger work.
