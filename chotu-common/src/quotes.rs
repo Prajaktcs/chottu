@@ -17,6 +17,31 @@ pub struct StockQuote {
     pub currency: String,
 }
 
+/// Book-cost hint used to disambiguate tickers that resolve on multiple exchanges.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CostHint {
+    pub average_cost: f64,
+    /// ISO currency for `average_cost` when known (e.g. `CAD`).
+    pub currency: Option<String>,
+}
+
+impl CostHint {
+    fn usable_cost(&self) -> Option<f64> {
+        self.average_cost
+            .is_finite()
+            .then_some(self.average_cost)
+            .filter(|c| *c > 0.0)
+    }
+
+    fn normalized_currency(&self) -> Option<String> {
+        self.currency
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(|c| c.to_ascii_uppercase())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum QuoteError {
     #[error("HTTP error: {0}")]
@@ -118,22 +143,43 @@ pub fn yahoo_symbol_candidates(ticker: &str) -> Result<Vec<String>, QuoteError> 
 
 /// When several Yahoo symbols resolve, prefer the price closest to book cost
 /// (stops US microcaps hijacking Canadian ETF tickers like `QQC` / `HURA`).
-fn pick_best_quote(quotes: Vec<StockQuote>, average_cost: Option<f64>) -> StockQuote {
+/// If a cost currency is known, only score quotes in that currency (fall back
+/// to all quotes when none match).
+fn pick_best_quote(quotes: Vec<StockQuote>, cost: Option<&CostHint>) -> StockQuote {
     debug_assert!(!quotes.is_empty());
     if quotes.len() == 1 {
         return quotes.into_iter().next().expect("non-empty");
     }
-    if let Some(cost) = average_cost.filter(|c| c.is_finite() && *c > 0.0) {
-        return quotes
-            .into_iter()
-            .min_by(|a, b| {
-                let da = (a.price / cost).ln().abs();
-                let db = (b.price / cost).ln().abs();
-                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .expect("non-empty");
-    }
-    quotes.into_iter().next().expect("non-empty")
+    let Some(hint) = cost else {
+        return quotes.into_iter().next().expect("non-empty");
+    };
+    let Some(book) = hint.usable_cost() else {
+        return quotes.into_iter().next().expect("non-empty");
+    };
+
+    let scored = if let Some(ccy) = hint.normalized_currency() {
+        let matching: Vec<StockQuote> = quotes
+            .iter()
+            .filter(|q| q.currency.eq_ignore_ascii_case(&ccy))
+            .cloned()
+            .collect();
+        if matching.is_empty() {
+            quotes
+        } else {
+            matching
+        }
+    } else {
+        quotes
+    };
+
+    scored
+        .into_iter()
+        .min_by(|a, b| {
+            let da = (a.price / book).ln().abs();
+            let db = (b.price / book).ln().abs();
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .expect("non-empty")
 }
 
 fn chart_url(symbol: &str) -> Result<reqwest::Url, QuoteError> {
@@ -210,14 +256,20 @@ pub async fn fetch_stock_quote(
     fetch_stock_quote_near_cost(client, ticker, None).await
 }
 
-/// Resolve a ticker, disambiguating multiple Yahoo hits with `average_cost` when set.
+/// Resolve a ticker, disambiguating multiple Yahoo hits with `cost` when set.
 pub async fn fetch_stock_quote_near_cost(
     client: &reqwest::Client,
     ticker: &str,
-    average_cost: Option<f64>,
+    cost: Option<CostHint>,
 ) -> Result<StockQuote, QuoteError> {
     let normalized = normalize_ticker(ticker)?;
     let candidates = yahoo_symbol_candidates(&normalized)?;
+    // Without a usable book cost we cannot disambiguate, so take the first hit
+    // instead of probing every exchange suffix.
+    let disambiguate = cost
+        .as_ref()
+        .and_then(CostHint::usable_cost)
+        .is_some();
 
     let mut found = Vec::new();
     let mut last_err = QuoteError::NotFound(normalized.clone());
@@ -230,6 +282,9 @@ pub async fn fetch_stock_quote_near_cost(
                     price,
                     currency,
                 });
+                if !disambiguate {
+                    break;
+                }
             }
             Err(e) => last_err = e,
         }
@@ -237,20 +292,21 @@ pub async fn fetch_stock_quote_near_cost(
     if found.is_empty() {
         return Err(last_err);
     }
-    Ok(pick_best_quote(found, average_cost))
+    Ok(pick_best_quote(found, cost.as_ref()))
 }
 
 /// Fetch quotes for many tickers with bounded concurrency.
 /// Missing symbols are omitted (caller falls back to book cost).
 pub async fn fetch_stock_quotes(tickers: &[String]) -> Result<Vec<StockQuote>, QuoteError> {
-    let keyed: Vec<(String, Option<f64>)> = tickers.iter().cloned().map(|t| (t, None)).collect();
+    let keyed: Vec<(String, Option<CostHint>)> =
+        tickers.iter().cloned().map(|t| (t, None)).collect();
     fetch_stock_quotes_near_cost(&keyed).await
 }
 
 /// Like [`fetch_stock_quotes`], but uses each holding's average cost to pick among
 /// ambiguous Yahoo symbols (e.g. US `QQC` vs TSX `QQC.TO`).
 pub async fn fetch_stock_quotes_near_cost(
-    tickers: &[(String, Option<f64>)],
+    tickers: &[(String, Option<CostHint>)],
 ) -> Result<Vec<StockQuote>, QuoteError> {
     if tickers.is_empty() {
         return Ok(Vec::new());
@@ -265,11 +321,9 @@ pub async fn fetch_stock_quotes_near_cost(
     while next < tickers.len() || !set.is_empty() {
         while set.len() < MAX_CONCURRENT_QUOTES && next < tickers.len() {
             let client = client.clone();
-            let (ticker, average_cost) = tickers[next].clone();
+            let (ticker, cost) = tickers[next].clone();
             next += 1;
-            set.spawn(async move {
-                fetch_stock_quote_near_cost(&client, &ticker, average_cost).await
-            });
+            set.spawn(async move { fetch_stock_quote_near_cost(&client, &ticker, cost).await });
         }
 
         let Some(joined) = set.join_next().await else {
@@ -298,9 +352,18 @@ pub async fn fetch_stock_quotes_near_cost(
 #[cfg(test)]
 mod tests {
     use super::{
-        chart_url, is_share_class_suffix, normalize_ticker, pick_best_quote,
-        yahoo_symbol_candidates, StockQuote,
+        chart_url, is_share_class_suffix, normalize_ticker, pick_best_quote, yahoo_symbol_candidates,
+        CostHint, StockQuote,
     };
+
+    fn quote(symbol: &str, price: f64, currency: &str) -> StockQuote {
+        StockQuote {
+            ticker: "QQC".into(),
+            yahoo_symbol: symbol.into(),
+            price,
+            currency: currency.into(),
+        }
+    }
 
     #[test]
     fn candidates_add_tsx_suffix_for_bare_symbols() {
@@ -357,21 +420,24 @@ mod tests {
 
     #[test]
     fn pick_best_quote_prefers_price_near_book_cost() {
-        let quotes = vec![
-            StockQuote {
-                ticker: "QQC".into(),
-                yahoo_symbol: "QQC".into(),
-                price: 24.46,
-                currency: "USD".into(),
-            },
-            StockQuote {
-                ticker: "QQC".into(),
-                yahoo_symbol: "QQC.TO".into(),
-                price: 49.25,
-                currency: "CAD".into(),
-            },
-        ];
-        let best = pick_best_quote(quotes, Some(40.321));
+        let quotes = vec![quote("QQC", 24.46, "USD"), quote("QQC.TO", 49.25, "CAD")];
+        let hint = CostHint {
+            average_cost: 40.321,
+            currency: None,
+        };
+        let best = pick_best_quote(quotes, Some(&hint));
+        assert_eq!(best.yahoo_symbol, "QQC.TO");
+    }
+
+    #[test]
+    fn pick_best_quote_prefers_matching_cost_currency() {
+        // CAD cost is near the USD price numerically, but currency should win.
+        let quotes = vec![quote("QQC", 40.0, "USD"), quote("QQC.TO", 49.25, "CAD")];
+        let hint = CostHint {
+            average_cost: 40.321,
+            currency: Some("CAD".into()),
+        };
+        let best = pick_best_quote(quotes, Some(&hint));
         assert_eq!(best.yahoo_symbol, "QQC.TO");
     }
 

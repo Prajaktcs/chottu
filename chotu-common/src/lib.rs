@@ -60,7 +60,7 @@ pub use finnhub::{
     FinnhubError,
 };
 pub use quotes::{
-    fetch_stock_quotes, fetch_stock_quotes_near_cost, StockQuote, QuoteError,
+    fetch_stock_quotes, fetch_stock_quotes_near_cost, CostHint, QuoteError, StockQuote,
 };
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, spawn_background_reindex, MemoryHit,

@@ -14,13 +14,13 @@ use chotu_common::{
     compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
     default_member_id, display_category, exchange_google_code, fetch_exchange_rates,
     fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_telegram_delivery,
-    is_telegram_chat_allowed, looks_like_task_add_query,    lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat, parse_due_phrase,
-    pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
-    save_google_refresh_token, save_health_refresh_token, schedule_at, set_budget_override,
-    set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
+    is_telegram_chat_allowed, looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent,
+    member_for_telegram_chat, parse_due_phrase, pending_budget_alerts, resolve_food_log_timing,
+    save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token, schedule_at,
+    set_budget_override, set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
     start_redirect_listener, telegram_chat_for_member, telegram_delivery_targets, AppConfig,
-    CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient, InvestmentPhilosophy, MemoryIndex,
-    UserIntent,
+    CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, InvestmentPhilosophy,
+    MemoryIndex, UserIntent,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 use teloxide::net::Download;
@@ -3184,9 +3184,17 @@ async fn build_networth_summary(pool: &SqlitePool, config: &AppConfig) -> Result
         return Ok(msg);
     }
 
-    let tickers: Vec<(String, Option<f64>)> = holdings
+    let tickers: Vec<(String, Option<CostHint>)> = holdings
         .iter()
-        .map(|h| (h.ticker.clone(), Some(h.average_cost)))
+        .map(|h| {
+            (
+                h.ticker.clone(),
+                Some(CostHint {
+                    average_cost: h.average_cost,
+                    currency: h.average_cost_currency.clone(),
+                }),
+            )
+        })
         .collect();
     let prices = match fetch_stock_quotes_near_cost(&tickers).await {
         Ok(p) => p,
