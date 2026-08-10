@@ -1,0 +1,35 @@
+{
+  "baseline": {
+    "model_id": "openai/gpt-5.6-sol",
+    "pass_label_accuracy": 1.0,
+    "pass_label_n": 2,
+    "interest_label_accuracy": 0.875,
+    "interest_label_n": 4,
+    "pairwise_order_accuracy": 1.0,
+    "pairwise_n": 8,
+    "interest_in_top_k": 0.75,
+    "top_k": 3,
+    "mean_fit_clear_pass": 1.5,
+    "mean_fit_clear_interest": 6.25,
+    "composite": 0.9500000000000001
+  },
+  "candidate": {
+    "model_id": "qwen/qwen3.8-max",
+    "pass_label_accuracy": 1.0,
+    "pass_label_n": 2,
+    "interest_label_accuracy": 0.875,
+    "interest_label_n": 4,
+    "pairwise_order_accuracy": 1.0,
+    "pairwise_n": 8,
+    "interest_in_top_k": 0.625,
+    "top_k": 3,
+    "mean_fit_clear_pass": 1.0,
+    "mean_fit_clear_interest": 4.0,
+    "composite": 0.925
+  },
+  "candidate_wins": false,
+  "delta_composite": -0.025000000000000022,
+  "notes": [
+    "Baseline composite ahead — keep current panel scorer."
+  ]
+}

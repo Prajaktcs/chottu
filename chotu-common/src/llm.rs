@@ -1,6 +1,7 @@
 use crate::models::{EmailMetadata, OllamaClassificationResponse};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
+use rig_core::message::ToolChoice;
 use rig_core::providers::gemini;
 use rig_core::providers::ollama;
 use rig_core::providers::openrouter;
@@ -918,6 +919,10 @@ impl OpenRouterClient {
     }
 
     /// Structured extraction via Rig's tool-calling extractor.
+    ///
+    /// Uses `tool_choice: auto` (not Rig's default `required`) because some
+    /// OpenRouter providers — notably Alibaba Qwen thinking models — reject
+    /// `tool_choice: required` while reasoning is enabled.
     pub async fn generate_structured<T>(
         &self,
         model: &str,
@@ -931,6 +936,7 @@ impl OpenRouterClient {
             .client
             .extractor::<T>(model)
             .preamble(system_prompt)
+            .tool_choice(ToolChoice::Auto)
             .retries(2)
             .build();
 

@@ -1,0 +1,201 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Apple has an exceptional ecosystem, brand, recurring services revenue, and capital returns, but its enormous starting valuation precludes a credible 100x outcome.",
+      "catalysts": [
+        "Services monetization and installed-base growth",
+        "AI-enabled device upgrades",
+        "Continued share repurchases"
+      ],
+      "risks": [
+        "Premium valuation and law-of-large-numbers growth limits",
+        "Regulatory pressure on App Store economics",
+        "China supply-chain and demand exposure"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "At the supplied $4.57T market capitalization, a 100x return would imply roughly $457T of equity value, making it incompatible with the hundred-bagger mandate."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Microsoft combines powerful software distribution, recurring revenue, high returns on capital, and leading cloud/AI assets, but the starting size makes it unsuitable for a hundred-bagger satellite allocation.",
+      "catalysts": [
+        "Azure and AI workload growth",
+        "Copilot monetization across the software estate",
+        "Operating leverage from cloud infrastructure"
+      ],
+      "risks": [
+        "Heavy AI infrastructure spending",
+        "Cloud and AI competition",
+        "Antitrust and regulatory scrutiny"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "The supplied $3.71T market capitalization would require approximately $371T of value for a 100x return, overwhelming even an excellent fundamental outlook."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Berkshire offers durable insurance economics, decentralized operations, and exemplary capital allocation, but its scale and mature holdings make a 100x result implausible.",
+      "catalysts": [
+        "Deployment of large cash resources",
+        "Insurance float growth",
+        "Succession execution and disciplined repurchases"
+      ],
+      "risks": [
+        "Succession and key-person transition",
+        "Conglomerate scale constraining growth",
+        "Insurance catastrophe and underwriting volatility"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "At more than $1T of supplied market capitalization, Berkshire would need to exceed $100T for a 100x return; its mature, diversified asset base is designed for compounding rather than venture-scale upside."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Direct-to-device satellite broadband addresses a massive global connectivity market and carrier partnerships could create attractive distribution economics, but the capital intensity, binary execution path, and already-large valuation make a further 100x implausible.",
+      "catalysts": [
+        "Successful commercial deployment of the satellite constellation",
+        "Carrier launches and conversion of partnerships into paying subscribers",
+        "Regulatory approvals and demonstrated direct-to-device performance"
+      ],
+      "risks": [
+        "Constellation execution, launch, and technical risk",
+        "Large funding needs and dilution",
+        "Competition from better-capitalized satellite networks",
+        "Supplied $27.9B valuation embeds substantial success"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 4,
+      "conviction": "Pass",
+      "thesis": "Rocket Lab has an increasingly integrated space platform, flight heritage, and strategic government exposure, but the supplied valuation already discounts very substantial growth and defeats the 100x setup.",
+      "catalysts": [
+        "Higher launch cadence and Neutron execution",
+        "Expansion of space-systems revenue",
+        "Government and defense contract wins"
+      ],
+      "risks": [
+        "Neutron delays or cost overruns",
+        "Launch failures and schedule volatility",
+        "Intense competition",
+        "Government customer concentration and capital intensity"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "The supplied $49.5B valuation would require nearly $5T for a 100x outcome, while launch and space hardware remain capital-intensive and execution-sensitive."
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines Inc",
+      "fit_score": 7,
+      "conviction": "Medium",
+      "thesis": "From the supplied $3.56B base, Intuitive Machines offers asymmetric exposure to a potentially large lunar infrastructure market, with mission heritage and NASA relationships as early advantages; a 100x outcome is possible but requires it to become a dominant, diversified cislunar platform.",
+      "catalysts": [
+        "Successful lunar missions and milestone payments",
+        "NASA task-order awards under lunar programs",
+        "Growth into lunar communications, data, and infrastructure services"
+      ],
+      "risks": [
+        "Mission failures can impair reputation and backlog",
+        "Lumpy revenue and dependence on government budgets",
+        "Cash burn, dilution, and fixed-price contract risk",
+        "Small and uncertain commercial lunar economy"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 7,
+      "conviction": "Medium",
+      "thesis": "Redwire's supplied $3.25B valuation, broad picks-and-shovels portfolio, and exposure to defense and space infrastructure provide credible long-duration optionality, though acquisition-led growth and hardware economics weaken the moat and capital-allocation case.",
+      "catalysts": [
+        "Defense and civil-space contract growth",
+        "Successful integration of acquired capabilities",
+        "Scaling higher-value spacecraft, payload, and in-space manufacturing offerings"
+      ],
+      "risks": [
+        "Acquisition integration and leverage",
+        "Low-margin hardware mix and program execution",
+        "Government budget and customer concentration",
+        "Dilution and working-capital demands"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "SoundHound addresses a broad voice and conversational AI opportunity with vertical distribution in restaurants and autos; the supplied $3.49B base leaves mathematical 100x room, but uncertain moat, profitability, and capital efficiency keep conviction low.",
+      "catalysts": [
+        "Expansion of restaurant and automotive deployments",
+        "Improving subscription and royalty revenue mix",
+        "Successful integration and cross-selling of acquired enterprise AI assets"
+      ],
+      "risks": [
+        "Intense competition from large AI platforms",
+        "Customer concentration and lengthy deployment cycles",
+        "Cash burn, dilution, and acquisition risk",
+        "Valuation ahead of demonstrated durable free cash flow"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "IonQ has exposure to a potentially transformative computing market and a differentiated trapped-ion approach, but at the supplied $17.65B valuation a 100x outcome requires roughly $1.8T of value before commercial product-market fit is established.",
+      "catalysts": [
+        "Demonstration of sustained hardware performance improvements",
+        "Commercial bookings converting into recurring usage revenue",
+        "Quantum advantage in valuable enterprise workloads"
+      ],
+      "risks": [
+        "Quantum commercialization may take far longer than expected",
+        "Competing hardware modalities and rapid technical obsolescence",
+        "Minimal current revenue relative to supplied valuation",
+        "Ongoing cash burn and highly speculative end-market forecasts"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Joby targets a very large urban mobility opportunity and has meaningful engineering and strategic-partner advantages, but the supplied $8.5B valuation, certification risk, and capital-heavy vertically integrated model make a 100x return too remote.",
+      "catalysts": [
+        "Aircraft certification and entry into commercial service",
+        "Manufacturing ramp with acceptable unit costs",
+        "Launch of high-utilization routes through strategic partners"
+      ],
+      "risks": [
+        "Certification delays and safety setbacks",
+        "Manufacturing complexity and substantial capital requirements",
+        "Unproven demand, utilization, and route economics",
+        "Infrastructure, noise, and public-acceptance constraints"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    }
+  ]
+}

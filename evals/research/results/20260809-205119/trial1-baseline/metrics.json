@@ -1,0 +1,14 @@
+{
+  "model_id": "moonshotai/kimi-k3",
+  "pass_label_accuracy": 1.0,
+  "pass_label_n": 2,
+  "interest_label_accuracy": 1.0,
+  "interest_label_n": 4,
+  "pairwise_order_accuracy": 1.0,
+  "pairwise_n": 8,
+  "interest_in_top_k": 0.5,
+  "top_k": 3,
+  "mean_fit_clear_pass": 3.0,
+  "mean_fit_clear_interest": 4.5,
+  "composite": 0.9
+}

@@ -1,0 +1,214 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "World-class franchise with enormous installed base, brand moat and elite capital allocation via buybacks, but at ~$4.6T market cap a 100x outcome is mathematically impossible. Appropriate for a core sleeve, not a satellite hundred-bagger allocation.",
+      "catalysts": [
+        "Services growth and higher ARPU per device",
+        "On-device AI upgrade cycle driving iPhone replacement",
+        "Continued massive share repurchases and dividend growth"
+      ],
+      "risks": [
+        "Law of large numbers caps compounding to high-single-digit returns",
+        "Regulatory pressure on App Store economics and Google TAC payments",
+        "China demand and geopolitical supply chain concentration"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap valuation ($4.6T) makes 100x return arithmetically implausible; fails the satellite mandate."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Best-in-class enterprise software and cloud compounder with switching-cost moats and strong ROIC, but $3.7T market cap precludes multi-bagger asymmetry sought in a 100x satellite sleeve.",
+      "catalysts": [
+        "Azure AI capacity monetization and Copilot seat attach",
+        "Enterprise agreement price escalation",
+        "Continued buybacks/dividend growth"
+      ],
+      "risks": [
+        "Massive AI capex weighing on free cash flow and returns on capital",
+        "Scale limits upside to market-like returns",
+        "OpenAI relationship and competitive AI model commoditization"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap scale; cannot deliver 100x. Core holding, not satellite candidate."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Gold standard of capital allocation with fortress balance sheet and huge cash optionality, but at ~$1T with a post-Buffett transition and index-like return profile it offers no path to 100x.",
+      "catalysts": [
+        "Large opportunistic acquisition deploying record cash pile",
+        "Insurance float growth and higher short-rate income",
+        "Greg Abel-led operating improvements and buybacks"
+      ],
+      "risks": [
+        "Size drag on incremental returns",
+        "Key-person/succession uncertainty",
+        "Cash drag if no attractive deployment emerges"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "$1T market cap; structurally incapable of 100x. Wrong sleeve."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 7,
+      "conviction": "Medium",
+      "thesis": "Direct-to-standard-phone satellite broadband targeting the multi-hundred-billion-dollar global mobile connectivity gap, with a defensible IP portfolio (large phased-array BlueBird design), exclusive low-band spectrum access, and MNO partnerships (AT&T, Verizon, Vodafone, Rakuten) that provide distribution rather than requiring customer acquisition spend. If the constellation reaches commercial scale, incremental economics are software-like with wholesale revenue-share, and the option value across defense/government adds a second leg.",
+      "catalysts": [
+        "Block 2 BlueBird launch cadence and constellation build-out milestones",
+        "Commercial service activation and first meaningful revenue-share payments from US carriers",
+        "Definitive spectrum/L-band arrangements and FCC approvals",
+        "Government/defense contract awards (SDA, prime partnerships)"
+      ],
+      "risks": [
+        "Massive ongoing capex requiring repeated dilutive equity/convert raises",
+        "Launch failures and satellite reliability/unfolding risk",
+        "Starlink Direct-to-Cell competing with vastly superior launch economics",
+        "Pre-revenue valuation already ~$28B leaves limited room for 100x from here",
+        "Regulatory and spectrum-clearance delays across jurisdictions"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 6,
+      "conviction": "Medium",
+      "thesis": "Only credible Western small-launch provider transitioning into a vertically integrated space prime: Electron cadence plus a fast-growing Space Systems business (components, satellite buses, Neutron medium-lift). Beck is a technically excellent, mission-driven operator, and vertical integration is a genuine cost moat. Total addressable market spanning launch, satellite manufacturing and national security space is enormous.",
+      "catalysts": [
+        "Neutron first flight and reusability demonstration",
+        "Large national-security launch and constellation contracts (NSSL Lane 1)",
+        "Space Systems margin expansion and backlog conversion",
+        "Potential move into owning/operating constellations"
+      ],
+      "risks": [
+        "Persistent operating losses and negative free cash flow; dilution history",
+        "Neutron schedule slippage vs SpaceX Falcon 9/Starship price pressure",
+        "At ~$50B market cap the valuation already embeds flawless Neutron execution",
+        "Program concentration and fixed-price contract cost overruns"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Leading US commercial lunar lander operator with the only successful private soft landings, positioned for NASA CLPS and the Near Space Network lunar relay contract, which could evolve into recurring 'lunar infrastructure as a service' revenue. Sub-$4B cap gives genuine small-cap optionality if cislunar economy materializes.",
+      "catalysts": [
+        "Successful IM-3/IM-4 missions and follow-on CLPS task orders",
+        "Near Space Network Services contract ramp providing recurring revenue",
+        "Data services and orbital transfer vehicle diversification",
+        "Path to positive EBITDA and backlog growth"
+      ],
+      "risks": [
+        "Extreme dependence on NASA budget and Artemis program priorities",
+        "Mission failure risk is binary and reputationally severe",
+        "Low-margin cost-plus/fixed-price mix; weak unit economics to date",
+        "Complex share structure and continued dilution",
+        "Competition from Firefly, Astrobotic, Blue Origin"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Roll-up of space infrastructure components (solar arrays, deployables, avionics) plus differentiated microgravity bioprinting/PIL-BOX pharma platform and, via the Edge Autonomy acquisition, defense UAS exposure. Attach-rate business model on every satellite launched is a decent proxy for space growth; small base allows high percentage growth.",
+      "catalysts": [
+        "Edge Autonomy integration and European defense drone demand",
+        "Mars/VLEO spacecraft platform awards (e.g., ESA, DoD)",
+        "Microgravity pharmaceutical partnership monetization",
+        "Margin inflection to sustained positive EBITDA"
+      ],
+      "risks": [
+        "Acquisitive strategy with leverage, goodwill and integration risk",
+        "Thin gross margins and recurring fixed-price contract losses",
+        "Repeated equity raises and dilution; weak historical capital allocation",
+        "Commodity-like competition in space components",
+        "Customer concentration in government programs"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "Independent voice AI platform with proprietary speech-to-meaning stack and edge deployment, serving automotive, restaurant drive-thru and enterprise agents — a large TAM in conversational AI. Model is asset-light with royalty/subscription revenue that could scale attractively, but competitive positioning against hyperscaler and LLM-native voice stacks is the crux.",
+      "catalysts": [
+        "Automotive OEM design wins converting to per-unit royalties",
+        "Restaurant/QSR agentic ordering rollouts at scale",
+        "Gross margin recovery toward 70%+ as acquired low-margin revenue is rationalized",
+        "Path to adjusted EBITDA breakeven"
+      ],
+      "risks": [
+        "Severe commoditization risk from OpenAI/Google/Amazon voice APIs",
+        "History of large losses, dilution and acquisition-driven revenue",
+        "Accounting/internal-control restatement history damaging credibility",
+        "Customer concentration and long automotive design cycles",
+        "Valuation rich versus modest revenue base"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Trapped-ion quantum computing pure-play with high-fidelity qubits, cloud availability across all three hyperscalers, and an aggressive IP/acquisition strategy (Oxford Ionics, ID Quantique, Lightsynq) building a photonic-interconnect networking moat. If fault-tolerant quantum arrives, TAM is transformative and winners could be worth orders of magnitude more — classic lottery-ticket asymmetry.",
+      "catalysts": [
+        "Roadmap milestones on logical qubits / error-corrected systems",
+        "Large sovereign and national-lab system sales",
+        "Quantum networking/QKD contract wins",
+        "Strategic partnerships or investment from hyperscalers"
+      ],
+      "risks": [
+        "Revenue tiny relative to ~$18B market cap; deeply unprofitable",
+        "Technology may lose to superconducting or neutral-atom approaches",
+        "Heavy serial dilution funding acquisitions and R&D",
+        "Commercial quantum advantage timeline could slip a decade",
+        "Narrative-driven stock with extreme drawdown potential"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Best-capitalized eVTOL developer with vertically integrated manufacturing, deep certification progress with the FAA, and strategic backing from Toyota, Delta and Uber. If air taxis achieve type certification and scale, the urban/regional air mobility market is potentially hundreds of billions with strong network and regulatory-barrier moats.",
+      "catalysts": [
+        "FAA type certification progress through TIA flight testing",
+        "Dubai/UAE commercial launch and revenue-generating operations",
+        "Defense/DoD contracts and hybrid Superpilot autonomy programs",
+        "Manufacturing scale-up at Dayton and Marina with Toyota"
+      ],
+      "risks": [
+        "Pre-revenue with ~$1B+ annual cash burn and continued dilution",
+        "Certification timeline repeatedly slips; regulatory outcome uncertain",
+        "Unproven unit economics — battery life, maintenance, pilot costs, infrastructure",
+        "Competition from Archer, Beta, Chinese EHang; potential price war",
+        "$8.5B valuation already discounts substantial success"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    }
+  ]
+}

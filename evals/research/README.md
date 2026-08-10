@@ -59,7 +59,7 @@ Optional full panel + judge (more expensive):
 cargo run -p finance-advisor --bin research_bench -- \
   --baseline openai/gpt-5.6-sol \
   --candidate qwen/qwen3.8-max \
-  --companions anthropic/claude-opus-5,moonshotai/kimi-k3 \
+  --companions openai/gpt-5.6-sol,moonshotai/kimi-k3 \
   --with-judge \
   --trials 1
 ```
