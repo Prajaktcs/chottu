@@ -25,6 +25,38 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Reject edits to existing SQL migrations
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          # Modified (not newly added) migration files are forbidden, unless the
+          # result exactly matches the file's first-committed content (one-time
+          # restore after an accidental edit — sqlx checksums must stay stable).
+          changed="$(git diff --name-only --diff-filter=M "${base}...${head}" -- 'chotu-common/migrations/*.sql' || true)"
+          blocked=""
+          while IFS= read -r file; do
+            [[ -z "${file}" ]] && continue
+            intro="$(git log --diff-filter=A --format=%H "${head}" -- "${file}" | tail -1)"
+            if [[ -z "${intro}" ]]; then
+              blocked="${blocked}${file} (could not find introduction commit)"$'\n'
+              continue
+            fi
+            if git diff --quiet "${intro}:${file}" "${head}:${file}"; then
+              echo "Allowing restore of ${file} to its introduction commit (${intro})"
+            else
+              blocked="${blocked}${file}"$'\n'
+            fi
+          done <<< "${changed}"
+          if [[ -n "${blocked}" ]]; then
+            echo "::error::Do not modify already-committed migrations (sqlx checksums break). Add a new migration file instead."
+            echo "${blocked}"
+            exit 1
+          fi
 
       - name: Install system dependencies
         run: |
