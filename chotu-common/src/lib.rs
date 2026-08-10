@@ -59,7 +59,9 @@ pub use finnhub::{
     cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,
     FinnhubError,
 };
-pub use quotes::{fetch_stock_quotes, StockQuote, QuoteError};
+pub use quotes::{
+    fetch_stock_quotes, fetch_stock_quotes_near_cost, StockQuote, QuoteError,
+};
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, spawn_background_reindex, MemoryHit,
     MemoryIndex, ReindexStats, SourceType, DEFAULT_EMBED_MODEL,
