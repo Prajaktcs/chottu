@@ -41,7 +41,8 @@ pub use calendar::{
     CalendarEvent, GoogleCalendarClient,
 };
 pub use google_health::{
-    GoogleHealthClient, GoogleHealthFoodSummary, NutritionLogWrite, GOOGLE_HEALTH_OAUTH_SCOPES,
+    parse_exercise_data_points, ExerciseSession, GoogleHealthClient, GoogleHealthFoodSummary,
+    NutritionLogWrite, GOOGLE_HEALTH_OAUTH_SCOPES,
 };
 pub use ledger::{
     looks_like_non_transaction_alert, validate_ledger_amount, LedgerAmountReject,

@@ -1,5 +1,8 @@
 # Project Chotu To-Do List
 
+## Strengthen existing (see STRENGTHEN.md)
+- Prefer hardening shipped surfaces over new domains; work the checklist in [`STRENGTHEN.md`](STRENGTHEN.md) one PR at a time.
+
 ## Nutrition & Health Coach
 - [x] For the agent to send status reports or trends on how the nutrition is going
 - [x] Investigate if there is anything that we need to adjust in the nutrition phase
@@ -32,7 +35,7 @@
 - [x] Spend alerts / category budgets
 - [x] Family multi-user Telegram UX
 - [x] Fitness coach loop: `fitness_goals` + weekly `/plan` + exercise persistence + outcome-aware tips/brief
-- [ ] Structured `exercise_log` schema (activity type, duration, active kcal, start/end) beyond free-text descriptions — wire into coach/plan progress without keyword heuristics
+- [x] Structured `exercise_log` schema (activity type, duration, active kcal, start/end) beyond free-text descriptions — wire into coach/plan progress without keyword heuristics
 - [ ] Meal planning ↔ grocery lists
 - [ ] Medical-record–aware coaching (private local ingest only; never commit or fan-out across family DMs; user-confirmed constraints → macros/plan; never diagnose)
 

@@ -17,6 +17,122 @@ pub struct GoogleHealthClient {
     refresh_token: String,
 }
 
+/// One Google Health exercise / activity session with structured fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExerciseSession {
+    pub activity_type: String,
+    pub duration_minutes: i32,
+    /// Active energy burned for the session; 0 when the API omits calories.
+    pub active_calories: f64,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+}
+
+/// Cap a single session length so bad timestamps cannot produce negative or absurd minutes.
+const MAX_EXERCISE_DURATION_MINUTES: i32 = 24 * 60;
+
+fn clamp_exercise_duration_minutes(mins: i64) -> i32 {
+    mins.clamp(0, MAX_EXERCISE_DURATION_MINUTES as i64) as i32
+}
+
+impl ExerciseSession {
+    /// Human-readable blurb, e.g. `Strength Training (45 mins, 240 kcal)`.
+    pub fn display(&self) -> String {
+        let mins = self.duration_minutes.max(0);
+        if self.active_calories > 0.0 {
+            format!(
+                "{} ({} mins, {:.0} kcal)",
+                self.activity_type, mins, self.active_calories
+            )
+        } else {
+            format!("{} ({} mins)", self.activity_type, mins)
+        }
+    }
+}
+
+/// Parse `dataPoints` from a Google Health exercise reconcile response.
+pub fn parse_exercise_data_points(data: &serde_json::Value) -> Vec<ExerciseSession> {
+    let mut exercises = Vec::new();
+    let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) else {
+        return exercises;
+    };
+    for point in points {
+        let Some(exercise_obj) = point.get("exercise") else {
+            continue;
+        };
+        let activity_type = exercise_obj
+            .get("activityType")
+            .or_else(|| exercise_obj.get("exerciseType"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("Workout")
+            .to_string();
+
+        let calories = exercise_obj
+            .get("calories")
+            .and_then(|v| v.as_f64())
+            .or_else(|| {
+                exercise_obj
+                    .get("calories")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| s.parse::<f64>().ok())
+            })
+            .unwrap_or(0.0);
+
+        let start_str = point
+            .get("startTime")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                point
+                    .get("interval")
+                    .and_then(|i| i.get("startTime"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                exercise_obj
+                    .get("interval")
+                    .and_then(|i| i.get("startTime"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| exercise_obj.get("startTime").and_then(|v| v.as_str()));
+        let end_str = point
+            .get("endTime")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                point
+                    .get("interval")
+                    .and_then(|i| i.get("endTime"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| {
+                exercise_obj
+                    .get("interval")
+                    .and_then(|i| i.get("endTime"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| exercise_obj.get("endTime").and_then(|v| v.as_str()));
+
+        let mut duration_mins = 0_i32;
+        if let (Some(s_str), Some(e_str)) = (start_str, end_str) {
+            if let (Ok(s_dt), Ok(e_dt)) = (
+                chrono::DateTime::parse_from_rfc3339(s_str),
+                chrono::DateTime::parse_from_rfc3339(e_str),
+            ) {
+                duration_mins =
+                    clamp_exercise_duration_minutes(e_dt.signed_duration_since(s_dt).num_minutes());
+            }
+        }
+
+        exercises.push(ExerciseSession {
+            activity_type,
+            duration_minutes: duration_mins,
+            active_calories: calories,
+            start_at: start_str.map(|s| s.to_string()),
+            end_at: end_str.map(|s| s.to_string()),
+        });
+    }
+    exercises
+}
+
 /// Anonymous nutrition-log payload for `dataPoints.create`.
 #[derive(Debug, Clone)]
 pub struct NutritionLogWrite {
@@ -487,52 +603,24 @@ impl GoogleHealthClient {
         Ok(hours)
     }
 
-    /// Fetches exercise summary strings from the Google Health API for a specific date (format: YYYY-MM-DD).
-    pub async fn fetch_exercise_summary(&self, date: &str) -> Result<Vec<String>, anyhow::Error> {
+    /// Fetches structured exercise sessions from Google Health for a date (YYYY-MM-DD).
+    pub async fn fetch_exercise_sessions(
+        &self,
+        date: &str,
+    ) -> Result<Vec<ExerciseSession>, anyhow::Error> {
         let access_token = self.access_token().await?;
         let data = self.query_reconcile(&access_token, "exercise", date).await?;
+        Ok(parse_exercise_data_points(&data))
+    }
 
-        let mut exercises = Vec::new();
-        if let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) {
-            for point in points {
-                if let Some(exercise_obj) = point.get("exercise") {
-                    let activity_type = exercise_obj.get("activityType")
-                        .or_else(|| exercise_obj.get("exerciseType"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Workout");
-
-                    let calories = exercise_obj.get("calories")
-                        .and_then(|v| v.as_f64())
-                        .or_else(|| exercise_obj.get("calories").and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok())))
-                        .unwrap_or(0.0);
-
-                    let start_str = point.get("startTime").and_then(|v| v.as_str())
-                        .or_else(|| point.get("interval").and_then(|i| i.get("startTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("interval").and_then(|i| i.get("startTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("startTime").and_then(|v| v.as_str()));
-                    let end_str = point.get("endTime").and_then(|v| v.as_str())
-                        .or_else(|| point.get("interval").and_then(|i| i.get("endTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("interval").and_then(|i| i.get("endTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("endTime").and_then(|v| v.as_str()));
-
-                    let mut duration_mins = 0;
-                    if let (Some(s_str), Some(e_str)) = (start_str, end_str) {
-                        if let (Ok(s_dt), Ok(e_dt)) = (chrono::DateTime::parse_from_rfc3339(s_str), chrono::DateTime::parse_from_rfc3339(e_str)) {
-                            duration_mins = e_dt.signed_duration_since(s_dt).num_minutes();
-                        }
-                    }
-
-                    // Format: "Running (30 mins, 300 kcal)" or "Strength Training (45 mins)"
-                    let desc = if calories > 0.0 {
-                        format!("{} ({} mins, {:.0} kcal)", activity_type, duration_mins, calories)
-                    } else {
-                        format!("{} ({} mins)", activity_type, duration_mins)
-                    };
-                    exercises.push(desc);
-                }
-            }
-        }
-        Ok(exercises)
+    /// Display strings for exercise sessions (compat wrapper).
+    pub async fn fetch_exercise_summary(&self, date: &str) -> Result<Vec<String>, anyhow::Error> {
+        Ok(self
+            .fetch_exercise_sessions(date)
+            .await?
+            .into_iter()
+            .map(|s| s.display())
+            .collect())
     }
 
     /// Creates an anonymous nutrition-log data point. Returns the full resource `name`.
@@ -907,51 +995,58 @@ mod tests {
                             "endTime": "2026-06-21T08:45:00Z"
                         }
                     }
+                },
+                {
+                    "exercise": {
+                        "activityType": "Running",
+                        "calories": 300.0,
+                        "interval": {
+                            "startTime": "2026-06-21T17:00:00Z",
+                            "endTime": "2026-06-21T17:30:00Z"
+                        }
+                    }
                 }
             ]
         }"#;
         let data: serde_json::Value = serde_json::from_str(raw_json).unwrap();
-        let mut exercises = Vec::new();
-        if let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) {
-            for point in points {
-                if let Some(exercise_obj) = point.get("exercise") {
-                    let activity_type = exercise_obj.get("activityType")
-                        .or_else(|| exercise_obj.get("exerciseType"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Workout");
+        let exercises = parse_exercise_data_points(&data);
+        assert_eq!(exercises.len(), 2);
+        assert_eq!(exercises[0].activity_type, "Strength Training");
+        assert_eq!(exercises[0].duration_minutes, 45);
+        assert!((exercises[0].active_calories - 240.0).abs() < f64::EPSILON);
+        assert_eq!(
+            exercises[0].start_at.as_deref(),
+            Some("2026-06-21T08:00:00Z")
+        );
+        assert_eq!(
+            exercises[0].display(),
+            "Strength Training (45 mins, 240 kcal)"
+        );
+        assert_eq!(exercises[1].activity_type, "Running");
+        assert_eq!(exercises[1].duration_minutes, 30);
+    }
 
-                    let calories = exercise_obj.get("calories")
-                        .and_then(|v| v.as_f64())
-                        .or_else(|| exercise_obj.get("calories").and_then(|v| v.as_str().and_then(|s| s.parse::<f64>().ok())))
-                        .unwrap_or(0.0);
-
-                    let start_str = point.get("startTime").and_then(|v| v.as_str())
-                        .or_else(|| point.get("interval").and_then(|i| i.get("startTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("interval").and_then(|i| i.get("startTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("startTime").and_then(|v| v.as_str()));
-                    let end_str = point.get("endTime").and_then(|v| v.as_str())
-                        .or_else(|| point.get("interval").and_then(|i| i.get("endTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("interval").and_then(|i| i.get("endTime")).and_then(|v| v.as_str()))
-                        .or_else(|| exercise_obj.get("endTime").and_then(|v| v.as_str()));
-
-                    let mut duration_mins = 0;
-                    if let (Some(s_str), Some(e_str)) = (start_str, end_str) {
-                        if let (Ok(s_dt), Ok(e_dt)) = (chrono::DateTime::parse_from_rfc3339(s_str), chrono::DateTime::parse_from_rfc3339(e_str)) {
-                            duration_mins = e_dt.signed_duration_since(s_dt).num_minutes();
+    #[test]
+    fn test_parse_exercise_clamps_negative_duration() {
+        let raw_json = r#"{
+            "dataPoints": [
+                {
+                    "exercise": {
+                        "activityType": "Running",
+                        "calories": 100.0,
+                        "interval": {
+                            "startTime": "2026-06-21T08:45:00Z",
+                            "endTime": "2026-06-21T08:00:00Z"
                         }
                     }
-
-                    let desc = if calories > 0.0 {
-                        format!("{} ({} mins, {:.0} kcal)", activity_type, duration_mins, calories)
-                    } else {
-                        format!("{} ({} mins)", activity_type, duration_mins)
-                    };
-                    exercises.push(desc);
                 }
-            }
-        }
+            ]
+        }"#;
+        let data: serde_json::Value = serde_json::from_str(raw_json).unwrap();
+        let exercises = parse_exercise_data_points(&data);
         assert_eq!(exercises.len(), 1);
-        assert_eq!(exercises[0], "Strength Training (45 mins, 240 kcal)");
+        assert_eq!(exercises[0].duration_minutes, 0);
+        assert_eq!(exercises[0].display(), "Running (0 mins, 100 kcal)");
     }
 
     #[test]

@@ -15,18 +15,20 @@ pub use coaching::{
     FitnessCoachContext, NutritionCoachContext,
 };
 pub use fitness_plan::{
-    count_strengthish_sessions, current_week_start_str, generate_and_store_weekly_plan,
-    load_weekly_plan, parse_plan_json, render_plan_markdown, session_for_date,
-    session_for_date_from_stored, week_start_monday, weekday_name, PlanDay, PlanDayKind,
-    StoredWeeklyPlan, WeeklyFitnessPlan,
+    classify_activity_type, count_strength_sessions, count_strengthish_sessions,
+    current_week_start_str, generate_and_store_weekly_plan, load_weekly_plan, parse_plan_json,
+    render_plan_markdown, session_for_date, session_for_date_from_stored, sum_cardio_minutes,
+    week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind, StoredWeeklyPlan,
+    WeeklyFitnessPlan,
 };
 pub use sync::{
-    credentials_configured, delete_google_nutrition_logs, exercises_for_day, exercises_for_range,
-    external_nutrition_base, google_data_point_ids_for_day, google_health_client_for_member,
-    google_health_client_from_env, member_health_credentials_configured, push_food_log_to_google,
-    push_pending_food_logs, rebuild_summary_from_food_log, replace_exercise_log_for_day,
-    sum_food_log_for_day, sum_unsynced_food_log_for_day, sync_configured_members_today,
-    sync_member_for_date, sync_primary_today, write_summary_nutrition, DayNutritionTotals,
+    credentials_configured, delete_google_nutrition_logs, exercise_entries_for_day,
+    exercise_entries_for_range, exercises_for_day, exercises_for_range, external_nutrition_base,
+    google_data_point_ids_for_day, google_health_client_for_member, google_health_client_from_env,
+    member_health_credentials_configured, push_food_log_to_google, push_pending_food_logs,
+    rebuild_summary_from_food_log, replace_exercise_log_for_day, sum_food_log_for_day,
+    sum_unsynced_food_log_for_day, sync_configured_members_today, sync_member_for_date,
+    sync_primary_today, write_summary_nutrition, DayNutritionTotals, ExerciseLogEntry,
     HealthSyncReport,
 };
 pub use trends::build_nutrition_trend_reports;

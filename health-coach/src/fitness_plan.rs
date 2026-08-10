@@ -472,21 +472,126 @@ pub fn extract_json_object(text: &str) -> Option<&str> {
     Some(&body[start..=end])
 }
 
-/// Count strength-like exercise descriptions in a week (heuristic for coach progress).
-pub fn count_strengthish_sessions(descriptions: &[String]) -> i32 {
-    descriptions
-        .iter()
-        .filter(|d| {
-            let l = d.to_lowercase();
-            l.contains("strength")
-                || l.contains("weight")
-                || l.contains("lift")
-                || l.contains("gym")
-                || l.contains("workout")
-                || l.contains("functional")
-                || l.contains("hiit")
+/// Classify an activity type for weekly progress (strength sessions vs cardio minutes).
+///
+/// Deliberately does **not** treat bare "workout" / "gym" as strength — those
+/// false-positives inflated progress when descriptions were free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityKind {
+    Strength,
+    Cardio,
+    Mixed,
+    Other,
+}
+
+pub fn classify_activity_type(activity_type: &str) -> ActivityKind {
+    let l = activity_type.trim().to_lowercase();
+    if l.is_empty() {
+        return ActivityKind::Other;
+    }
+
+    // Mixed / hybrid first so "HIIT" isn't swallowed by vague matches.
+    if l.contains("hiit")
+        || l.contains("circuit")
+        || l.contains("cross training")
+        || l.contains("crosstraining")
+        || l.contains("mixed")
+    {
+        return ActivityKind::Mixed;
+    }
+
+    if l.contains("strength")
+        || l.contains("weight")
+        || l.contains("powerlift")
+        || l.contains("resistance")
+        || l.contains("calisthen")
+        || l.contains("bodybuild")
+        || l.contains("functional strength")
+        || l.contains("lift")
+        || l == "functional training"
+        || l.contains("kettlebell")
+        || l.contains("barbell")
+        || l.contains("dumbbell")
+    {
+        return ActivityKind::Strength;
+    }
+
+    if l.contains("run")
+        || l.contains("jog")
+        || l.contains("walk")
+        || l.contains("hik")
+        || l.contains("bike")
+        || l.contains("cycl")
+        || l.contains("swim")
+        || l.contains("row")
+        || l.contains("elliptical")
+        || l.contains("treadmill")
+        || l.contains("cardio")
+        || l.contains("aerobic")
+        || l.contains("spin")
+        || l.contains("dance")
+        || l.contains("ski")
+        || l.contains("skate")
+        || l.contains("soccer")
+        || l.contains("basketball")
+        || l.contains("tennis")
+        || l.contains("stair")
+        || l.contains("jump rope")
+        || l.contains("boxing")
+        || l.contains("martial")
+    {
+        return ActivityKind::Cardio;
+    }
+
+    ActivityKind::Other
+}
+
+/// Count strength (+ mixed) sessions from structured activity labels.
+pub fn count_strength_sessions<I, S>(activities: I) -> i32
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    activities
+        .into_iter()
+        .filter(|a| {
+            matches!(
+                classify_activity_type(a.as_ref()),
+                ActivityKind::Strength | ActivityKind::Mixed
+            )
         })
         .count() as i32
+}
+
+/// Sum cardio (+ mixed) duration minutes. Non-positive durations are ignored.
+pub fn sum_cardio_minutes<I, S>(sessions: I) -> i32
+where
+    I: IntoIterator<Item = (S, i32)>,
+    S: AsRef<str>,
+{
+    sessions
+        .into_iter()
+        .filter_map(|(activity, mins)| {
+            if mins <= 0 {
+                return None;
+            }
+            match classify_activity_type(activity.as_ref()) {
+                ActivityKind::Cardio | ActivityKind::Mixed => Some(mins),
+                _ => None,
+            }
+        })
+        .sum()
+}
+
+/// Legacy wrapper: classifies each description's activity label (text before ` (`).
+pub fn count_strengthish_sessions(descriptions: &[String]) -> i32 {
+    count_strength_sessions(descriptions.iter().map(|d| {
+        let t = d.trim();
+        match t.find(" (") {
+            Some(i) if i > 0 => t[..i].to_string(),
+            _ => t.to_string(),
+        }
+    }))
 }
 
 /// Weekday name for a NaiveDate (Monday..Sunday).
@@ -564,6 +669,38 @@ mod tests {
         let raw = "```json\n{\"theme\":\"x\",\"days\":[]}\n```";
         let obj = extract_json_object(raw).unwrap();
         assert!(obj.contains("theme"));
+    }
+
+    #[test]
+    fn classify_activity_types() {
+        assert_eq!(
+            classify_activity_type("Strength Training"),
+            ActivityKind::Strength
+        );
+        assert_eq!(classify_activity_type("Running"), ActivityKind::Cardio);
+        assert_eq!(classify_activity_type("HIIT"), ActivityKind::Mixed);
+        assert_eq!(classify_activity_type("Workout"), ActivityKind::Other);
+        assert_eq!(classify_activity_type("Gym"), ActivityKind::Other);
+        assert_eq!(classify_activity_type("Walking"), ActivityKind::Cardio);
+        assert_eq!(
+            classify_activity_type("Weightlifting"),
+            ActivityKind::Strength
+        );
+    }
+
+    #[test]
+    fn progress_counts_ignore_generic_workout() {
+        let labels = ["Workout", "Strength Training", "Running", "HIIT"];
+        assert_eq!(count_strength_sessions(labels), 2); // strength + HIIT
+        assert_eq!(
+            sum_cardio_minutes([
+                ("Workout", 60),
+                ("Strength Training", 45),
+                ("Running", 30),
+                ("HIIT", 20),
+            ]),
+            50
+        ); // running + HIIT
     }
 
     #[test]

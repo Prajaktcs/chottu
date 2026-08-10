@@ -34,14 +34,14 @@ pub struct FitnessCoachContext {
     pub days_until_target: Option<i64>,
     /// Today's planned session summary, if any.
     pub planned_session: Option<String>,
-    /// Free-text exercise blurbs for the window (v1).
-    /// TODO: replace with structured exercise rows (activity type, duration,
-    /// calories, start/end) once `exercise_log` schema is expanded beyond
-    /// description strings — see TODO.md.
+    /// Free-text exercise blurbs for the window (display).
     pub exercises: Vec<String>,
-    /// Strength-like sessions logged this week vs weekly target.
+    /// Strength (+ mixed) sessions logged this week vs weekly target.
     pub week_strength_sessions: Option<i32>,
     pub week_strength_target: Option<i32>,
+    /// Cardio (+ mixed) minutes logged this week vs weekly target.
+    pub week_cardio_minutes: Option<i32>,
+    pub week_cardio_target: Option<i32>,
     /// Optional trend arrows for calories / protein / steps (↑ ↓ →).
     pub calorie_trend: Option<&'static str>,
     pub protein_trend: Option<&'static str>,
@@ -97,6 +97,8 @@ impl FitnessCoachContext {
             exercises: Vec::new(),
             week_strength_sessions: None,
             week_strength_target: None,
+            week_cardio_minutes: None,
+            week_cardio_target: None,
             calorie_trend: None,
             protein_trend: None,
             steps_trend: None,
@@ -112,6 +114,8 @@ impl FitnessCoachContext {
         exercises: Vec<String>,
         week_strength_sessions: Option<i32>,
         week_strength_target: Option<i32>,
+        week_cardio_minutes: Option<i32>,
+        week_cardio_target: Option<i32>,
     ) -> Self {
         self.fitness_goals = fitness.cloned();
         self.days_until_target = days_until_target;
@@ -126,6 +130,8 @@ impl FitnessCoachContext {
         self.exercises = exercises;
         self.week_strength_sessions = week_strength_sessions;
         self.week_strength_target = week_strength_target;
+        self.week_cardio_minutes = week_cardio_minutes;
+        self.week_cardio_target = week_cardio_target;
         self
     }
 
@@ -165,6 +171,8 @@ impl FitnessCoachContext {
             exercises: Vec::new(),
             week_strength_sessions: None,
             week_strength_target: None,
+            week_cardio_minutes: None,
+            week_cardio_target: None,
             calorie_trend: Some(calorie_trend),
             protein_trend: Some(protein_trend),
             steps_trend: Some(steps_trend),
@@ -282,9 +290,12 @@ impl FitnessCoachContext {
         if let (Some(done), Some(target)) = (self.week_strength_sessions, self.week_strength_target)
         {
             lines.push(format!(
-                "Strength-like sessions this week: {}/{}",
+                "Strength sessions this week: {}/{}",
                 done, target
             ));
+        }
+        if let (Some(done), Some(target)) = (self.week_cardio_minutes, self.week_cardio_target) {
+            lines.push(format!("Cardio minutes this week: {}/{}", done, target));
         }
 
         lines.join("\n")
@@ -470,7 +481,7 @@ mod tests {
             constraints: vec!["low-impact cardio".into()],
             weekly_targets: Some(chotu_common::FitnessWeeklyTargets {
                 strength_sessions: Some(3),
-                cardio_minutes: None,
+                cardio_minutes: Some(90),
                 active_calories: Some(400),
             }),
         };
@@ -487,6 +498,8 @@ mod tests {
                 vec!["Weights 40m".into()],
                 Some(1),
                 Some(3),
+                Some(40),
+                Some(90),
             );
         let prompt = ctx.to_user_prompt();
         assert!(prompt.contains("Intent: beach body"));
@@ -494,7 +507,8 @@ mod tests {
         assert!(prompt.contains("Planned session today: Tuesday (strength): lower body"));
         assert!(prompt.contains("Weights 40m"));
         assert!(prompt.contains("low-impact cardio"));
-        assert!(prompt.contains("Strength-like sessions this week: 1/3"));
+        assert!(prompt.contains("Strength sessions this week: 1/3"));
+        assert!(prompt.contains("Cardio minutes this week: 40/90"));
         assert!(prompt.contains("Active calories: 400/400kcal"));
     }
 
