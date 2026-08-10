@@ -669,7 +669,7 @@ family:
         carbs_g: 220
         fats_g: 70
         fiber_g: 30
-        steps: 8000
+        steps: 10000
       fitness_goals:
         intent: "lean beach body"
         target_date: "2027-06-01"
@@ -730,7 +730,7 @@ target_allocation:
         let goals = loaded.family.members[0].nutrition_goals.as_ref().unwrap();
         assert_eq!(goals.calories, Some(2200));
         assert_eq!(goals.protein_g, Some(160.0));
-        assert_eq!(goals.steps, Some(8000));
+        assert_eq!(goals.steps, Some(10000));
         assert!(loaded.family.members[2].nutrition_goals.is_none());
         let fitness = loaded.family.members[0].fitness_goals.as_ref().unwrap();
         assert_eq!(fitness.intent.as_deref(), Some("lean beach body"));

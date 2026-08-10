@@ -349,7 +349,8 @@ pub async fn start_telegram_bot(
         }
     });
 
-    // Scheduled Google Health sync is owned by the Health Coach agent (8:45 PM).
+    // Scheduled Google Health sync is owned by the Health Coach agent
+    // (8:45 PM local + 11:00 PM ET late steps sync / nudge).
     println!("Telegram Bot: Google Health scheduled sync is handled by the Health Coach agent.");
 
     // Background catch-up for local memory RAG index (journals / digests / refs / tasks).

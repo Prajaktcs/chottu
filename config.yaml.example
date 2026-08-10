@@ -15,7 +15,7 @@ family:
         carbs_g: 220
         fats_g: 70
         fiber_g: 30
-        steps: 8000
+        steps: 10000   # daily step push (late sync ~11pm ET nudges if under)
       # Optional long-horizon fitness outcome + training policy.
       # Keep real goals in your private config.yaml (gitignored) — never commit
       # personal health details. Linked Telegram DMs only see *your* nutrition/training.

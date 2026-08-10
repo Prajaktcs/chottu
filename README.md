@@ -40,7 +40,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 
 ### Family health & nutrition (Health Coach)
 - Multi-member household profiles (`config.yaml`: adults/kids, optional per-member nutrition + fitness goals).
-- Two-way **Google Health** sync: pull daily calories/macros/activity/exercises; push Telegram-logged meals back per linked member.
+- Two-way **Google Health** sync: pull daily calories/macros/activity/exercises; push Telegram-logged meals back per linked member. Evening sync ~8:45 local; **late steps sync ~11:00 PM ET** (override with `HEALTH_LATE_SYNC_HOUR` / `HEALTH_LATE_SYNC_TZ`) with a private nudge toward the daily step goal (config `nutrition_goals.steps`, default 10 000).
 - Log food by text (`/food`), plain-language chat (“log 2 eggs for praj”), or **photo**:
   - Barcode → [Open Food Facts](https://world.openfoodfacts.org/)
   - Package / plated meal → Gemini vision
