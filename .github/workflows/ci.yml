@@ -25,6 +25,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Reject edits to existing SQL migrations
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          changed="$(git diff --name-only --diff-filter=M "${base}...${head}" -- 'chotu-common/migrations/*.sql' || true)"
+          if [[ -n "${changed}" ]]; then
+            echo "::error::Do not modify already-committed migrations (sqlx checksums break). Add a new migration file instead."
+            echo "${changed}"
+            exit 1
+          fi
 
       - name: Install system dependencies
         run: |

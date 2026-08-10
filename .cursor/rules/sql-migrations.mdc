@@ -1,0 +1,24 @@
+---
+description: Never edit already-committed sqlx migrations; add a new file instead
+globs: chotu-common/migrations/**/*.sql
+alwaysApply: false
+---
+
+# SQL migrations are immutable
+
+Once a migration under `chotu-common/migrations/` is committed, **do not modify it** — even comments.
+
+sqlx stores a SHA-384 checksum of each applied migration. Editing an existing file causes:
+
+`migration … was previously applied but has been modified`
+
+## What to do instead
+
+- Schema change → **new** `YYYYMMDDHHMMSS_description.sql` with a later timestamp than the latest migration
+- Clarifying docs → put them in the **new** migration’s header, README, or code comments — not in an old file
+- Bug in an already-applied migration → ship a **forward** fix migration; do not rewrite history
+
+## Allowed
+
+- Adding brand-new migration files
+- Editing a migration only if it has **never** been committed / never applied anywhere (local WIP only)
