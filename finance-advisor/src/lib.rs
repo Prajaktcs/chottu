@@ -188,6 +188,16 @@ impl StockResearcher {
         }
     }
 
+    /// Build with an explicit panel + judge (e.g. A/B harnesses). Uses `OPENROUTER_API_KEY`.
+    pub fn with_models(panel_models: Vec<String>, judge_model: String) -> Self {
+        let client = OpenRouterClient::from_env().ok();
+        Self {
+            client,
+            panel_models,
+            judge_model,
+        }
+    }
+
     pub fn is_configured(&self) -> bool {
         self.client.is_some()
     }
