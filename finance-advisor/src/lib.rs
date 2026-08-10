@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use anyhow::Context;
 use chotu_common::{
-    AppConfig, CapBand, FinancialLedgerEntry, FinnhubClient, InvestmentPhilosophy,
-    OpenRouterClient, TargetAllocation,
+    fetch_exchange_rates, prefers_yahoo_profile, AppConfig, CapBand, FinancialLedgerEntry,
+    FinnhubClient, FinnhubError, InvestmentPhilosophy, OpenRouterClient, TargetAllocation,
+    YahooProfileClient,
 };
 use futures::future::join_all;
 use schemars::JsonSchema;
@@ -824,25 +825,70 @@ fn cap_band_to_market(band: CapBand) -> MarketCapBand {
     }
 }
 
-/// Enrich universe via Finnhub profile2. Discovery drops Mid/Large/unresolved; seeded keeps all.
+/// Enrich universe via Finnhub profile2, with Yahoo fallback for international /
+/// Finnhub-403 symbols (free Finnhub is US-only). Discovery drops Mid/Large/unresolved;
+/// seeded keeps all.
 pub async fn enrich_universe_with_finnhub(
     universe: &mut Vec<UniverseEntry>,
     client: &FinnhubClient,
     discovery: bool,
 ) -> Result<EnrichResult, anyhow::Error> {
     let tickers: Vec<String> = universe.iter().map(|e| e.ticker.clone()).collect();
-    let lookups = client.lookup_profiles(&tickers).await;
+    let mut yahoo_first = Vec::new();
+    let mut finnhub_first = Vec::new();
+    for t in tickers {
+        if prefers_yahoo_profile(&t) {
+            yahoo_first.push(t);
+        } else {
+            finnhub_first.push(t);
+        }
+    }
+
     let mut by_ticker: HashMap<String, chotu_common::CompanyProfile> = HashMap::new();
+    let mut need_yahoo = yahoo_first;
     let mut lookup_misses = 0usize;
 
-    for (ticker, result) in lookups {
-        match result {
-            Ok(profile) => {
-                by_ticker.insert(normalize_ticker(&ticker), profile);
+    if !finnhub_first.is_empty() {
+        let lookups = client.lookup_profiles(&finnhub_first).await;
+        for (ticker, result) in lookups {
+            match result {
+                Ok(profile) => {
+                    by_ticker.insert(normalize_ticker(&ticker), profile);
+                }
+                Err(FinnhubError::HttpStatus { status: 403, .. }) => {
+                    // Free-tier international / gated symbol — try Yahoo quietly.
+                    need_yahoo.push(ticker);
+                }
+                Err(e) => {
+                    eprintln!("Finance Advisor: Finnhub lookup failed for {ticker}: {e}");
+                    need_yahoo.push(ticker);
+                }
+            }
+        }
+    }
+
+    if !need_yahoo.is_empty() {
+        match YahooProfileClient::new() {
+            Ok(yahoo) => {
+                let usd_rates = fetch_exchange_rates("USD").await;
+                let y_lookups = yahoo.lookup_profiles(&need_yahoo, &usd_rates).await;
+                for (ticker, result) in y_lookups {
+                    match result {
+                        Ok(profile) => {
+                            by_ticker.insert(normalize_ticker(&ticker), profile);
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Finance Advisor: Yahoo market-cap lookup failed for {ticker}: {e}"
+                            );
+                            lookup_misses += 1;
+                        }
+                    }
+                }
             }
             Err(e) => {
-                eprintln!("Finance Advisor: Finnhub lookup failed for {ticker}: {e}");
-                lookup_misses += 1;
+                eprintln!("Finance Advisor: Yahoo client init failed: {e}");
+                lookup_misses += need_yahoo.len();
             }
         }
     }
@@ -880,7 +926,7 @@ pub fn apply_finnhub_profiles(
                         ticker: enriched.ticker,
                         company: enriched.company,
                         reason: format!(
-                            "Finnhub band {:?} (cap ${:.1}M) outside micro/small mandate",
+                            "Market-cap band {:?} (cap ${:.1}M) outside micro/small mandate",
                             band, profile.market_cap_m
                         ),
                     });
@@ -893,7 +939,7 @@ pub fn apply_finnhub_profiles(
                     dropped.push(DroppedUniverseEntry {
                         ticker: entry.ticker.clone(),
                         company: entry.company.clone(),
-                        reason: "Finnhub profile not found".to_string(),
+                        reason: "market-cap profile not found".to_string(),
                     });
                 } else {
                     kept.push(entry);

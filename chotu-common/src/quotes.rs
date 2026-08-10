@@ -27,6 +27,24 @@ pub enum QuoteError {
     NotFound(String),
     #[error("yahoo finance returned an unexpected payload for {0}")]
     BadPayload(String),
+    #[error("yahoo finance auth failed: {0}")]
+    Auth(String),
+    #[error("yahoo finance HTTP {status}")]
+    HttpStatus { status: u16 },
+}
+
+impl QuoteError {
+    /// Cloneable copy for fan-out when the same batch failure applies to many tickers.
+    pub fn clone_shared(&self) -> Self {
+        match self {
+            QuoteError::Http(e) => QuoteError::BadPayload(format!("HTTP: {e}")),
+            QuoteError::InvalidSymbol(s) => QuoteError::InvalidSymbol(s.clone()),
+            QuoteError::NotFound(s) => QuoteError::NotFound(s.clone()),
+            QuoteError::BadPayload(s) => QuoteError::BadPayload(s.clone()),
+            QuoteError::Auth(s) => QuoteError::Auth(s.clone()),
+            QuoteError::HttpStatus { status } => QuoteError::HttpStatus { status: *status },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
