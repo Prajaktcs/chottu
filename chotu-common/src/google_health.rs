@@ -28,16 +28,24 @@ pub struct ExerciseSession {
     pub end_at: Option<String>,
 }
 
+/// Cap a single session length so bad timestamps cannot produce negative or absurd minutes.
+const MAX_EXERCISE_DURATION_MINUTES: i32 = 24 * 60;
+
+fn clamp_exercise_duration_minutes(mins: i64) -> i32 {
+    mins.clamp(0, MAX_EXERCISE_DURATION_MINUTES as i64) as i32
+}
+
 impl ExerciseSession {
     /// Human-readable blurb, e.g. `Strength Training (45 mins, 240 kcal)`.
     pub fn display(&self) -> String {
+        let mins = self.duration_minutes.max(0);
         if self.active_calories > 0.0 {
             format!(
                 "{} ({} mins, {:.0} kcal)",
-                self.activity_type, self.duration_minutes, self.active_calories
+                self.activity_type, mins, self.active_calories
             )
         } else {
-            format!("{} ({} mins)", self.activity_type, self.duration_minutes)
+            format!("{} ({} mins)", self.activity_type, mins)
         }
     }
 }
@@ -109,7 +117,8 @@ pub fn parse_exercise_data_points(data: &serde_json::Value) -> Vec<ExerciseSessi
                 chrono::DateTime::parse_from_rfc3339(s_str),
                 chrono::DateTime::parse_from_rfc3339(e_str),
             ) {
-                duration_mins = e_dt.signed_duration_since(s_dt).num_minutes() as i32;
+                duration_mins =
+                    clamp_exercise_duration_minutes(e_dt.signed_duration_since(s_dt).num_minutes());
             }
         }
 
@@ -1015,6 +1024,29 @@ mod tests {
         );
         assert_eq!(exercises[1].activity_type, "Running");
         assert_eq!(exercises[1].duration_minutes, 30);
+    }
+
+    #[test]
+    fn test_parse_exercise_clamps_negative_duration() {
+        let raw_json = r#"{
+            "dataPoints": [
+                {
+                    "exercise": {
+                        "activityType": "Running",
+                        "calories": 100.0,
+                        "interval": {
+                            "startTime": "2026-06-21T08:45:00Z",
+                            "endTime": "2026-06-21T08:00:00Z"
+                        }
+                    }
+                }
+            ]
+        }"#;
+        let data: serde_json::Value = serde_json::from_str(raw_json).unwrap();
+        let exercises = parse_exercise_data_points(&data);
+        assert_eq!(exercises.len(), 1);
+        assert_eq!(exercises[0].duration_minutes, 0);
+        assert_eq!(exercises[0].display(), "Running (0 mins, 100 kcal)");
     }
 
     #[test]
