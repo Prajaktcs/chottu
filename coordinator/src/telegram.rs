@@ -150,7 +150,7 @@ pub async fn start_telegram_bot(
     let researcher = StockResearcher::from_env();
     if !researcher.is_configured() {
         eprintln!(
-            "Telegram Bot: OPENROUTER_API_KEY not set — /research and scheduled stock research disabled."
+            "Telegram Bot: OPENROUTER_API_KEY not set — /research disabled."
         );
     } else {
         println!(
@@ -213,46 +213,43 @@ pub async fn start_telegram_bot(
         }
     });
 
-    // Spawn proactive evening stock research scheduler.
-    let stock_bot = bot.clone();
-    let stock_pool = pool.clone();
-    let stock_researcher = researcher.clone();
-    let stock_config = shared_config.clone();
+    // Spawn proactive evening portfolio (/networth) overview scheduler.
+    let networth_bot = bot.clone();
+    let networth_pool = pool.clone();
+    let networth_config = shared_config.clone();
     tokio::spawn(async move {
         use chrono::Timelike;
         println!(
-            "Telegram Bot: Stock research scheduler running (sends when linked chats or TELEGRAM_CHAT_ID exist)."
+            "Telegram Bot: Portfolio overview scheduler running at 18:00 (sends when linked chats or TELEGRAM_CHAT_ID exist)."
         );
         let mut last_run_date = String::new();
         loop {
             let now = chrono::Local::now();
             let date_str = now.format("%Y-%m-%d").to_string();
             if now.hour() == 18 && now.minute() == 0 && date_str != last_run_date {
-                let cfg = stock_config.read().await.clone();
-                let targets: Vec<ChatId> = telegram_delivery_targets(&cfg)
-                    .into_iter()
-                    .map(ChatId)
-                    .collect();
+                let cfg = networth_config.read().await.clone();
+                let targets = telegram_delivery_targets(&cfg);
                 if targets.is_empty() {
                     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                     continue;
                 }
-                println!("Telegram Bot: Scheduled time (6:00 PM) reached. Running evening stock research...");
-                if let Err(e) = run_and_log_stock_research_multi(
-                    &stock_bot,
-                    &targets,
-                    &stock_pool,
-                    &stock_researcher,
-                    cfg.investment_philosophy.as_ref(),
-                    None,
-                )
-                .await
-                {
-                    eprintln!(
-                        "Telegram Bot: failed to run scheduled stock research: {:?}",
-                        e
-                    );
-                } else {
+                println!(
+                    "Telegram Bot: Scheduled time (6:00 PM) reached. Pushing portfolio overview..."
+                );
+                let mut any_ok = false;
+                for cid in targets {
+                    if let Err(e) =
+                        handle_networth(&networth_bot, ChatId(cid), &networth_pool, &cfg).await
+                    {
+                        eprintln!(
+                            "Telegram Bot: failed to push portfolio overview to {}: {:?}",
+                            cid, e
+                        );
+                    } else {
+                        any_ok = true;
+                    }
+                }
+                if any_ok {
                     last_run_date = date_str;
                 }
             }
