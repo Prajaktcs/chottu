@@ -13,6 +13,7 @@ pub mod calendar;
 pub mod open_food_facts;
 pub mod finnhub;
 pub mod quotes;
+pub mod yahoo_profile;
 pub mod spend_budget;
 
 pub use database::{complete_all_open_tasks, init_db, list_completable_open_tasks};
@@ -60,6 +61,9 @@ pub use finnhub::{
     FinnhubError,
 };
 pub use quotes::{fetch_stock_quotes, StockQuote, QuoteError};
+pub use yahoo_profile::{
+    prefers_yahoo_profile, yahoo_market_cap_usd_millions, YahooProfileClient,
+};
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, spawn_background_reindex, MemoryHit,
     MemoryIndex, ReindexStats, SourceType, DEFAULT_EMBED_MODEL,

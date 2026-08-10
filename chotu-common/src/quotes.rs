@@ -27,6 +27,8 @@ pub enum QuoteError {
     NotFound(String),
     #[error("yahoo finance returned an unexpected payload for {0}")]
     BadPayload(String),
+    #[error("yahoo finance auth failed: {0}")]
+    Auth(String),
 }
 
 #[derive(Debug, Deserialize)]
