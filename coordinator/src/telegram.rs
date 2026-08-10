@@ -236,21 +236,25 @@ pub async fn start_telegram_bot(
                 println!(
                     "Telegram Bot: Scheduled time (6:00 PM) reached. Pushing portfolio overview..."
                 );
-                let mut any_ok = false;
-                for cid in targets {
-                    if let Err(e) =
-                        handle_networth(&networth_bot, ChatId(cid), &networth_pool, &cfg).await
-                    {
-                        eprintln!(
-                            "Telegram Bot: failed to push portfolio overview to {}: {:?}",
-                            cid, e
-                        );
-                    } else {
-                        any_ok = true;
+                // Build once (one DB + quote/FX fetch), then fan out the same message.
+                match build_networth_summary(&networth_pool, &cfg).await {
+                    Ok(msg) => {
+                        if send_household(&networth_bot, &cfg, msg).await {
+                            last_run_date = date_str;
+                        }
                     }
-                }
-                if any_ok {
-                    last_run_date = date_str;
+                    Err(e) => {
+                        eprintln!(
+                            "Telegram Bot: failed to build scheduled portfolio overview: {}",
+                            e
+                        );
+                        let _ = send_household(
+                            &networth_bot,
+                            &cfg,
+                            format!("❌ Portfolio overview failed: {}", e),
+                        )
+                        .await;
+                    }
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
@@ -3126,22 +3130,46 @@ async fn handle_networth(
     pool: &SqlitePool,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
+    let has_holdings: bool =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM portfolio_holdings")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0)
+            > 0;
+    if has_holdings {
+        bot.send_message(chat_id, "🔍 Fetching live quotes via Yahoo Finance...")
+            .await?;
+    }
+
+    match build_networth_summary(pool, config).await {
+        Ok(msg) => {
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+        }
+        Err(e) => {
+            bot.send_message(chat_id, format!("❌ {}", e)).await?;
+        }
+    }
+
+    Ok(())
+}
+
+/// One DB + FX/quote fetch shared by `/networth` and the evening scheduler.
+async fn build_networth_summary(pool: &SqlitePool, config: &AppConfig) -> Result<String, String> {
     let base = config.currency();
     let rates = fetch_exchange_rates(base).await;
 
     // Portfolio only for now — email ledger is a transaction log, not a cash balance.
-    let holdings: Vec<chotu_common::PortfolioHolding> = match sqlx::query_as::<_, chotu_common::PortfolioHolding>(
+    let holdings: Vec<chotu_common::PortfolioHolding> = sqlx::query_as::<_, chotu_common::PortfolioHolding>(
         "SELECT ticker, shares_owned, average_cost, average_cost_currency, last_updated FROM portfolio_holdings"
     )
     .fetch_all(pool)
-    .await {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("Failed to fetch portfolio holdings: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error retrieving portfolio.").await?;
-            return Ok(());
-        }
-    };
+    .await
+    .map_err(|e| {
+        eprintln!("Failed to fetch portfolio holdings: {:?}", e);
+        "Database error retrieving portfolio.".to_string()
+    })?;
 
     let mut msg = String::new();
     msg.push_str(&format!("💰 *Project Chotu Net Worth Summary* ({})\n\n", base));
@@ -3154,106 +3182,98 @@ async fn handle_networth(
         ));
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
         msg.push_str(&format!("✨ *Invested Net Worth:* $0.00 {}", base));
-    } else {
-        bot.send_message(chat_id, "🔍 Fetching live quotes via Yahoo Finance...").await?;
+        return Ok(msg);
+    }
 
-        let tickers: Vec<String> = holdings.iter().map(|h| h.ticker.clone()).collect();
-        let prices = match fetch_stock_quotes(&tickers).await {
-            Ok(p) => p,
-            Err(e) => {
-                eprintln!("Failed to fetch stock prices: {:?}", e);
-                let mut portfolio_cost = 0.0;
-                for h in &holdings {
-                    let converted = holding_values_in_base(h, None, config, &rates);
-                    portfolio_cost += converted.cost_base;
-                }
-                msg.push_str(&format!(
-                    "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, showing FX'd book cost)\n",
-                    portfolio_cost, base
-                ));
-                msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
-                msg.push_str(&format!(
-                    "✨ *Invested Net Worth:* ${:.2} {} (estimated)",
-                    portfolio_cost,
-                    base
-                ));
-                bot.send_message(chat_id, msg).parse_mode(teloxide::types::ParseMode::Markdown).await?;
-                return Ok(());
+    let tickers: Vec<String> = holdings.iter().map(|h| h.ticker.clone()).collect();
+    let prices = match fetch_stock_quotes(&tickers).await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to fetch stock prices: {:?}", e);
+            let mut portfolio_cost = 0.0;
+            for h in &holdings {
+                let converted = holding_values_in_base(h, None, config, &rates);
+                portfolio_cost += converted.cost_base;
             }
-        };
-
-        let price_map: std::collections::HashMap<String, (f64, String)> = prices
-            .into_iter()
-            .map(|p| (p.ticker.to_uppercase(), (p.price, p.currency)))
-            .collect();
-
-        let mut total_portfolio_value = 0.0;
-        let mut total_portfolio_cost = 0.0;
-        let mut breakdown = String::new();
-        let mut missing_quotes = 0usize;
-
-        for h in &holdings {
-            let ticker_upper = h.ticker.to_uppercase();
-            let quote = price_map.get(&ticker_upper).map(|(p, c)| (*p, c.as_str()));
-            let converted = holding_values_in_base(h, quote, config, &rates);
-            if converted.missing_quote {
-                missing_quotes += 1;
-            }
-            total_portfolio_cost += converted.cost_base;
-            total_portfolio_value += converted.value_base;
-
-            let diff_percent = if converted.cost_base > 0.0 {
-                (converted.value_base - converted.cost_base) / converted.cost_base * 100.0
-            } else {
-                0.0
-            };
-            let sign = if diff_percent >= 0.0 { "+" } else { "" };
-
-            breakdown.push_str(&format!(
-                "  - *{}*: {:.1} shares @ ${:.2} {} (Cost: ${:.2} | Value: ${:.2} | {}{:.1}%)\n",
-                ticker_upper,
-                h.shares_owned,
-                converted.price_base,
-                base,
-                converted.cost_base,
-                converted.value_base,
-                sign,
-                diff_percent
+            msg.push_str(&format!(
+                "• 📈 *Stock Portfolio:* ${:.2} {} (quote lookup failed, showing FX'd book cost)\n",
+                portfolio_cost, base
             ));
+            msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
+            msg.push_str(&format!(
+                "✨ *Invested Net Worth:* ${:.2} {} (estimated)",
+                portfolio_cost, base
+            ));
+            return Ok(msg);
         }
+    };
 
-        let overall_diff_percent = if total_portfolio_cost > 0.0 {
-            (total_portfolio_value - total_portfolio_cost) / total_portfolio_cost * 100.0
+    let price_map: std::collections::HashMap<String, (f64, String)> = prices
+        .into_iter()
+        .map(|p| (p.ticker.to_uppercase(), (p.price, p.currency)))
+        .collect();
+
+    let mut total_portfolio_value = 0.0;
+    let mut total_portfolio_cost = 0.0;
+    let mut breakdown = String::new();
+    let mut missing_quotes = 0usize;
+
+    for h in &holdings {
+        let ticker_upper = h.ticker.to_uppercase();
+        let quote = price_map.get(&ticker_upper).map(|(p, c)| (*p, c.as_str()));
+        let converted = holding_values_in_base(h, quote, config, &rates);
+        if converted.missing_quote {
+            missing_quotes += 1;
+        }
+        total_portfolio_cost += converted.cost_base;
+        total_portfolio_value += converted.value_base;
+
+        let diff_percent = if converted.cost_base > 0.0 {
+            (converted.value_base - converted.cost_base) / converted.cost_base * 100.0
         } else {
             0.0
         };
-        let overall_sign = if overall_diff_percent >= 0.0 { "+" } else { "" };
+        let sign = if diff_percent >= 0.0 { "+" } else { "" };
 
-        msg.push_str(&format!(
-            "• 📈 *Stock Portfolio:* ${:.2} {} (Cost: ${:.2} | {}{:.1}%)\n",
-            total_portfolio_value, base, total_portfolio_cost, overall_sign, overall_diff_percent
+        breakdown.push_str(&format!(
+            "  - *{}*: {:.1} shares @ ${:.2} {} (Cost: ${:.2} | Value: ${:.2} | {}{:.1}%)\n",
+            ticker_upper,
+            h.shares_owned,
+            converted.price_base,
+            base,
+            converted.cost_base,
+            converted.value_base,
+            sign,
+            diff_percent
         ));
-        if missing_quotes > 0 {
-            msg.push_str(&format!(
-                "  _({} holding(s) used book cost — try Yahoo symbols like `VFV.TO`)_\n",
-                missing_quotes
-            ));
-        }
-        msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
-        msg.push_str(&format!(
-            "✨ *Invested Net Worth:* ${:.2} {}\n\n",
-            total_portfolio_value,
-            base
-        ));
-        msg.push_str("*Holdings Breakdown:*\n");
-        msg.push_str(&breakdown);
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
+    let overall_diff_percent = if total_portfolio_cost > 0.0 {
+        (total_portfolio_value - total_portfolio_cost) / total_portfolio_cost * 100.0
+    } else {
+        0.0
+    };
+    let overall_sign = if overall_diff_percent >= 0.0 { "+" } else { "" };
 
-    Ok(())
+    msg.push_str(&format!(
+        "• 📈 *Stock Portfolio:* ${:.2} {} (Cost: ${:.2} | {}{:.1}%)\n",
+        total_portfolio_value, base, total_portfolio_cost, overall_sign, overall_diff_percent
+    ));
+    if missing_quotes > 0 {
+        msg.push_str(&format!(
+            "  _({} holding(s) used book cost — try Yahoo symbols like `VFV.TO`)_\n",
+            missing_quotes
+        ));
+    }
+    msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    msg.push_str(&format!(
+        "✨ *Invested Net Worth:* ${:.2} {}\n\n",
+        total_portfolio_value, base
+    ));
+    msg.push_str("*Holdings Breakdown:*\n");
+    msg.push_str(&breakdown);
+
+    Ok(msg)
 }
 
 /// Per-share price and book cost converted into the configured base currency.
