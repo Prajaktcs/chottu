@@ -116,7 +116,7 @@ impl Args {
         if with_judge && companions.is_empty() {
             anyhow::bail!(
                 "--with-judge needs a multi-model panel; pass --companions e.g. \
-                 anthropic/claude-opus-5,moonshotai/kimi-k3"
+                 moonshotai/kimi-k3"
             );
         }
 

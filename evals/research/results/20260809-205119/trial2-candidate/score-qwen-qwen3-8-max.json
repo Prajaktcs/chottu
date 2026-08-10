@@ -1,0 +1,207 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Apple is an exceptional high-quality mega-cap ecosystem business with strong pricing power, services growth, and buybacks, but its ~$4.6T market cap makes it unsuitable for a satellite portfolio seeking 100x asymmetric returns.",
+      "catalysts": [
+        "AI-driven iPhone upgrade cycle",
+        "Services monetization across the installed base",
+        "Continued buybacks and dividend growth"
+      ],
+      "risks": [
+        "China exposure and geopolitics",
+        "Regulatory pressure on App Store and services",
+        "Hardware cycle dependence and innovation risk"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap size makes 100x economically implausible; even aggressive multiple expansion cannot bridge the required return."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Microsoft is one of the highest-quality software franchises in the world, with durable cloud, AI, and enterprise software positioning, but its ~$3.7T market cap makes it unsuitable for a 100x satellite mandate.",
+      "catalysts": [
+        "Azure and AI workload growth",
+        "Copilot monetization across enterprise software",
+        "Strong recurring revenue and margin expansion"
+      ],
+      "risks": [
+        "Regulatory scrutiny",
+        "AI capex returns taking longer than expected",
+        "Competition in cloud and productivity software"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap size makes 100x implausible; better suited as a core compounder rather than a satellite asymmetric bet."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Berkshire is an excellent long-duration compounding vehicle with disciplined capital allocation, diversified cash flows, and a strong insurance float model, but its ~$1.0T market cap makes 100x upside unrealistic for this mandate.",
+      "catalysts": [
+        "Disciplined large-scale acquisitions",
+        "Insurance underwriting and float generation",
+        "Buybacks if shares trade below intrinsic value"
+      ],
+      "risks": [
+        "Size limits future compounding rate",
+        "Succession and capital allocation continuity",
+        "Cyclical insurance and macro exposure"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Too large for 100x upside; Berkshire is a capital preservation/compounding vehicle, not a satellite moonshot candidate."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "AST SpaceMobile targets a potentially enormous direct-to-device satellite connectivity market, but the business is capital-intensive, pre-scale, and faces intense competition; the current market cap already embeds meaningful success.",
+      "catalysts": [
+        "Commercial satellite deployment and service launch",
+        "MNO roaming and partnership contracts",
+        "Government or defense connectivity contracts",
+        "Spectrum and partnership milestones"
+      ],
+      "risks": [
+        "Massive funding needs and dilution",
+        "Constellation execution and technical risk",
+        "Competition from StarLink/direct-to-cell and terrestrial networks",
+        "Regulatory and spectrum delays"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "Rocket Lab is one of the most credible independent launch and space-systems platforms, but at ~$50B market cap it already prices substantial future growth; 100x would require becoming a dominant global space-infrastructure franchise with extraordinary margins.",
+      "catalysts": [
+        "Neutron launch success and cadence",
+        "Defense and constellation contracts",
+        "Space systems backlog and vertical integration",
+        "Margin expansion from higher-value systems"
+      ],
+      "risks": [
+        "Launch failure or program delays",
+        "High capex and development risk",
+        "Competition from SpaceX and large space primes",
+        "Valuation compression if growth disappoints"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Intuitive Machines offers one of the few small-cap pure plays on lunar logistics and cislunar infrastructure; if lunar and defense spending becomes a durable market and LUNR evolves from contract missions into recurring data, navigation, or communications services, the upside can be asymmetric.",
+      "catalysts": [
+        "Successful CLPS lunar missions",
+        "New NASA or national-security contracts",
+        "Expansion into lunar relay, navigation, or data services",
+        "International and commercial lunar partnerships"
+      ],
+      "risks": [
+        "Mission failure or delay could severely damage credibility",
+        "Government budget and contract concentration",
+        "Cash burn and dilution risk",
+        "Better-capitalized competitors entering lunar services"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "Redwire provides exposure to space-infrastructure components and in-space manufacturing, but it is more of a roll-up/component supplier than a clear category king; upside exists if space manufacturing scales, yet returns on capital and integration remain concerns.",
+      "catalysts": [
+        "In-space manufacturing demonstrations",
+        "National-security or solar-array orders",
+        "Acquisition integration and margin improvement",
+        "Expansion into higher-value space components"
+      ],
+      "risks": [
+        "M&A integration and execution risk",
+        "Customer concentration and government-budget dependence",
+        "Low current profitability and dilution risk",
+        "Competition from vertically integrated space primes"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "SoundHound has AI voice optionality across automotive, restaurants, and devices, but the market is highly competitive, hyperscalers control key parts of the stack, and SoundHound's moat and unit economics are not strong enough for a high-conviction 100x satellite position.",
+      "catalysts": [
+        "Major automotive or device OEM wins",
+        "Expansion into vertical AI agents",
+        "Improved monetization and gross margin"
+      ],
+      "risks": [
+        "Big-tech competition",
+        "Customer concentration and churn",
+        "Cash burn and dilution",
+        "AI-hype valuation risk"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Weak moat, crowded AI competitive landscape, and insufficient evidence of durable high-return unit economics."
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "IONQ is a leading trapped-ion quantum computing platform with potentially enormous long-term TAM, but the technology timeline is uncertain, capital needs are high, and the current valuation already assigns significant option value; not a high-conviction 100x from the current market cap.",
+      "catalysts": [
+        "Error-correction and logical-qubit milestones",
+        "Government and enterprise quantum contracts",
+        "Scaling roadmap execution",
+        "Cloud and partnership expansion"
+      ],
+      "risks": [
+        "Technology and modality risk",
+        "Competition from hyperscalers and other quantum approaches",
+        "Funding and dilution risk",
+        "Valuation dependent on long-dated success"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 2,
+      "conviction": "Low",
+      "thesis": "Joby has meaningful eVTOL certification progress and a large potential urban air mobility TAM, but manufacturing, infrastructure, and operations are capital-intensive, and the path to high returns remains unclear; the current market cap already reflects substantial de-risking.",
+      "catalysts": [
+        "FAA certification milestones",
+        "Launch-city operations and partnerships",
+        "Manufacturing scale and cost reductions",
+        "Government or defense orders"
+      ],
+      "risks": [
+        "Certification delays",
+        "Capital intensity and dilution",
+        "Demand adoption uncertainty",
+        "Competition and infrastructure constraints"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    }
+  ]
+}

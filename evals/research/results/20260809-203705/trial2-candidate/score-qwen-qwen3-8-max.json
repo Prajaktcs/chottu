@@ -1,0 +1,207 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Apple is a high-quality mega-cap with a powerful ecosystem, services monetization, and strong capital returns, but at roughly a $4.6 trillion market cap it fails the micro/small-cap 100x screen; the base is simply too large for exponential satellite-style upside.",
+      "catalysts": [
+        "AI-driven iPhone upgrade cycle",
+        "Services revenue and margin expansion",
+        "Aggressive buybacks and capital returns"
+      ],
+      "risks": [
+        "China exposure and geopolitical risk",
+        "Regulatory pressure on App Store and services",
+        "Hardware cyclicality and innovation plateau"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Market cap is far too large and growth is too mature for a 100x micro/small-cap satellite mandate."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Microsoft is one of the best large-cap platform businesses in AI, cloud, and enterprise software, but at roughly a $3.7 trillion market cap it is a quality compounder rather than a credible 100x small-cap opportunity.",
+      "catalysts": [
+        "Azure and AI Copilot monetization",
+        "Enterprise software pricing power",
+        "Operating leverage from AI productivity tools"
+      ],
+      "risks": [
+        "Cloud competition and AI capex intensity",
+        "Regulatory scrutiny",
+        "Enterprise IT spending cyclicality"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Market cap is far too large for a 100x satellite portfolio, despite excellent business quality."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Berkshire has elite capital allocation, durable subsidiaries, and significant financial strength, but its roughly $1 trillion market cap and the law of large numbers make a 100x outcome unrealistic; it is a high-quality compounding vehicle, not a micro/small-cap hundred-bagger candidate.",
+      "catalysts": [
+        "Disciplined large-scale acquisitions",
+        "Insurance underwriting and investment income",
+        "Potential succession clarity and capital deployment"
+      ],
+      "risks": [
+        "Size limits future growth rate",
+        "Succession and key-person risk",
+        "Cyclical exposure to insurance, rail, and energy"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Excellent capital allocation but too large to fit a high-conviction 100x micro/small-cap mandate."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "AST SpaceMobile targets a massive direct-to-device satellite connectivity market with carrier partnerships and spectrum positioning, but the model is capital intensive, still early commercially, and already carries a roughly $28 billion market cap, making a 100x outcome unlikely even if execution succeeds.",
+      "catalysts": [
+        "Commercial satellite service rollout",
+        "Additional carrier and roaming partnerships",
+        "Constellation launches and spectrum agreements"
+      ],
+      "risks": [
+        "Heavy capex and shareholder dilution",
+        "Launch, technical, and network integration failures",
+        "Competition from Starlink and terrestrial networks",
+        "Regulatory and country-by-country approval delays"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "Rocket Lab has proven launch capability, growing space-systems revenue, and defense exposure, but at roughly a $49.5 billion market cap it is too large for a 100x small-cap mandate; future upside depends heavily on Neutron execution and margin expansion.",
+      "catalysts": [
+        "Neutron launch success and commercialization",
+        "Defense and national-security contract wins",
+        "Space-systems backlog growth and vertical integration"
+      ],
+      "risks": [
+        "Launch failures or delays",
+        "High capital intensity",
+        "Competition from SpaceX and other launch providers",
+        "Rich valuation leaves little room for mispricing"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Intuitive Machines is one of the few listed small-cap pure plays on lunar delivery, data, and infrastructure; if Artemis-related and commercial lunar spending becomes persistent and LUNR establishes recurring NASA/commercial toll-road assets, a 100x tail outcome is theoretically possible, though execution, profitability, and contract durability remain unproven.",
+      "catalysts": [
+        "Successful lunar landing and surface missions",
+        "Expanded CLPS and NASA task orders",
+        "Lunar communications, navigation, and data-service awards",
+        "Commercial payload and international contract growth"
+      ],
+      "risks": [
+        "Mission failure or technical delays",
+        "Lumpy government-funded revenue",
+        "Cash burn and dilution",
+        "Competition from better-capitalized aerospace players"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "Redwire is a small-cap space-infrastructure platform with exposure to solar arrays, sensors, in-space manufacturing, and national-security programs, giving it leverage to a growing space economy; however, roll-up integration risk, modest profitability, and capital-allocation concerns reduce conviction for a 100x outcome.",
+      "catalysts": [
+        "Defense and NASA budget growth",
+        "Successful integration of acquisitions and margin improvement",
+        "In-space manufacturing and lunar infrastructure contracts",
+        "Expansion of high-value subsystems and components"
+      ],
+      "risks": [
+        "Acquisition integration and execution risk",
+        "Low or volatile margins",
+        "Customer concentration in government end markets",
+        "Dilution or balance-sheet strain"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "SoundHound has voice-AI optionality across automotive, restaurants, and connected devices, but the market is highly competitive, hyperscalers and open-source models can compress pricing, and the company has not yet demonstrated a durable moat or strong unit economics worthy of high-conviction 100x allocation.",
+      "catalysts": [
+        "Automotive design wins",
+        "Agentic voice-commerce partnerships",
+        "Revenue acceleration in restaurants and IoT",
+        "Potential platform consolidation or strategic interest"
+      ],
+      "risks": [
+        "Competition from large AI platforms",
+        "Cash burn and dilution",
+        "Customer concentration and lumpy contracts",
+        "Unproven long-term margins"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Crowded AI voice market with no clear durable moat or proven high-return economics."
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "IONQ has credible trapped-ion quantum computing positioning and a potentially large long-term market, but at roughly a $17.7 billion market cap it is already priced for significant success, remains pre-commercial, and faces binary technology and commercialization risk that makes a 100x return implausible for this mandate.",
+      "catalysts": [
+        "Error-correction and qubit-scaling milestones",
+        "Government and defense quantum contracts",
+        "Enterprise pilot programs",
+        "Strategic partnerships with cloud providers"
+      ],
+      "risks": [
+        "Technology roadmap delays",
+        "Competition from superconducting, photonic, and neutral-atom approaches",
+        "Dilution from high R&D spend",
+        "Uncertain commercial adoption timeline"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Already too large and too binary/pre-commercial for a high-conviction small-cap 100x screen."
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "Joby has a potentially massive urban air mobility opportunity and strong partnerships, but certification, manufacturing ramp, infrastructure buildout, and ongoing cash burn create substantial risk; at roughly an $8.5 billion market cap, a 100x outcome is not credible even under a successful commercialization scenario.",
+      "catalysts": [
+        "FAA certification progress",
+        "Launch-city commercial operations",
+        "Toyota and other strategic partnerships",
+        "Manufacturing scale and cost reduction"
+      ],
+      "risks": [
+        "Certification or safety delays",
+        "Capital intensity and dilution",
+        "Weak initial consumer adoption",
+        "Infrastructure and airspace regulation",
+        "Competition from other eVTOL and aerospace players"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    }
+  ]
+}

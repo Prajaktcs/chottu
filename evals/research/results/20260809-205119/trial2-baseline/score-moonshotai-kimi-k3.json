@@ -1,0 +1,216 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Apple is a world-class compounder with an unmatched hardware/services ecosystem moat and exemplary capital allocation, but at ~$4.6T it is the antithesis of a micro-cap hundred-bagger candidate. Even flawless AI and services execution produces low-double-digit compounding, not 100x asymmetry.",
+      "catalysts": [
+        "Services mix expansion driving margin lift",
+        "Apple Intelligence-driven iPhone upgrade cycle",
+        "Continued ~$100B/yr share repurchases",
+        "New hardware categories (Vision line, home/robotics optionality)"
+      ],
+      "risks": [
+        "Law of large numbers caps upside from $4.6T base",
+        "Antitrust pressure on App Store take rate and Google TAC payments",
+        "China demand softness and supply-chain concentration",
+        "AI execution lag versus hyperscaler peers"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "~$4.6T mega-cap; a 100x implies a ~$457T valuation exceeding global GDP. Superb business, wrong mandate for a hundred-bagger satellite sleeve."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Microsoft combines durable enterprise moats with leading AI positioning via Azure and Copilot, with strong returns on capital and disciplined allocation. At ~$3.7T, however, the asymmetry required for a hundred-bagger simply does not exist; this is a core compounder, not a satellite moonshot.",
+      "catalysts": [
+        "Azure AI revenue acceleration",
+        "Copilot enterprise seat monetization",
+        "OpenAI partnership economics and model integration",
+        "Operating leverage after AI capex wave normalizes"
+      ],
+      "risks": [
+        "AI capex intensity pressuring free cash flow margins",
+        "Uncertainty on enterprise AI ROI and Copilot attach rates",
+        "Regulatory/antitrust overhang on bundling and OpenAI ties",
+        "Valuation multiple already reflects AI leadership"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "~$3.7T mega-cap; 100x implies ~$370T. Core-holding quality, but categorically outside the hundred-bagger satellite mandate."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Berkshire is a fortress balance sheet with elite capital allocation and a diversified collection of high-return operating businesses plus a massive equity portfolio. But at ~$1T market cap, even Buffett-descendant excellence compounds at market-beating—not hundred-bagger—rates. Fails the mandate on size alone.",
+      "catalysts": [
+        "Deployment of ~$300B+ cash pile into a market dislocation",
+        "Insurance float and underwriting profit growth",
+        "BNSF and Berkshire Hathaway Energy earnings expansion",
+        "Continued buybacks when trading below intrinsic value"
+      ],
+      "risks": [
+        "Post-Buffett succession and key-person transition",
+        "Size drag: too big to move the needle with new investments",
+        "Insurance catastrophe loss exposure",
+        "Equity portfolio concentration (notably Apple)"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "~$1T conglomerate with the greatest capital allocator in history, but size is the anchor on returns; a 100x outcome is arithmetically implausible."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 5,
+      "conviction": "Medium",
+      "thesis": "AST SpaceMobile is building the first space-based cellular broadband network connecting directly to unmodified smartphones—a genuinely massive TAM spanning billions of mobile users—with blue-chip validation from AT&T, Verizon, Vodafone, Rakuten, and Google. The moat is a patent/wholesale-MNO model plus first-mover constellation scale. At ~$28B, though, the market has priced in significant success: the sub-$2B hundred-bagger entry window has closed, leaving credible multi-bagger rather than 100x potential.",
+      "catalysts": [
+        "Commercial service activation with MNO partners",
+        "BlueBird Block 2 satellite launches and constellation buildout",
+        "New MNO, government, and defense contract awards",
+        "Regulatory/spectrum coordination milestones and path to FCF breakeven"
+      ],
+      "risks": [
+        "Heavy ongoing capex and recurring equity dilution",
+        "Launch and satellite deployment execution risk",
+        "SpaceX Starlink direct-to-cell competition",
+        "Spectrum/regulatory risk",
+        "Valuation already discounts substantial multi-year success"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "Rocket Lab is the clear Western #2 in launch with a genuinely integrated Space Systems segment and a credible Neutron medium-lift rocket, led by exceptional founder-operator Peter Beck with a strong execution record. The end-to-end space company model is a real moat. However, at ~$50B the valuation capitalizes years of flawless execution—a 100x implies ~$5T, which is not credible—so it fails the hundred-bagger mandate despite high business quality.",
+      "catalysts": [
+        "Neutron first launch and reusability milestones",
+        "Space Systems backlog growth (satellite buses, components, constellation wins)",
+        "National security awards (HASTE, NSSL Phase 3 eligibility)",
+        "Record Electron launch cadence"
+      ],
+      "risks": [
+        "Neutron development delays, cost overruns, or failure",
+        "Negative margins and continued cash burn",
+        "SpaceX rideshare economics compressing small-launch pricing",
+        "Extreme price-to-sales multiple vulnerable to any slip"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Intuitive Machines is the leading pure-play on the NASA-funded lunar economy, with CLPS delivery contracts, NSNS lunar communications services, and first-mover heritage from the first commercial Moon landing. At ~$3.6B it is among the smaller caps here, so a 10x+ outcome is conceivable if the lunar cislunar economy materializes. But revenue is lumpy, each mission carries binary risk, and 100x requires a $350B+ lunar-infrastructure company—speculative even in bull scenarios.",
+      "catalysts": [
+        "IM-3/IM-4 mission execution and additional CLPS awards",
+        "Near Space Network Services (lunar data relay) revenue ramp",
+        "Lunar Terrain Vehicle and cargo delivery awards",
+        "Emerging commercial and allied-nation lunar payload demand"
+      ],
+      "risks": [
+        "Binary mission failure risk on each landing",
+        "Dependence on NASA budget cycles and contract timing",
+        "Dilution and working-capital strain between milestone payments",
+        "Small float, high volatility, and lumpy revenue recognition"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 6,
+      "conviction": "Medium",
+      "thesis": "Redwire is a diversified space-infrastructure consolidator with real revenue, a broad component portfolio (solar arrays, sensors, in-space manufacturing), and an expanding defense footprint via Edge Autonomy. It is the best mandate fit in this universe: smallest cap, tangible unit economics, and a roll-up strategy echoing proven aerospace compounders. Still, 100x from ~$3.2B implies a $320B company—implausible—so it screens as a quality multi-bagger, not a hundred-bagger.",
+      "catalysts": [
+        "Edge Autonomy integration expanding defense revenue and margins",
+        "Backlog conversion in solar arrays, antennas, and digital engineering",
+        "Further accretive bolt-on M&A in space infrastructure",
+        "National security space budget tailwinds (SDA, missile tracking constellations)"
+      ],
+      "risks": [
+        "Integration and leverage risk from serial acquisitions",
+        "Government contract concentration and budget timing",
+        "Thin GAAP profitability and competitive pricing pressure",
+        "100x outcome ($320B+) far beyond any credible space-infrastructure scenario"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "SoundHound has real voice-AI traction across restaurant ordering and automotive assistants with triple-digit growth and a broadened platform via the Amelia acquisition. The moat question is severe, however: hyperscalers and LLM-native competitors are converging on the same use cases, gross margins are pressured, and losses remain large. At ~$3.5B and a rich sales multiple, risk/reward is skewed against the asymmetric profile the mandate requires.",
+      "catalysts": [
+        "Restaurant drive-thru and phone-ordering rollouts at scale",
+        "Automotive generative-AI voice assistant design wins",
+        "Amelia cross-sell into enterprise customer-service automation",
+        "Path to adjusted EBITDA breakeven"
+      ],
+      "risks": [
+        "Competition from OpenAI, Google, and Amazon voice/LLM stacks",
+        "Persistent GAAP losses and shareholder dilution",
+        "Customer concentration and long enterprise sales cycles",
+        "High short interest and extreme valuation volatility"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "IonQ's trapped-ion architecture offers high-fidelity qubits and a credible technical roadmap toward networked quantum systems, and quantum computing is an enormous option-value TAM. But the stock is effectively a long-dated call option: revenue is in the tens of millions against an ~$18B market cap. The 100x window closed when the market pre-paid for the quantum future; multiple-compression risk now dominates the asymmetry.",
+      "catalysts": [
+        "New system launches and algorithmic-qubit milestones",
+        "Government and enterprise quantum computing contracts",
+        "Quantum networking progress via photonic interconnects",
+        "Demonstrations approaching quantum advantage"
+      ],
+      "risks": [
+        "Revenue in the tens of millions versus ~$18B valuation",
+        "Heavy dilution funding decades-long roadmap",
+        "Fault-tolerant timelines could slip many years",
+        "Competition from IBM, Google, Quantinuum, and well-funded private peers",
+        "Hype-cycle drawdown risk and insider selling"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 4,
+      "conviction": "Low",
+      "thesis": "Joby leads the eVTOL certification race with deep partners (Toyota, Delta) and a first-mover commercial path in Dubai, targeting a genuinely novel urban air mobility market. It remains pre-scale with heavy cash burn and unproven unit economics, and the ~$8.5B valuation already prices certification success. Hundred-bagger math (~$850B) is not plausible; downside on any certification slip is severe.",
+      "catalysts": [
+        "FAA type certification progression through final stages",
+        "Dubai commercial air-taxi launch",
+        "US market entry (NYC/LA) with Delta partnership",
+        "Toyota-backed manufacturing scale-up and DoD logistics contracts"
+      ],
+      "risks": [
+        "Certification delays and sustained heavy cash burn",
+        "Unit economics unproven at commercial cadence; vertiport infrastructure unbuilt",
+        "Competition from Archer, Wisk, Vertical, and Chinese eVTOL OEMs",
+        "Regulatory and public-acceptance risk for urban air mobility"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    }
+  ]
+}

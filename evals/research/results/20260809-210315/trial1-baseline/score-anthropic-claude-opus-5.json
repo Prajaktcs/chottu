@@ -1,0 +1,207 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "World-class franchise with enormous installed base, services annuity, and best-in-class capital returns, but at $4.6T market cap a 100x outcome is mathematically impossible. Compounder-quality, not satellite-quality.",
+      "catalysts": [
+        "Services margin expansion",
+        "On-device AI upgrade cycle",
+        "Continued mega-scale buybacks"
+      ],
+      "risks": [
+        "Regulatory pressure on App Store economics",
+        "China demand and supply concentration",
+        "Hardware innovation stagnation"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap size precludes 100x; not a micro/small-cap satellite candidate."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Dominant enterprise software and cloud moat with high ROIC and disciplined allocation, but $3.7T market cap makes multi-bagger, let alone 100x, returns implausible within the satellite mandate.",
+      "catalysts": [
+        "Azure AI capacity monetization",
+        "Copilot seat attach rates",
+        "Enterprise agreement price increases"
+      ],
+      "risks": [
+        "Massive AI capex depressing returns on capital",
+        "Antitrust/bundling scrutiny",
+        "Competitive cloud pricing"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap; no path to 100x."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Exemplary capital allocation and fortress balance sheet with ~$1T cap; a defensive core holding, structurally incapable of the asymmetric upside a 100x satellite sleeve requires.",
+      "catalysts": [
+        "Deployment of record cash pile into a large acquisition",
+        "Insurance float/underwriting gains",
+        "Buybacks below intrinsic value"
+      ],
+      "risks": [
+        "Post-Buffett succession execution",
+        "Cash drag if no large deals",
+        "Cyclical exposure via rail/energy/insurance"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Mega-cap conglomerate; return profile incompatible with 100x objective."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 7,
+      "conviction": "Medium",
+      "thesis": "Direct-to-unmodified-handset satellite broadband targets a multi-hundred-billion-dollar TAM with a genuine IP/spectrum moat (large phased-array BlueBird design, L-band spectrum, MNO revenue-share deals with AT&T/Verizon/Vodafone/Rakuten). If constellation completion and MNO revenue sharing scale, incremental economics are software-like; however $28B cap already discounts substantial success, cutting the 100x math.",
+      "catalysts": [
+        "Block 2 BlueBird launch cadence and commercial beta service",
+        "Definitive MNO revenue-share contracts converting to cash",
+        "FCC/spectrum approvals and Ligado/L-band integration",
+        "Government/defense contract awards"
+      ],
+      "risks": [
+        "Heavy dilution and capital intensity to fund full constellation",
+        "Launch failures and satellite deployment delays",
+        "Starlink Direct-to-Cell competition with superior launch access",
+        "Pre-revenue valuation with regulatory dependency"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 7,
+      "conviction": "Medium",
+      "thesis": "Only credible Western small-launch operator plus a fast-growing, higher-margin space systems/components business; Neutron could unlock the medium-lift market and vertical integration gives durable cost advantage and an emerging end-to-end space services moat under a founder-CEO with strong execution record. Valuation at ~$50B already embeds Neutron success.",
+      "catalysts": [
+        "Neutron first launch and cadence ramp",
+        "Space Systems backlog conversion and Flatellite/constellation ambitions",
+        "National security launch contract wins (NSSL Lane 1)",
+        "Path to positive free cash flow"
+      ],
+      "risks": [
+        "Neutron schedule slip and development cost overruns",
+        "SpaceX pricing dominance",
+        "Persistent losses and dilution",
+        "Rich multiple leaves no margin for error"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines Inc",
+      "fit_score": 6,
+      "conviction": "Medium",
+      "thesis": "First commercial entity to soft-land on the Moon; positioned as the prime for NASA CLPS and lunar data relay (Near Space Network) services, an emerging cislunar infrastructure TAM. At ~$3.6B it retains real optionality, but revenue is government-dependent, margins thin, and mission risk binary.",
+      "catalysts": [
+        "IM-2/IM-3 mission success and follow-on CLPS task orders",
+        "Lunar Terrain Vehicle and data relay contract awards",
+        "Backlog growth and first sustained positive gross margin quarters"
+      ],
+      "risks": [
+        "Mission failure destroying credibility and share price",
+        "Concentration in NASA budget appropriations",
+        "Recurring dilution and warrant overhang",
+        "Fixed-price contracts with cost overrun exposure"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Roll-up of space infrastructure components (solar arrays, avionics) plus optionality in microgravity pharma manufacturing and the Edge Autonomy drone acquisition. Diversified backlog is attractive, but the acquisitive model, low margins, and leverage undermine the high-ROIC and moat criteria.",
+      "catalysts": [
+        "Edge Autonomy defense drone revenue synergies",
+        "European defense/space budget expansion",
+        "Microgravity biopharma milestones",
+        "Margin improvement on fixed-price backlog"
+      ],
+      "risks": [
+        "Serial dilution and debt-funded M&A integration risk",
+        "Persistent negative EBITDA and cost overruns on fixed-price programs",
+        "Customer concentration in government programs",
+        "Weak pricing power as a subsystem supplier"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Acquisition-driven, low-margin supplier economics with weak moat and dilution history."
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 5,
+      "conviction": "Low",
+      "thesis": "Independent voice AI platform with genuine multi-decade speech IP, edge-capable architecture, and expanding automotive/restaurant deployments in a large conversational-AI TAM. But it competes against hyperscaler foundation models, gross margins have been diluted by acquisitions, and cash burn plus dilution has been heavy.",
+      "catalysts": [
+        "Automotive OEM design wins converting to per-unit royalties",
+        "Restaurant/drive-thru voice ordering scale deals",
+        "Agentic AI/Amelia enterprise cross-sell",
+        "Path to adjusted EBITDA breakeven"
+      ],
+      "risks": [
+        "Commoditization of voice by OpenAI/Google/Amazon",
+        "Customer concentration and lumpy bookings",
+        "History of shareholder dilution and accounting restatement",
+        "Subscale revenue versus valuation"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Moat questionable against hyperscaler LLM commoditization; unit economics unproven."
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 6,
+      "conviction": "Low",
+      "thesis": "Trapped-ion quantum computing leader with high-fidelity qubits, strong patent estate, and a networking/QKD acquisition strategy addressing a potentially enormous long-term compute TAM. However revenue is grant/pilot-driven, cash burn is severe, and $17.6B already prices in commercial quantum advantage that may be a decade away.",
+      "catalysts": [
+        "Roadmap milestones toward logical qubits (Tempo/2M physical qubit targets)",
+        "Government and national-lab contract awards",
+        "Quantum networking acquisitions creating an integrated stack",
+        "Any demonstrated commercial quantum advantage"
+      ],
+      "risks": [
+        "Competing modalities (superconducting, neutral atom) plus Google/IBM scale R&D",
+        "Minimal revenue against enormous valuation",
+        "Continuous equity issuance and dilution",
+        "Timeline risk: commercial utility may slip beyond investment horizon"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Valuation already large relative to negligible revenue; technology and timeline risk too high for high conviction."
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 6,
+      "conviction": "Medium",
+      "thesis": "Leading eVTOL developer with vertically integrated manufacturing, deep FAA certification progress, and strategic backing from Toyota, Delta and Uber targeting a large urban air mobility and defense TAM. Certification, if achieved first, creates a formidable regulatory moat, but the business is pre-revenue and capital-hungry.",
+      "catalysts": [
+        "FAA type certification progress and TIA flight testing",
+        "Dubai/UAE commercial launch and exclusive operating rights",
+        "Toyota manufacturing partnership scaling and additional investment",
+        "DoD/Agility Prime contracts and hybrid VTOL programs"
+      ],
+      "risks": [
+        "Certification delays pushing revenue years out",
+        "Massive cash burn and dilution before scale",
+        "Unproven consumer demand and unit economics at target price points",
+        "Archer and international competition; battery/infrastructure constraints"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": null
+    }
+  ]
+}

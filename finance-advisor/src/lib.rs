@@ -17,7 +17,7 @@ pub use bench::{
 
 pub const DEFAULT_PANEL_MODELS: &[&str] = &[
     "openai/gpt-5.6-sol",
-    "anthropic/claude-opus-5",
+    "qwen/qwen3.8-max",
     "moonshotai/kimi-k3",
 ];
 pub const DEFAULT_JUDGE_MODEL: &str = "moonshotai/kimi-k3";

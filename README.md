@@ -151,7 +151,7 @@ OPENROUTER_API_KEY=your_openrouter_api_key
 FINNHUB_API_KEY=your_finnhub_api_key
 
 # Optional: override stock-research models (defaults shown)
-# RESEARCH_PANEL_MODELS=openai/gpt-5.6-sol,anthropic/claude-opus-5,moonshotai/kimi-k3
+# RESEARCH_PANEL_MODELS=openai/gpt-5.6-sol,qwen/qwen3.8-max,moonshotai/kimi-k3
 # RESEARCH_JUDGE_MODEL=moonshotai/kimi-k3
 
 # Compare future panel scorers locally (gold fixture; run on your laptop):

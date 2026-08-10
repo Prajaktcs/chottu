@@ -1,10 +1,11 @@
-//! Seeded stock-research A/B: GPT-5.6 Sol vs Qwen3.8-Max as panel scorers.
+//! Seeded stock-research A/B helper: current panel vs prior Opus panel.
 //!
 //! Usage:
 //!   cargo run -p finance-advisor --bin research_ab
 //!   cargo run -p finance-advisor --bin research_ab -- --targets "ASTS, RKLB, IONQ"
 //!
 //! Writes artifacts under `evals/research-ab/<run_id>/`.
+//! Prefer `research_bench` for gold-metric scorer comparison.
 
 use anyhow::{Context, Result};
 use chotu_common::{config_path, load_config, InvestmentPhilosophy};
@@ -22,11 +23,11 @@ const DEFAULT_TARGETS: &str = "ASTS, RKLB, IONQ, SOUN, JOBY, ACHR, LUNR, RDW";
 
 const ARM_A_PANEL: &[&str] = &[
     "openai/gpt-5.6-sol",
-    "anthropic/claude-opus-5",
+    "qwen/qwen3.8-max",
     "moonshotai/kimi-k3",
 ];
 const ARM_B_PANEL: &[&str] = &[
-    "qwen/qwen3.8-max",
+    "openai/gpt-5.6-sol",
     "anthropic/claude-opus-5",
     "moonshotai/kimi-k3",
 ];
@@ -41,13 +42,13 @@ struct ArmSpec {
 const ARMS: &[ArmSpec] = &[
     ArmSpec {
         id: "a-baseline",
-        label: "A baseline (Sol + Opus + Kimi, judge Kimi)",
+        label: "A baseline (Sol + Qwen + Kimi, judge Kimi)",
         panel: ARM_A_PANEL,
         judge: DEFAULT_JUDGE_MODEL,
     },
     ArmSpec {
-        id: "b-qwen",
-        label: "B candidate (Qwen3.8-Max + Opus + Kimi, judge Kimi)",
+        id: "b-opus",
+        label: "B prior panel (Sol + Opus + Kimi, judge Kimi)",
         panel: ARM_B_PANEL,
         judge: DEFAULT_JUDGE_MODEL,
     },

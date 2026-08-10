@@ -1,6 +1,7 @@
 use crate::models::{EmailMetadata, OllamaClassificationResponse};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
+use rig_core::message::ToolChoice;
 use rig_core::providers::gemini;
 use rig_core::providers::ollama;
 use rig_core::providers::openrouter;
@@ -918,6 +919,9 @@ impl OpenRouterClient {
     }
 
     /// Structured extraction via Rig's tool-calling extractor.
+    ///
+    /// Qwen thinking models on Alibaba reject `tool_choice: required`, so those
+    /// use `auto`. Other OpenRouter models keep Rig's `required` default.
     pub async fn generate_structured<T>(
         &self,
         model: &str,
@@ -927,10 +931,17 @@ impl OpenRouterClient {
     where
         T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
     {
+        let tool_choice = if model.starts_with("qwen/") {
+            ToolChoice::Auto
+        } else {
+            ToolChoice::Required
+        };
+
         let extractor = self
             .client
             .extractor::<T>(model)
             .preamble(system_prompt)
+            .tool_choice(tool_choice)
             .retries(2)
             .build();
 

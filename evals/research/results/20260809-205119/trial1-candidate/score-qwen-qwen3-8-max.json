@@ -1,0 +1,217 @@
+{
+  "scores": [
+    {
+      "ticker": "AAPL",
+      "company": "Apple Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Apple is a $4.57T mega-cap with dominant ecosystem economics and extraordinary capital allocation, but at this scale a 100x return would imply a ~$457T market cap, which is impossible. This is a core holding, not a satellite hundred-bagger candidate.",
+      "catalysts": [
+        "AI integration across device ecosystem",
+        "Services revenue growth",
+        "Potential new product categories (AR/VR, auto)"
+      ],
+      "risks": [
+        "Regulatory antitrust pressure",
+        "China supply chain concentration",
+        "Hardware cycle saturation"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Market cap of $4.57T makes 100x mathematically implausible; no path to $457T valuation. Entirely wrong size for this mandate."
+    },
+    {
+      "ticker": "MSFT",
+      "company": "Microsoft Corp",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Microsoft is a $3.71T mega-cap with best-in-class cloud and enterprise software economics. While the AI opportunity is real, a 100x return would require a ~$371T market cap. This is a compounder, not a hundred-bagger.",
+      "catalysts": [
+        "Azure AI workload growth",
+        "Copilot monetization across enterprise suite",
+        "Gaming and LinkedIn expansion"
+      ],
+      "risks": [
+        "Antitrust scrutiny globally",
+        "Cloud competition from AWS/Google",
+        "AI capex ROI uncertainty"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "At $3.71T market cap, 100x is impossible. This is a quality compounder but completely unsuitable for a micro/small-cap 100x satellite sleeve."
+    },
+    {
+      "ticker": "BRK.A",
+      "company": "Berkshire Hathaway Inc",
+      "fit_score": 1,
+      "conviction": "Pass",
+      "thesis": "Berkshire is the gold standard of capital allocation under Buffett/Abel, but at $1.01T market cap, a 100x return would require $101T. The law of large numbers makes this a steady compounder at best, not a satellite hundred-bagger.",
+      "catalysts": [
+        "Succession clarity under Greg Abel",
+        "Massive cash deployment into acquisitions",
+        "Insurance float growth"
+      ],
+      "risks": [
+        "Post-Buffett transition uncertainty",
+        "Size constrains acquisition returns",
+        "Cyclical insurance exposure"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "$1.01T market cap eliminates any 100x possibility. Berkshire is a wealth preservation/compounding vehicle, not a high-beta satellite candidate."
+    },
+    {
+      "ticker": "ASTS",
+      "company": "AST SpaceMobile Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "AST SpaceMobile has a genuinely differentiated technology (direct-to-device satellite broadband) with massive TAM if it can deliver global cellular coverage from space. However, at $27.9B market cap, the stock has already priced in significant success. A 100x would require ~$2.8T, which is implausible even in the bull case. The capital intensity of constellation buildout and execution risk remain substantial.",
+      "catalysts": [
+        "Commercial service launch with carrier partners (AT&T, Vodafone, Rakuten)",
+        "FCC/international spectrum approvals",
+        "Constellation deployment milestones",
+        "Government/defense contracts"
+      ],
+      "risks": [
+        "Extreme capital intensity requiring continued dilution",
+        "Technology execution risk at scale",
+        "Competition from Starlink direct-to-cell",
+        "Carrier partnership concentration"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "At $27.9B market cap, 100x implies $2.8T which is not credible. The technology is interesting but the stock has already re-rated significantly, leaving limited upside for this mandate."
+    },
+    {
+      "ticker": "RKLB",
+      "company": "Rocket Lab Corp",
+      "fit_score": 2,
+      "conviction": "Pass",
+      "thesis": "Rocket Lab has established itself as the #2 launch provider with a growing space systems business. However, at $49.5B market cap, the stock already reflects significant future growth. A 100x would require ~$5T, which exceeds even the most optimistic space economy projections. The company has strong execution but is now priced as a large-cap growth story.",
+      "catalysts": [
+        "Neutron rocket first launch",
+        "Space systems backlog growth",
+        "National security launch contracts",
+        "Potential M&A in space systems"
+      ],
+      "risks": [
+        "Neutron development delays",
+        "SpaceX dominance in launch pricing",
+        "Capital intensity of rocket development",
+        "Valuation already reflects significant growth"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "At $49.5B market cap, 100x is impossible ($5T implied). The company is excellent but has graduated well beyond small-cap territory. Not suitable for this mandate."
+    },
+    {
+      "ticker": "LUNR",
+      "company": "Intuitive Machines",
+      "fit_score": 6,
+      "conviction": "Medium",
+      "thesis": "Intuitive Machines is positioned as a critical infrastructure provider for the lunar economy with NASA CLPS contracts and proprietary landing technology. At $3.6B market cap, there is genuine (though highly speculative) path to significant multiple expansion if the lunar/cislunar economy materializes as NASA and commercial actors scale operations. First-mover advantage in lunar landing services, data relay, and surface infrastructure creates potential moat. The company has demonstrated execution with Nova-C landing. However, government revenue concentration and capital intensity are real concerns.",
+      "catalysts": [
+        "NASA CLPS contract expansion and Artemis program acceleration",
+        "Near Space Network data relay revenue ramp",
+        "International space agency contracts",
+        "Commercial lunar resource utilization partnerships",
+        "Potential defense/national security lunar contracts"
+      ],
+      "risks": [
+        "Heavy government revenue concentration (NASA dependency)",
+        "Mission failure risk (single event can destroy confidence)",
+        "Capital intensive with ongoing dilution risk",
+        "Lunar economy timeline may be decades away",
+        "Competition from Blue Origin, SpaceX for lunar access"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "RDW",
+      "company": "Redwire Corp",
+      "fit_score": 6,
+      "conviction": "Medium",
+      "thesis": "Redwire is a space infrastructure company providing critical components and systems for both government and commercial space missions (solar arrays, in-space manufacturing, sensors). At $3.2B market cap, the company benefits from the secular growth in space spending while maintaining diversified revenue across NASA, DoD, and commercial customers. The roll-up strategy in space manufacturing creates a potential moat through vertical integration and IP accumulation. In-space manufacturing and 3D printing capabilities could become extremely high-margin at scale.",
+      "catalysts": [
+        "DoD/government contract wins for space infrastructure",
+        "In-space manufacturing technology maturation (3D printing, solar arrays)",
+        "Commercial space station component contracts (post-ISS era)",
+        "Margin expansion as scale increases",
+        "Potential acquisition targets in fragmented space components market"
+      ],
+      "risks": [
+        "Government budget cycle dependency",
+        "Integration risk from M&A strategy",
+        "Dilution risk given capital needs",
+        "Competition from larger primes (Northrop, L3Harris)",
+        "Technology risk in next-gen space manufacturing"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    },
+    {
+      "ticker": "SOUN",
+      "company": "SoundHound AI Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "SoundHound AI provides voice AI platform services to automotive, restaurant, and customer service verticals. While the AI TAM is enormous, SoundHound faces brutal competition from hyperscalers (Google, Amazon, Apple) and well-funded AI startups. The company lacks a clear structural moat - voice AI is becoming commoditized by large language models. At $3.5B market cap, the valuation already prices in significant AI hype. Unit economics remain unproven at scale.",
+      "catalysts": [
+        "Automotive OEM design wins expanding to production",
+        "Restaurant/retail vertical expansion",
+        "AI platform subscription revenue growth",
+        "Strategic partnership with major tech company"
+      ],
+      "risks": [
+        "Competition from Big Tech voice assistants",
+        "LLM commoditization eroding differentiation",
+        "Customer concentration risk",
+        "Path to profitability unclear",
+        "Valuation built on AI narrative not fundamentals"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "Weak competitive moat against hyperscalers in AI. Voice AI is being commoditized by foundation models. At $3.5B with unclear unit economics, the risk/reward for 100x is poor. Competition is existential."
+    },
+    {
+      "ticker": "IONQ",
+      "company": "IONQ Inc",
+      "fit_score": 3,
+      "conviction": "Low",
+      "thesis": "IonQ is a leader in trapped-ion quantum computing with impressive technical milestones. However, at $17.7B market cap, the stock has already priced in enormous future success. A 100x would require $1.77T, which would make IonQ larger than today's biggest tech companies. Quantum computing remains pre-commercial with uncertain timeline to practical advantage. The company burns cash with minimal revenue relative to valuation.",
+      "catalysts": [
+        "Quantum error correction milestones",
+        "Government/defense quantum contracts",
+        "Commercial quantum advantage demonstration",
+        "Strategic partnerships with cloud providers (AWS, Azure, GCP)"
+      ],
+      "risks": [
+        "Decades-long timeline to commercial viability",
+        "Extreme capital intensity with ongoing dilution",
+        "Competition from superconducting (IBM, Google) and other approaches",
+        "Revenue is trivial relative to $17.7B market cap",
+        "Technology may not achieve fault tolerance"
+      ],
+      "hundred_bagger_plausible": false,
+      "pass_reason": "At $17.7B market cap with minimal revenue and uncertain commercialization timeline, 100x ($1.77T) is not credible. The technology is fascinating but the risk/reward at current valuation is poor for this mandate."
+    },
+    {
+      "ticker": "JOBY",
+      "company": "Joby Aviation Inc",
+      "fit_score": 5,
+      "conviction": "Medium",
+      "thesis": "Joby Aviation is a leader in eVTOL (electric vertical takeoff and landing) aircraft development with the strongest regulatory positioning toward FAA certification. At $8.5B market cap, the company has significant runway if urban air mobility becomes a reality. The potential TAM for air taxis is enormous ($1T+ by 2040 per various estimates). Joby has strong partnerships (Toyota, Delta, Uber) and manufacturing capability. However, the company is pre-revenue, capital intensive, and regulatory certification timeline remains uncertain.",
+      "catalysts": [
+        "FAA Type Certification completion",
+        "First commercial operations launch (Dubai, US cities)",
+        "Toyota partnership deepening for manufacturing scale",
+        "DoD/defense contracts (Agility Prime)",
+        "International certification and market entry"
+      ],
+      "risks": [
+        "FAA certification delays (years possible)",
+        "Massive capital requirements before revenue at scale",
+        "Public acceptance and noise concerns",
+        "Competition from Archer, Lilium, traditional aerospace",
+        "Unit economics unproven at scale",
+        "Pilot training and infrastructure buildout"
+      ],
+      "hundred_bagger_plausible": true,
+      "pass_reason": null
+    }
+  ]
+}
