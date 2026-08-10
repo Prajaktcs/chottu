@@ -22,17 +22,19 @@ family:
       fitness_goals:
         intent: "example outcome (replace locally)"
         target_date: "2027-06-01"
-        focus: "recomp"             # cut | bulk | recomp | endurance | general
+        focus: "recomp"             # required enum if set: cut | bulk | recomp | endurance | general
         sessions_per_week: 4
         session_minutes: 45
-        equipment: "gym"            # home | gym | mixed
+        equipment: "gym"            # required enum if set: home | gym | mixed
         # User-authored limits only (NOT medical records / diagnoses).
         constraints:
           - "example constraint (replace locally)"
         weekly_targets:
           strength_sessions: 3
           cardio_minutes: 90
-          active_calories: 400      # daily floor when set
+          # Daily minimum Google Health "active energy burned" (movement/workout kcal),
+          # NOT food-intake calories. Omit if you don't care about this floor.
+          active_calories: 400
     - id: jordan
       name: Jordan
       role: adult

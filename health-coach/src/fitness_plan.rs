@@ -277,8 +277,8 @@ pub fn build_plan_user_prompt(
             }
         }
     }
-    if let Some(focus) = fitness.focus.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        lines.push(format!("Focus: {}", focus));
+    if let Some(focus) = fitness.focus {
+        lines.push(format!("Focus: {}", focus.as_str()));
     }
     if let Some(n) = fitness.sessions_per_week {
         lines.push(format!("Sessions per week: {}", n));
@@ -286,13 +286,8 @@ pub fn build_plan_user_prompt(
     if let Some(m) = fitness.session_minutes {
         lines.push(format!("Session minutes: {}", m));
     }
-    if let Some(eq) = fitness
-        .equipment
-        .as_ref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        lines.push(format!("Equipment: {}", eq));
+    if let Some(eq) = fitness.equipment {
+        lines.push(format!("Equipment: {}", eq.as_str()));
     }
     if !fitness.constraints.is_empty() {
         lines.push("Constraints:".to_string());
@@ -576,10 +571,10 @@ mod tests {
         let fitness = FitnessGoals {
             intent: Some("beach body".into()),
             target_date: Some("2027-06-01".into()),
-            focus: Some("recomp".into()),
+            focus: Some(chotu_common::FitnessFocus::Recomp),
             sessions_per_week: Some(4),
             session_minutes: Some(45),
-            equipment: Some("gym".into()),
+            equipment: Some(chotu_common::FitnessEquipment::Gym),
             constraints: vec!["no hard runs".into()],
             weekly_targets: None,
         };

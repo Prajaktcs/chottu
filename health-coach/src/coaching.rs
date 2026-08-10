@@ -34,7 +34,10 @@ pub struct FitnessCoachContext {
     pub days_until_target: Option<i64>,
     /// Today's planned session summary, if any.
     pub planned_session: Option<String>,
-    /// Exercise descriptions for the window (today or recent).
+    /// Free-text exercise blurbs for the window (v1).
+    /// TODO: replace with structured exercise rows (activity type, duration,
+    /// calories, start/end) once `exercise_log` schema is expanded beyond
+    /// description strings — see TODO.md.
     pub exercises: Vec<String>,
     /// Strength-like sessions logged this week vs weekly target.
     pub week_strength_sessions: Option<i32>,
@@ -241,8 +244,8 @@ impl FitnessCoachContext {
             if let Some(days) = self.days_until_target {
                 lines.push(format!("  - Days remaining: {}", days));
             }
-            if let Some(focus) = fg.focus.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                lines.push(format!("  - Focus: {}", focus));
+            if let Some(focus) = fg.focus {
+                lines.push(format!("  - Focus: {}", focus.as_str()));
             }
             if let Some(wt) = fg.weekly_targets.as_ref() {
                 if let Some(target) = wt.active_calories {
@@ -460,10 +463,10 @@ mod tests {
         let fitness = FitnessGoals {
             intent: Some("beach body".into()),
             target_date: Some("2027-06-01".into()),
-            focus: Some("recomp".into()),
+            focus: Some(chotu_common::FitnessFocus::Recomp),
             sessions_per_week: Some(4),
             session_minutes: Some(45),
-            equipment: Some("gym".into()),
+            equipment: Some(chotu_common::FitnessEquipment::Gym),
             constraints: vec!["low-impact cardio".into()],
             weekly_targets: Some(chotu_common::FitnessWeeklyTargets {
                 strength_sessions: Some(3),
