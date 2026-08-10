@@ -197,7 +197,9 @@ impl YahooProfileClient {
                 return Err(QuoteError::Auth(format!("quote HTTP {status}")));
             }
             if !status.is_success() {
-                return Err(QuoteError::Auth(format!("quote HTTP {status}")));
+                return Err(QuoteError::HttpStatus {
+                    status: status.as_u16(),
+                });
             }
 
             let body: QuoteApiResponse = resp
@@ -275,11 +277,11 @@ impl YahooProfileClient {
         let rows = match self.fetch_quote_rows(&all_symbols).await {
             Ok(r) => r,
             Err(e) => {
-                let msg = e.to_string();
+                let shared = e.clone_shared();
                 return tickers
                     .iter()
                     .cloned()
-                    .map(|t| (t, Err(QuoteError::Auth(msg.clone()))))
+                    .map(|t| (t, Err(shared.clone_shared())))
                     .collect();
             }
         };
