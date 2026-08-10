@@ -13,15 +13,15 @@ use chotu_common::{
     answer_memory_query, build_calendar_client, clear_budget_override, complete_all_open_tasks,
     compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
     default_member_id, display_category, exchange_google_code, fetch_exchange_rates,
-    fetch_stock_quotes, format_budget_progress_markdown, has_telegram_delivery,
+    fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_telegram_delivery,
     is_telegram_chat_allowed, list_completable_open_tasks, looks_like_task_add_query,
     lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat, parse_due_phrase,
     pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
     save_google_refresh_token, save_health_refresh_token, schedule_at, set_budget_override,
     set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
     start_redirect_listener, telegram_chat_for_member, telegram_delivery_targets, AppConfig,
-    CalendarWindow, ChotuLlm, FoodPhotoKind, GeminiClient, InvestmentPhilosophy, MemoryIndex,
-    UserIntent,
+    CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, InvestmentPhilosophy,
+    MemoryIndex, UserIntent,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 use teloxide::net::Download;
@@ -3256,8 +3256,19 @@ async fn build_networth_summary(pool: &SqlitePool, config: &AppConfig) -> Result
         return Ok(msg);
     }
 
-    let tickers: Vec<String> = holdings.iter().map(|h| h.ticker.clone()).collect();
-    let prices = match fetch_stock_quotes(&tickers).await {
+    let tickers: Vec<(String, Option<CostHint>)> = holdings
+        .iter()
+        .map(|h| {
+            (
+                h.ticker.clone(),
+                Some(CostHint {
+                    average_cost: h.average_cost,
+                    currency: h.average_cost_currency.clone(),
+                }),
+            )
+        })
+        .collect();
+    let prices = match fetch_stock_quotes_near_cost(&tickers).await {
         Ok(p) => p,
         Err(e) => {
             eprintln!("Failed to fetch stock prices: {:?}", e);
@@ -3287,14 +3298,14 @@ async fn build_networth_summary(pool: &SqlitePool, config: &AppConfig) -> Result
     let mut total_portfolio_value = 0.0;
     let mut total_portfolio_cost = 0.0;
     let mut breakdown = String::new();
-    let mut missing_quotes = 0usize;
+    let mut missing_tickers: Vec<String> = Vec::new();
 
     for h in &holdings {
         let ticker_upper = h.ticker.to_uppercase();
         let quote = price_map.get(&ticker_upper).map(|(p, c)| (*p, c.as_str()));
         let converted = holding_values_in_base(h, quote, config, &rates);
         if converted.missing_quote {
-            missing_quotes += 1;
+            missing_tickers.push(ticker_upper.clone());
         }
         total_portfolio_cost += converted.cost_base;
         total_portfolio_value += converted.value_base;
@@ -3330,10 +3341,11 @@ async fn build_networth_summary(pool: &SqlitePool, config: &AppConfig) -> Result
         "• 📈 *Stock Portfolio:* ${:.2} {} (Cost: ${:.2} | {}{:.1}%)\n",
         total_portfolio_value, base, total_portfolio_cost, overall_sign, overall_diff_percent
     ));
-    if missing_quotes > 0 {
+    if !missing_tickers.is_empty() {
         msg.push_str(&format!(
-            "  _({} holding(s) used book cost — try Yahoo symbols like `VFV.TO`)_\n",
-            missing_quotes
+            "  _({} holding(s) used book cost: {})_\n",
+            missing_tickers.len(),
+            missing_tickers.join(", ")
         ));
     }
     msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n");

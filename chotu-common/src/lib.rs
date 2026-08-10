@@ -60,7 +60,9 @@ pub use finnhub::{
     cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,
     FinnhubError,
 };
-pub use quotes::{fetch_stock_quotes, StockQuote, QuoteError};
+pub use quotes::{
+    fetch_stock_quotes, fetch_stock_quotes_near_cost, CostHint, QuoteError, StockQuote,
+};
 pub use yahoo_profile::{
     prefers_yahoo_profile, yahoo_market_cap_usd_millions, YahooProfileClient,
 };
