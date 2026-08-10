@@ -1,25 +1,15 @@
-# Research panel A/B — Sol vs Qwen3.8-Max
+# Legacy one-off A/B helper
 
-Seeded stock-research comparison that keeps Opus + Kimi + Kimi-judge fixed and swaps only the expensive OpenAI scorer for Qwen3.8-Max.
+Prefer the durable local bench:
 
-## Run
-
-Requires `OPENROUTER_API_KEY` (optional `FINNHUB_API_KEY` for cap enrichment):
+→ **[`evals/research/README.md`](../research/README.md)** (`research_bench`)
 
 ```bash
-cargo run -p finance-advisor --bin research_ab
-# or custom seed:
-cargo run -p finance-advisor --bin research_ab -- --targets "ASTS, RKLB, IONQ, SOUN"
+cargo run -p finance-advisor --bin research_bench -- --dry-run
+cargo run -p finance-advisor --bin research_bench -- \
+  --baseline openai/gpt-5.6-sol \
+  --candidate qwen/qwen3.8-max \
+  --trials 2
 ```
 
-Artifacts land in `evals/research-ab/<run_id>/`:
-
-- `a-baseline/` — Sol + Opus + Kimi, judge Kimi
-- `b-qwen/` — Qwen3.8-Max + Opus + Kimi, judge Kimi
-- `summary.md` — universe, score tables, top-3 overlap
-
-Default seed: `ASTS, RKLB, IONQ, SOUN, JOBY, ACHR, LUNR, RDW`.
-
-## Decision rule
-
-Change `DEFAULT_PANEL_MODELS` in `finance-advisor` only if arm B is clearly as good or better on shortlist quality / philosophy fit. Single-pass runs are directional (LLM variance).
+`research_ab` remains as a full-panel qualitative runner if you want side-by-side syntheses without gold metrics.
