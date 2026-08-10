@@ -7,16 +7,18 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ## Backlog (priority order)
 
 ### 1. Structured exercise progress
-- [ ] Stop flattening Google Health activity fields into free-text descriptions
-- [ ] Persist activity type, duration, active kcal, start/end on `exercise_log`
-- [ ] Wire coach/plan progress to real fields (kill keyword heuristics like `"gym"` / `"workout"` for strength)
-- [ ] Measure `weekly_targets.cardio_minutes` from duration data, not prompts alone
+- [x] Stop flattening Google Health activity fields into free-text descriptions
+- [x] Persist activity type, duration, active kcal, start/end on `exercise_log`
+- [x] Wire coach/plan progress to real fields (kill keyword heuristics like `"gym"` / `"workout"` for strength)
+- [x] Measure `weekly_targets.cardio_minutes` from duration data, not prompts alone
 
 **Why:** Sync already receives structured activity; coach progress guesses from text, so cardio can count as strength and cardio targets are never measured.
 
 **Effort:** M
 
 **Files:** `chotu-common/src/google_health.rs`, `health-coach/src/sync.rs`, `chotu-common/migrations/20260810000001_fitness_coach.sql` (or a follow-on migration), `health-coach/src/fitness_plan.rs`, `health-coach/src/coach_enrich.rs`, `health-coach/src/coaching.rs`
+
+**Done:** `ExerciseSession` + migration `20260810000002`; progress via `classify_activity_type` / `count_strength_sessions` / `sum_cardio_minutes` (generic "Workout"/"Gym" no longer count as strength).
 
 ---
 

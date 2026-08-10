@@ -1,6 +1,5 @@
 -- Persist Google Health exercise sessions for coaching + weekly plan context.
--- v1 stores free-text descriptions only. TODO: structured columns (activity_type,
--- duration_minutes, active_calories, start_at, end_at) for accurate progress.
+-- Structured columns added in 20260810000002_exercise_log_structured.sql.
 CREATE TABLE IF NOT EXISTS exercise_log (
     id TEXT PRIMARY KEY,
     date TEXT NOT NULL,                    -- YYYY-MM-DD local civil day

@@ -6,10 +6,10 @@ use sqlx::SqlitePool;
 
 use crate::coaching::FitnessCoachContext;
 use crate::fitness_plan::{
-    count_strengthish_sessions, current_week_start_str, load_weekly_plan, parse_plan_json,
-    session_for_date, week_start_monday,
+    count_strength_sessions, current_week_start_str, load_weekly_plan, parse_plan_json,
+    session_for_date, sum_cardio_minutes, week_start_monday,
 };
-use crate::sync::{exercises_for_day, exercises_for_range};
+use crate::sync::{exercise_entries_for_range, exercises_for_day};
 
 /// Enrich a day/trend coach context with fitness goals, today's plan, and exercises.
 pub async fn enrich_coach_context(
@@ -25,7 +25,9 @@ pub async fn enrich_coach_context(
         .members
         .iter()
         .find(|m| m.id.eq_ignore_ascii_case(member_id));
-    let fitness = member.and_then(|m| m.fitness_goals.as_ref()).filter(|g| !g.is_empty());
+    let fitness = member
+        .and_then(|m| m.fitness_goals.as_ref())
+        .filter(|g| !g.is_empty());
 
     let today = Local::now().date_naive();
     let days_until = fitness.and_then(|g| g.days_until_target(today));
@@ -52,14 +54,21 @@ pub async fn enrich_coach_context(
         .format("%Y-%m-%d")
         .to_string();
     let week_start_s = week_start_date.format("%Y-%m-%d").to_string();
-    let week_ex = exercises_for_range(pool, member_id, &week_start_s, &week_end)
+    let week_ex = exercise_entries_for_range(pool, member_id, &week_start_s, &week_end)
         .await
         .unwrap_or_default();
-    let week_descs: Vec<String> = week_ex.into_iter().map(|(_, d)| d).collect();
-    let strength_done = count_strengthish_sessions(&week_descs);
-    let strength_target = fitness
-        .and_then(|g| g.weekly_targets.as_ref())
-        .and_then(|t| t.strength_sessions);
+
+    let strength_done =
+        count_strength_sessions(week_ex.iter().map(|e| e.activity_label()));
+    let cardio_done = sum_cardio_minutes(
+        week_ex
+            .iter()
+            .map(|e| (e.activity_label(), e.duration_mins())),
+    );
+
+    let targets = fitness.and_then(|g| g.weekly_targets.as_ref());
+    let strength_target = targets.and_then(|t| t.strength_sessions);
+    let cardio_target = targets.and_then(|t| t.cardio_minutes);
 
     ctx.with_fitness(
         fitness,
@@ -68,6 +77,8 @@ pub async fn enrich_coach_context(
         exercises,
         Some(strength_done),
         strength_target,
+        Some(cardio_done),
+        cardio_target,
     )
 }
 
@@ -79,7 +90,12 @@ pub fn fitness_brief_lines(
     yesterday_exercises: &[String],
 ) -> String {
     let mut out = String::new();
-    if let Some(intent) = fitness.intent.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(intent) = fitness
+        .intent
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         out.push_str(&format!("  - Outcome: {}\n", intent));
     }
     if let Some(days) = fitness.days_until_target(as_of) {

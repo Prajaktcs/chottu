@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use chotu_common::{
-    health_refresh_token_env_key, resolve_health_refresh_token, AppConfig, FoodLog, GeminiClient,
-    GoogleHealthClient, GoogleHealthFoodSummary, MissingSyncNutrition, NutritionLogWrite,
+    health_refresh_token_env_key, resolve_health_refresh_token, AppConfig, ExerciseSession,
+    FoodLog, GeminiClient, GoogleHealthClient, GoogleHealthFoodSummary, MissingSyncNutrition,
+    NutritionLogWrite,
 };
 use sqlx::SqlitePool;
 
@@ -28,7 +29,7 @@ pub struct HealthSyncReport {
     pub steps: i32,
     pub active_calories: i32,
     pub sleep_hours: Option<f64>,
-    pub exercises: Vec<String>,
+    pub exercises: Vec<ExerciseSession>,
     /// Number of Telegram `/food` rows merged on top of Google Health totals.
     pub manual_food_entries: i64,
 }
@@ -45,7 +46,7 @@ impl HealthSyncReport {
         } else {
             self.exercises
                 .iter()
-                .map(|e| format!("• {}", e))
+                .map(|e| format!("• {}", e.display()))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -324,7 +325,10 @@ pub async fn sync_member_for_date(
     let steps = client.fetch_steps_summary(date).await.unwrap_or(0);
     let active_calories = client.fetch_active_energy_summary(date).await.unwrap_or(0);
     let sleep_hours = client.fetch_sleep_summary(date).await.ok();
-    let exercises = client.fetch_exercise_summary(date).await.unwrap_or_default();
+    let exercises = client
+        .fetch_exercise_sessions(date)
+        .await
+        .unwrap_or_default();
 
     // Local Telegram meals that have not been pushed to Google Health yet.
     let manual = sum_unsynced_food_log_for_day(pool, member_id, date)
@@ -488,12 +492,47 @@ pub async fn sync_member_for_date(
     Ok(report)
 }
 
+/// One persisted exercise_log row (structured fields optional for pre-migration rows).
+#[derive(Debug, Clone, Default, sqlx::FromRow)]
+pub struct ExerciseLogEntry {
+    pub date: String,
+    pub description: String,
+    pub activity_type: Option<String>,
+    pub duration_minutes: Option<i32>,
+    pub active_calories: Option<f64>,
+    pub start_at: Option<String>,
+    pub end_at: Option<String>,
+}
+
+impl ExerciseLogEntry {
+    /// Prefer stored activity_type; otherwise the label before ` (` in description.
+    pub fn activity_label(&self) -> String {
+        if let Some(t) = self
+            .activity_type
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            return t.to_string();
+        }
+        let desc = self.description.trim();
+        match desc.find(" (") {
+            Some(i) if i > 0 => desc[..i].to_string(),
+            _ => desc.to_string(),
+        }
+    }
+
+    pub fn duration_mins(&self) -> i32 {
+        self.duration_minutes.unwrap_or(0).max(0)
+    }
+}
+
 /// Replace Google Health exercise rows for one member/day (atomic delete+insert).
 pub async fn replace_exercise_log_for_day(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
-    exercises: &[String],
+    exercises: &[ExerciseSession],
 ) -> Result<()> {
     let mut tx = pool
         .begin()
@@ -507,19 +546,27 @@ pub async fn replace_exercise_log_for_day(
         .await
         .context("Failed to clear exercise_log for day")?;
 
-    for desc in exercises {
-        let trimmed = desc.trim();
-        if trimmed.is_empty() {
+    for session in exercises {
+        let desc = session.display();
+        if desc.trim().is_empty() {
             continue;
         }
         let id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
-            "INSERT INTO exercise_log (id, date, family_member_id, description, source) VALUES (?, ?, ?, ?, 'google_health')",
+            "INSERT INTO exercise_log \
+             (id, date, family_member_id, description, source, \
+              activity_type, duration_minutes, active_calories, start_at, end_at) \
+             VALUES (?, ?, ?, ?, 'google_health', ?, ?, ?, ?, ?)",
         )
         .bind(&id)
         .bind(date)
         .bind(member_id)
-        .bind(trimmed)
+        .bind(&desc)
+        .bind(&session.activity_type)
+        .bind(session.duration_minutes)
+        .bind(session.active_calories)
+        .bind(&session.start_at)
+        .bind(&session.end_at)
         .execute(&mut *tx)
         .await
         .with_context(|| format!("Failed to insert exercise_log row for {}", member_id))?;
@@ -537,8 +584,22 @@ pub async fn exercises_for_day(
     member_id: &str,
     date: &str,
 ) -> Result<Vec<String>> {
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT description FROM exercise_log \
+    Ok(exercise_entries_for_day(pool, member_id, date)
+        .await?
+        .into_iter()
+        .map(|e| e.description)
+        .collect())
+}
+
+/// Structured exercise rows for a member on a civil day.
+pub async fn exercise_entries_for_day(
+    pool: &SqlitePool,
+    member_id: &str,
+    date: &str,
+) -> Result<Vec<ExerciseLogEntry>> {
+    let rows: Vec<ExerciseLogEntry> = sqlx::query_as(
+        "SELECT date, description, activity_type, duration_minutes, active_calories, start_at, end_at \
+         FROM exercise_log \
          WHERE family_member_id = ? AND date = ? \
          ORDER BY created_at ASC, id ASC",
     )
@@ -547,7 +608,7 @@ pub async fn exercises_for_day(
     .fetch_all(pool)
     .await
     .context("Failed to query exercise_log")?;
-    Ok(rows.into_iter().map(|(d,)| d).collect())
+    Ok(rows)
 }
 
 /// Exercise descriptions for a member between `start_date` and `end_date` inclusive.
@@ -557,8 +618,23 @@ pub async fn exercises_for_range(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<(String, String)>> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT date, description FROM exercise_log \
+    Ok(exercise_entries_for_range(pool, member_id, start_date, end_date)
+        .await?
+        .into_iter()
+        .map(|e| (e.date, e.description))
+        .collect())
+}
+
+/// Structured exercise rows for a member between `start_date` and `end_date` inclusive.
+pub async fn exercise_entries_for_range(
+    pool: &SqlitePool,
+    member_id: &str,
+    start_date: &str,
+    end_date: &str,
+) -> Result<Vec<ExerciseLogEntry>> {
+    let rows: Vec<ExerciseLogEntry> = sqlx::query_as(
+        "SELECT date, description, activity_type, duration_minutes, active_calories, start_at, end_at \
+         FROM exercise_log \
          WHERE family_member_id = ? AND date >= ? AND date <= ? \
          ORDER BY date ASC, created_at ASC",
     )
