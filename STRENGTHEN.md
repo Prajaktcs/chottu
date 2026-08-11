@@ -38,15 +38,17 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 3. Food mutation guards in linked DMs
-- [ ] From a linked personal DM, only allow food mutations for the chat’s member
-- [ ] Block `/food`, `/adjustfood`, `/undofood`, `/clearfood` (and free-text `FOOD` with another `member_id`) targeting other members
-- [ ] Keep household chat able to log for any member (existing behavior)
+- [x] From a linked personal DM, only allow food mutations for the chat’s member
+- [x] Block `/food`, `/adjustfood`, `/undofood`, `/clearfood` (and free-text `FOOD` with another `member_id`) targeting other members
+- [x] Keep household chat able to log for any member (existing behavior)
 
 **Why:** Status/trends/brief health sections are scoped to self in linked DMs, but food writes still accept any member id.
 
 **Effort:** S
 
 **Files:** `coordinator/src/telegram.rs` (`resolve_food_member_and_description`, `resolve_optional_member_arg`, food handlers), `chotu-common/src/family.rs` (`member_for_telegram_chat`)
+
+**Done:** `ensure_food_mutation_allowed` rejects cross-member `/food`, `/adjustfood`, `/undofood`, `/clearfood`, free-text FOOD, and food photos in linked DMs; household/unlinked chats unchanged.
 
 ---
 
@@ -122,10 +124,10 @@ Not prioritized, but known thin spots:
 |------|-----|
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
-| Family privacy | Allowlist + link hijack guards are good; remaining leaks are items 2–5 and 7 above; household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
+| Family privacy | Allowlist + link hijack guards are good; remaining leaks are items 4–5 and 7 above; household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
 
 ## Suggested order
 
-Max quality per week: **3 → 4 → 5 → 6 → 7 → 8** (items 1–2 done).
+Max quality per week: **4 → 5 → 6 → 7 → 8** (items 1–3 done).
 
-Items 3–4 are a natural “quick wins” PR if you want privacy/reliability before larger work.
+Items 4–5 are the next privacy/reliability wins before larger wiring work.
