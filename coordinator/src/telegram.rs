@@ -12,11 +12,11 @@ use tokio::sync::RwLock;
 use chotu_common::{
     answer_memory_query, build_calendar_client, clear_budget_override, complete_all_open_tasks,
     compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
-    default_member_id, display_category, exchange_google_code, fetch_exchange_rates,
-    fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_telegram_delivery,
-    is_telegram_chat_allowed, list_completable_open_tasks, looks_like_task_add_query,
-    lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat, parse_due_phrase,
-    pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
+    default_member_id, display_category, ensure_food_mutation_allowed, exchange_google_code,
+    fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
+    has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
+    looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
+    parse_due_phrase, pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
     save_google_refresh_token, save_health_refresh_token, schedule_at, set_budget_override,
     set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
     start_redirect_listener, telegram_chat_for_member, telegram_delivery_targets, AppConfig,
@@ -718,6 +718,9 @@ async fn handle_food_log(
 
     let (family_member_id, food_description) =
         resolve_food_member_and_description(args, config, chat_id.0);
+    if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
+        return Ok(());
+    }
     if food_description.is_empty() {
         bot.send_message(
             chat_id,
@@ -844,6 +847,22 @@ fn resolve_optional_member_arg(args: &str, config: &AppConfig, chat_id: i64) -> 
         .find(|m| m.id.eq_ignore_ascii_case(member_id))
         .map(|m| m.id.clone())
         .unwrap_or_else(|| default_member_id(config, chat_id).to_string())
+}
+
+/// Linked DMs may only mutate food for their own member. Returns `true` if blocked.
+async fn reject_foreign_food_mutation(
+    bot: &Bot,
+    chat_id: ChatId,
+    config: &AppConfig,
+    target_member_id: &str,
+) -> Result<bool, teloxide::RequestError> {
+    if let Err(msg) = ensure_food_mutation_allowed(config, chat_id.0, target_member_id) {
+        bot.send_message(chat_id, msg)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .await?;
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Insert food_log, update day totals, optionally push to Google Health, reply macros-first.
@@ -1146,6 +1165,9 @@ async fn handle_clear_food(
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
     let target_member_id = resolve_optional_member_arg(&args, config, chat_id.0);
+    if reject_foreign_food_mutation(bot, chat_id, config, &target_member_id).await? {
+        return Ok(());
+    }
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -1244,6 +1266,10 @@ async fn handle_adjust_food(
             offset = 1;
             break;
         }
+    }
+
+    if reject_foreign_food_mutation(bot, chat_id, config, &member_id).await? {
+        return Ok(());
     }
 
     let remaining_tokens = &tokens[offset..];
@@ -1406,6 +1432,9 @@ async fn handle_undo_food(
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
     let target_member_id = resolve_optional_member_arg(&args, config, chat_id.0);
+    if reject_foreign_food_mutation(bot, chat_id, config, &target_member_id).await? {
+        return Ok(());
+    }
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -3996,6 +4025,12 @@ async fn handle_food_photo(
     let best = photos.last().expect("non-empty photo sizes");
     let caption = msg.caption().unwrap_or("").trim();
 
+    let (member_id, caption_rest) =
+        resolve_food_member_and_description(caption, config, chat_id.0);
+    if reject_foreign_food_mutation(bot, chat_id, config, &member_id).await? {
+        return Ok(());
+    }
+
     bot.send_message(
         chat_id,
         "🔍 Analyzing food photo (barcode / package / plate)...",
@@ -4045,9 +4080,6 @@ async fn handle_food_photo(
         .await?;
         return Ok(());
     }
-
-    let (member_id, caption_rest) =
-        resolve_food_member_and_description(caption, config, chat_id.0);
 
     let (description, nutrition, source_note) = if let Some(ref barcode) = analysis.barcode {
         match lookup_barcode(barcode).await {
@@ -4249,6 +4281,9 @@ async fn dispatch_free_text_intent(
             let family_member_id = member_id.unwrap_or_else(|| {
                 default_member_id(config, chat_id.0).to_string()
             });
+            if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
+                return Ok(());
+            }
             log_food_for_member(
                 bot,
                 chat_id,

@@ -474,6 +474,23 @@ pub fn default_member_id(config: &AppConfig, chat_id: i64) -> &str {
         .unwrap_or("alex")
 }
 
+/// Food writes from a linked personal DM may only target that chat's member.
+/// Household / unlinked chats may target any member (returns `Ok(())`).
+pub fn ensure_food_mutation_allowed(
+    config: &AppConfig,
+    chat_id: i64,
+    target_member_id: &str,
+) -> Result<(), String> {
+    match member_for_telegram_chat(config, chat_id) {
+        Some(linked) if !linked.id.eq_ignore_ascii_case(target_member_id) => Err(format!(
+            "This chat is linked as `{}`. Food commands here only work for you — \
+             use the household chat to log or change food for someone else.",
+            linked.id
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// True when at least one member has a linked Telegram chat.
 pub fn has_any_telegram_link(config: &AppConfig) -> bool {
     config
@@ -1043,6 +1060,19 @@ family:
         assert!(member_for_telegram_chat(&config, 999).is_none());
         assert_eq!(default_member_id(&config, 222), "jordan");
         assert_eq!(default_member_id(&config, 999), "alex");
+    }
+
+    #[test]
+    fn test_food_mutation_guard_linked_dm() {
+        let config = two_member_config();
+        assert!(ensure_food_mutation_allowed(&config, 111, "alex").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, 111, "Alex").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, 111, "jordan").is_err());
+        assert!(ensure_food_mutation_allowed(&config, 222, "jordan").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, 222, "alex").is_err());
+        // Unlinked / household chat may target anyone.
+        assert!(ensure_food_mutation_allowed(&config, 999, "alex").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, 999, "jordan").is_ok());
     }
 
     #[test]

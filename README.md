@@ -213,10 +213,10 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/help` | Displays the help text. |
 | `/login <health <member>\|gmail\|calendar <member>>` | Interactive OAuth (Health/Calendar save per-member refresh tokens). |
 | `/sync` | Triggers a manual sync of today's nutrition for every linked Google Health account. |
-| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Relative days/times in the text are resolved (e.g. `/food yesterday's dinner pasta`). Pushes to that member's Google Health when linked. |
-| `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). Defaults to linked member. |
-| `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). |
-| `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. |
+| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Relative days/times in the text are resolved (e.g. `/food yesterday's dinner pasta`). Pushes to that member's Google Health when linked. Linked DMs can only log for themselves; use the household chat to log for someone else. |
+| `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). Defaults to linked member. Linked DMs: self only. |
+| `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). Linked DMs: self only. |
+| `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. Linked DMs: self only. |
 | `/status` | Today's status (finance + health, exercises, fitness outcome progress, short local-Ollama coach tip per member). |
 | `/plan [new]` | Show this week's training plan (generate if missing). `/plan new` regenerates from `fitness_goals` + recent activity via local Ollama. |
 | `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals, training countdown/session. Auto-sends at 7:00 local to all linked DMs (`MORNING_BRIEF_HOUR` to override; `TELEGRAM_CHAT_ID` optional shared fallback). |
@@ -235,7 +235,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 
 Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what's today's workout", "show my training plan", "regenerate plan", "what was that recipe I saved", "log 2 eggs for praj", "yesterday's dinner was pasta", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
 
-**Food photos:** send a barcode, product package, or plated meal. Caption is optional; without a member id it logs for the linked DM member (e.g. `half the bowl` or `praj half the bowl`). Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
+**Food photos:** send a barcode, product package, or plated meal. Caption is optional; without a member id it logs for the linked DM member (e.g. `half the bowl` or `praj half the bowl`). Linked DMs reject captions that target another member. Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
 
 ---
 

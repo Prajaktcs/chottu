@@ -23,13 +23,13 @@ pub use due_parse::{
 };
 pub use food_parse::{resolve_food_log_timing, FoodLogTiming};
 pub use family::{
-    config_path, default_member_id, has_any_telegram_link, has_telegram_delivery,
-    health_refresh_token_env_key, is_telegram_chat_allowed, load_config, member_for_telegram_chat,
-    resolve_health_refresh_token, set_member_telegram_chat_id, telegram_chat_for_member,
-    telegram_delivery_targets, AppConfig, FamilyMember, FamilySection, InvestmentPhilosophy,
-    TargetAllocation, AllocationBucket, BucketHolding, SpendBudgets, fetch_exchange_rates,
-    CalendarConfig, FitnessEquipment, FitnessFocus, FitnessGoals, FitnessWeeklyTargets,
-    NutritionGoals,
+    config_path, default_member_id, ensure_food_mutation_allowed, has_any_telegram_link,
+    has_telegram_delivery, health_refresh_token_env_key, is_telegram_chat_allowed, load_config,
+    member_for_telegram_chat, resolve_health_refresh_token, set_member_telegram_chat_id,
+    telegram_chat_for_member, telegram_delivery_targets, AppConfig, FamilyMember, FamilySection,
+    InvestmentPhilosophy, TargetAllocation, AllocationBucket, BucketHolding, SpendBudgets,
+    fetch_exchange_rates, CalendarConfig, FitnessEquipment, FitnessFocus, FitnessGoals,
+    FitnessWeeklyTargets, NutritionGoals,
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
