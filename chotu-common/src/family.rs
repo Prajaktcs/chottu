@@ -483,7 +483,7 @@ pub fn ensure_food_mutation_allowed(
 ) -> Result<(), String> {
     match member_for_telegram_chat(config, chat_id) {
         Some(linked) if !linked.id.eq_ignore_ascii_case(target_member_id) => Err(format!(
-            "This chat is linked as `{}`. Food commands here only work for you — \
+            "This chat is linked as {}. Food commands here only work for you — \
              use the household chat to log or change food for someone else.",
             linked.id
         )),

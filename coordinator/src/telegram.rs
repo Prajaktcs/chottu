@@ -857,9 +857,8 @@ async fn reject_foreign_food_mutation(
     target_member_id: &str,
 ) -> Result<bool, teloxide::RequestError> {
     if let Err(msg) = ensure_food_mutation_allowed(config, chat_id.0, target_member_id) {
-        bot.send_message(chat_id, msg)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await?;
+        // Plain text: member ids must not go through Telegram Markdown parse mode.
+        bot.send_message(chat_id, msg).await?;
         return Ok(true);
     }
     Ok(false)
