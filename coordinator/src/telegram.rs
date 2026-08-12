@@ -798,21 +798,21 @@ async fn log_food_for_member(
     )
     .await?;
 
-    let nudge = spawn_progress_nudge(
-        bot.clone(),
-        chat_id,
-        20,
-        format!(
-            "Still estimating macros for {} — hang tight, this can take a bit…",
-            family_member_id
-        ),
-    );
-
-    let estimate = with_typing_indicator(bot, chat_id, async {
-        gemini_client.approximate_nutrition(food_description).await
-    })
-    .await;
-    nudge.abort();
+    let estimate = {
+        let _nudge = ProgressNudge::spawn(
+            bot.clone(),
+            chat_id,
+            20,
+            format!(
+                "Still estimating macros for {} — hang tight, this can take a bit…",
+                family_member_id
+            ),
+        );
+        with_typing_indicator(bot, chat_id, async {
+            gemini_client.approximate_nutrition(food_description).await
+        })
+        .await
+    };
 
     match estimate {
         Ok(est) => {
@@ -839,37 +839,50 @@ async fn log_food_for_member(
 }
 
 /// Keep Telegram's "typing…" indicator alive while `fut` runs (chat actions expire ~5s).
+/// Driven with `select!` in this task so cancellation/drop stops typing automatically.
 async fn with_typing_indicator<F, T>(bot: &Bot, chat_id: ChatId, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    let typing_bot = bot.clone();
-    let typing = tokio::spawn(async move {
-        loop {
-            let _ = typing_bot
-                .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-                .await;
-            tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    tokio::pin!(fut);
+    loop {
+        tokio::select! {
+            result = &mut fut => return result,
+            _ = async {
+                let _ = bot
+                    .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
+                    .await;
+                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+            } => {}
         }
-    });
-    let result = fut.await;
-    typing.abort();
-    result
+    }
 }
 
-/// After `delay_secs`, send a follow-up so long waits don't look stuck. Abort when done.
-fn spawn_progress_nudge(
-    bot: Bot,
-    chat_id: ChatId,
-    delay_secs: u64,
-    text: String,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-        if let Err(e) = bot.send_message(chat_id, text).await {
-            eprintln!("Telegram Bot: failed to send progress nudge: {:?}", e);
+/// Background "still working…" nudge that aborts on drop (safe under handler cancellation).
+struct ProgressNudge {
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl ProgressNudge {
+    fn spawn(bot: Bot, chat_id: ChatId, delay_secs: u64, text: String) -> Self {
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            if let Err(e) = bot.send_message(chat_id, text).await {
+                eprintln!("Telegram Bot: failed to send progress nudge: {:?}", e);
+            }
+        });
+        Self {
+            handle: Some(handle),
         }
-    })
+    }
+}
+
+impl Drop for ProgressNudge {
+    fn drop(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
 }
 
 /// Parse optional leading member id from `/food` args or a photo caption.
@@ -4115,19 +4128,20 @@ async fn handle_food_photo(
         return Ok(());
     }
 
-    let photo_nudge = spawn_progress_nudge(
-        bot.clone(),
-        chat_id,
-        20,
-        "Still analyzing that photo — hang tight…".to_string(),
-    );
-    let analysis = with_typing_indicator(bot, chat_id, async {
-        gemini_client
-            .approximate_nutrition_from_image(&image_bytes, "image/jpeg", caption)
-            .await
-    })
-    .await;
-    photo_nudge.abort();
+    let analysis = {
+        let _photo_nudge = ProgressNudge::spawn(
+            bot.clone(),
+            chat_id,
+            20,
+            "Still analyzing that photo — hang tight…".to_string(),
+        );
+        with_typing_indicator(bot, chat_id, async {
+            gemini_client
+                .approximate_nutrition_from_image(&image_bytes, "image/jpeg", caption)
+                .await
+        })
+        .await
+    };
 
     let analysis = match analysis {
         Ok(a) => a,
@@ -4280,12 +4294,6 @@ async fn dispatch_free_text_intent(
     // doesn't look frozen (food logs especially felt stuck for ~1–2 minutes).
     bot.send_message(chat_id, "Got it — working on that…")
         .await?;
-    let classify_nudge = spawn_progress_nudge(
-        bot.clone(),
-        chat_id,
-        20,
-        "Still figuring that out — local model is thinking…".to_string(),
-    );
 
     let member_ids: Vec<String> = config
         .family
@@ -4294,11 +4302,18 @@ async fn dispatch_free_text_intent(
         .map(|m| m.id.clone())
         .collect();
 
-    let classification = with_typing_indicator(bot, chat_id, async {
-        llm.classify_intent(trimmed, &member_ids).await
-    })
-    .await;
-    classify_nudge.abort();
+    let classification = {
+        let _classify_nudge = ProgressNudge::spawn(
+            bot.clone(),
+            chat_id,
+            20,
+            "Still figuring that out — local model is thinking…".to_string(),
+        );
+        with_typing_indicator(bot, chat_id, async {
+            llm.classify_intent(trimmed, &member_ids).await
+        })
+        .await
+    };
 
     let classification = match classification {
         Ok(c) => c,
