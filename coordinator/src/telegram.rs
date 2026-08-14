@@ -16,9 +16,9 @@ use chotu_common::{
     fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
     has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
-    parse_due_phrase, pending_budget_alerts, resolve_food_log_timing, save_calendar_refresh_token,
-    save_google_refresh_token, save_health_refresh_token, schedule_at, set_budget_override,
-    set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
+    effective_food_time, parse_due_phrase, pending_budget_alerts, resolve_food_log_timing,
+    save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token, schedule_at,
+    set_budget_override, set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
     start_redirect_listener, telegram_chat_for_member, telegram_delivery_targets, AppConfig,
     CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, InvestmentPhilosophy,
     MemoryIndex, UserIntent,
@@ -771,11 +771,14 @@ async fn handle_food_log(
         &description,
         food_date.as_deref(),
         food_time.as_deref(),
+        &food_description,
     )
     .await
 }
 
 /// Estimate nutrition and persist a food log for an optional resolved day/time.
+/// `timing_utterance` is the original user text (meal words may be stripped from
+/// `food_description`); used to map lunch/snacks/dinner onto household windows.
 async fn log_food_for_member(
     bot: &Bot,
     chat_id: ChatId,
@@ -786,8 +789,10 @@ async fn log_food_for_member(
     food_description: &str,
     food_date: Option<&str>,
     food_time: Option<&str>,
+    timing_utterance: &str,
 ) -> Result<(), teloxide::RequestError> {
-    let timing = resolve_food_log_timing(food_date, food_time);
+    let food_time = effective_food_time(timing_utterance, food_time);
+    let timing = resolve_food_log_timing(food_date, food_time.as_deref());
 
     bot.send_message(
         chat_id,
@@ -4244,7 +4249,10 @@ async fn handle_food_photo(
         resolve_food_log_timing(None, None)
     } else {
         match llm.extract_food_log_context(&caption_rest).await {
-            Ok(ctx) => resolve_food_log_timing(ctx.food_date.as_deref(), ctx.food_time.as_deref()),
+            Ok(ctx) => {
+                let food_time = effective_food_time(&caption_rest, ctx.food_time.as_deref());
+                resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
+            }
             Err(e) => {
                 eprintln!(
                     "Food photo caption timing extract failed (using now): {:?}",
@@ -4397,6 +4405,7 @@ async fn dispatch_free_text_intent(
                 &description,
                 date.as_deref(),
                 time.as_deref(),
+                trimmed,
             )
             .await?;
         }
