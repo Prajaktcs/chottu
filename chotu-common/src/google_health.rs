@@ -189,7 +189,8 @@ fn utc_offset_duration_str(ts: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Google Health MealType only allows BREAKFAST / LUNCH / DINNER / SNACK.
-/// Aligned with household meal windows: lunch ~12–13, snacks ~16–18, dinner ~20–21:30.
+/// Hour buckets (local): breakfast 5–10, lunch 11–14, snack 15–18, dinner 19–22
+/// (else snack). Chosen so lunch/snack/dinner midpoints map to the right label.
 fn meal_type_for_timestamp(ts: chrono::DateTime<chrono::Utc>) -> &'static str {
     use chrono::Timelike;
     let hour = ts.with_timezone(&chrono::Local).hour();

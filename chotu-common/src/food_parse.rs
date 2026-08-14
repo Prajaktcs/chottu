@@ -116,16 +116,42 @@ pub fn meal_of_day_clock_time(utterance: &str) -> Option<&'static str> {
 
 fn utterance_has_explicit_clock(utterance: &str) -> bool {
     let lower = utterance.to_lowercase();
-    for raw in lower.split_whitespace() {
-        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':');
-        if token.is_empty() {
-            continue;
-        }
+    let tokens: Vec<&str> = lower
+        .split_whitespace()
+        .map(|raw| raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':'))
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    for (i, token) in tokens.iter().enumerate() {
         if looks_like_clock_token(token) {
+            return true;
+        }
+        // Spaced forms: "7 pm", "7:30 am"
+        if i + 1 < tokens.len() && is_ampm_token(tokens[i + 1]) && looks_like_hour_minute(token)
+        {
             return true;
         }
     }
     false
+}
+
+fn is_ampm_token(token: &str) -> bool {
+    matches!(token, "am" | "pm" | "a.m" | "p.m" | "a.m." | "p.m.")
+}
+
+fn looks_like_hour_minute(token: &str) -> bool {
+    let body = token.trim_end_matches(':');
+    let (hour_s, min_s) = match body.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => (body, "0"),
+    };
+    let Ok(hour) = hour_s.parse::<u32>() else {
+        return false;
+    };
+    let Ok(min) = min_s.parse::<u32>() else {
+        return false;
+    };
+    hour >= 1 && hour <= 12 && min < 60
 }
 
 fn looks_like_clock_token(token: &str) -> bool {
@@ -146,18 +172,7 @@ fn looks_like_clock_token(token: &str) -> bool {
     if !ampm {
         return false;
     }
-    let body = body.trim_end_matches(':');
-    let (hour_s, min_s) = match body.split_once(':') {
-        Some((h, m)) => (h, m),
-        None => (body, "0"),
-    };
-    let Ok(hour) = hour_s.parse::<u32>() else {
-        return false;
-    };
-    let Ok(min) = min_s.parse::<u32>() else {
-        return false;
-    };
-    hour >= 1 && hour <= 12 && min < 60
+    looks_like_hour_minute(body)
 }
 
 fn parse_hhmm(raw: &str) -> Option<NaiveTime> {
@@ -303,6 +318,14 @@ mod tests {
         assert_eq!(
             effective_food_time("dinner at 7pm pasta", Some("19:00")).as_deref(),
             Some("19:00")
+        );
+        assert_eq!(
+            effective_food_time("dinner at 7 pm pasta", Some("19:00")).as_deref(),
+            Some("19:00")
+        );
+        assert_eq!(
+            effective_food_time("snacks at 4:30 pm almonds", Some("16:30")).as_deref(),
+            Some("16:30")
         );
         assert_eq!(
             effective_food_time("lunch at 13:15 rice", Some("13:15")).as_deref(),
