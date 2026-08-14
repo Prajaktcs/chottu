@@ -189,13 +189,15 @@ fn utc_offset_duration_str(ts: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 /// Google Health MealType only allows BREAKFAST / LUNCH / DINNER / SNACK.
+/// Aligned with household meal windows: lunch ~12–13, snacks ~16–18, dinner ~20–21:30.
 fn meal_type_for_timestamp(ts: chrono::DateTime<chrono::Utc>) -> &'static str {
     use chrono::Timelike;
     let hour = ts.with_timezone(&chrono::Local).hour();
     match hour {
         5..=10 => "BREAKFAST",
         11..=14 => "LUNCH",
-        17..=21 => "DINNER",
+        15..=18 => "SNACK",
+        19..=22 => "DINNER",
         _ => "SNACK",
     }
 }
@@ -1069,17 +1071,22 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let dinner = Local
-            .with_ymd_and_hms(2026, 8, 2, 19, 0, 0)
+            .with_ymd_and_hms(2026, 8, 2, 20, 45, 0)
             .unwrap()
             .with_timezone(&chrono::Utc);
         let snack = Local
-            .with_ymd_and_hms(2026, 8, 2, 22, 0, 0)
+            .with_ymd_and_hms(2026, 8, 2, 17, 0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let late_snack = Local
+            .with_ymd_and_hms(2026, 8, 2, 23, 0, 0)
             .unwrap()
             .with_timezone(&chrono::Utc);
         assert_eq!(meal_type_for_timestamp(breakfast), "BREAKFAST");
         assert_eq!(meal_type_for_timestamp(lunch), "LUNCH");
         assert_eq!(meal_type_for_timestamp(dinner), "DINNER");
         assert_eq!(meal_type_for_timestamp(snack), "SNACK");
+        assert_eq!(meal_type_for_timestamp(late_snack), "SNACK");
     }
 
     #[test]

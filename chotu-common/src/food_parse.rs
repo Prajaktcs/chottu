@@ -1,11 +1,22 @@
 //! Resolve LLM-provided food log date/time into a local civil day + UTC instant.
 //!
 //! Relative phrases ("yesterday", "last Friday") are understood by the intent/LLM
-//! layer, which emits YYYY-MM-DD and optional HH:MM. This module only validates
-//! and converts those structured fields — it does not hardcode natural-language
-//! date vocabularies.
+//! layer, which emits YYYY-MM-DD and optional HH:MM. This module validates and
+//! converts those structured fields, and maps meal-of-day words (lunch / snacks /
+//! dinner) onto household time windows when no explicit clock time was spoken.
 
 use chrono::{Local, NaiveDate, NaiveTime, TimeZone, Utc};
+
+/// Midpoints of household meal windows (local 24h clock).
+///
+/// - Breakfast ≈ morning (kept for prompt parity)
+/// - Lunch: 12:00–13:00 → 12:30
+/// - Snacks: 16:00–18:00 → 17:00
+/// - Dinner: 20:00–21:30 → 20:45
+pub const MEAL_TIME_BREAKFAST: &str = "08:00";
+pub const MEAL_TIME_LUNCH: &str = "12:30";
+pub const MEAL_TIME_SNACK: &str = "17:00";
+pub const MEAL_TIME_DINNER: &str = "20:45";
 
 /// When a food log should be attributed (local civil day + UTC instant).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +66,98 @@ pub fn resolve_food_log_timing(
         timestamp,
         date_was_explicit,
     }
+}
+
+/// Prefer household meal windows when the utterance names a meal-of-day and does
+/// not also name an explicit clock time ("3pm", "19:00"). Otherwise keep the
+/// LLM-provided `HH:MM` (or `None`).
+///
+/// Call this with the *original* user text (before meal words are stripped from
+/// `food_description`).
+pub fn effective_food_time(utterance: &str, llm_food_time: Option<&str>) -> Option<String> {
+    let llm = llm_food_time
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    if utterance_has_explicit_clock(utterance) {
+        return llm;
+    }
+
+    if let Some(meal_hhmm) = meal_of_day_clock_time(utterance) {
+        return Some(meal_hhmm.to_string());
+    }
+
+    llm
+}
+
+/// Midpoint clock time for the first meal-of-day word in `utterance`, if any.
+pub fn meal_of_day_clock_time(utterance: &str) -> Option<&'static str> {
+    let lower = utterance.to_lowercase();
+    // Word-ish boundaries: avoid matching inside longer tokens.
+    let has = |word: &str| {
+        lower
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|t| t == word)
+    };
+
+    if has("breakfast") {
+        Some(MEAL_TIME_BREAKFAST)
+    } else if has("lunch") {
+        Some(MEAL_TIME_LUNCH)
+    } else if has("dinner") || has("supper") {
+        Some(MEAL_TIME_DINNER)
+    } else if has("snack") || has("snacks") {
+        Some(MEAL_TIME_SNACK)
+    } else {
+        None
+    }
+}
+
+fn utterance_has_explicit_clock(utterance: &str) -> bool {
+    let lower = utterance.to_lowercase();
+    for raw in lower.split_whitespace() {
+        let token = raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':');
+        if token.is_empty() {
+            continue;
+        }
+        if looks_like_clock_token(token) {
+            return true;
+        }
+    }
+    false
+}
+
+fn looks_like_clock_token(token: &str) -> bool {
+    let s = token.trim().to_lowercase().replace(' ', "");
+    if NaiveTime::parse_from_str(&s, "%H:%M").is_ok()
+        || NaiveTime::parse_from_str(&s, "%H:%M:%S").is_ok()
+    {
+        return true;
+    }
+
+    let (body, ampm) = if let Some(rest) = s.strip_suffix("am") {
+        (rest, true)
+    } else if let Some(rest) = s.strip_suffix("pm") {
+        (rest, true)
+    } else {
+        (s.as_str(), false)
+    };
+    if !ampm {
+        return false;
+    }
+    let body = body.trim_end_matches(':');
+    let (hour_s, min_s) = match body.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => (body, "0"),
+    };
+    let Ok(hour) = hour_s.parse::<u32>() else {
+        return false;
+    };
+    let Ok(min) = min_s.parse::<u32>() else {
+        return false;
+    };
+    hour >= 1 && hour <= 12 && min < 60
 }
 
 fn parse_hhmm(raw: &str) -> Option<NaiveTime> {
@@ -156,5 +259,59 @@ mod tests {
         let local = timing.timestamp.with_timezone(&Local);
         assert_eq!(local.hour(), 8);
         assert_eq!(local.minute(), 0);
+    }
+
+    #[test]
+    fn meal_of_day_maps_to_window_midpoints() {
+        assert_eq!(
+            meal_of_day_clock_time("had pasta for lunch"),
+            Some(MEAL_TIME_LUNCH)
+        );
+        assert_eq!(
+            meal_of_day_clock_time("snacks: almonds"),
+            Some(MEAL_TIME_SNACK)
+        );
+        assert_eq!(
+            meal_of_day_clock_time("yesterday's dinner was curry"),
+            Some(MEAL_TIME_DINNER)
+        );
+        assert_eq!(
+            meal_of_day_clock_time("supper leftovers"),
+            Some(MEAL_TIME_DINNER)
+        );
+        assert_eq!(meal_of_day_clock_time("just some pasta"), None);
+    }
+
+    #[test]
+    fn effective_food_time_prefers_meal_window_over_llm() {
+        assert_eq!(
+            effective_food_time("lunch was pasta", Some("12:00")).as_deref(),
+            Some(MEAL_TIME_LUNCH)
+        );
+        assert_eq!(
+            effective_food_time("snacks almonds", None).as_deref(),
+            Some(MEAL_TIME_SNACK)
+        );
+        assert_eq!(
+            effective_food_time("dinner curry", Some("19:00")).as_deref(),
+            Some(MEAL_TIME_DINNER)
+        );
+    }
+
+    #[test]
+    fn explicit_clock_keeps_llm_time() {
+        assert_eq!(
+            effective_food_time("dinner at 7pm pasta", Some("19:00")).as_deref(),
+            Some("19:00")
+        );
+        assert_eq!(
+            effective_food_time("lunch at 13:15 rice", Some("13:15")).as_deref(),
+            Some("13:15")
+        );
+        assert_eq!(
+            effective_food_time("just pasta", Some("14:00")).as_deref(),
+            Some("14:00")
+        );
+        assert_eq!(effective_food_time("just pasta", None), None);
     }
 }

@@ -21,7 +21,10 @@ pub use due_parse::{
     is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
     split_task_add_args, ParsedDue,
 };
-pub use food_parse::{resolve_food_log_timing, FoodLogTiming};
+pub use food_parse::{
+    effective_food_time, meal_of_day_clock_time, resolve_food_log_timing, FoodLogTiming,
+    MEAL_TIME_BREAKFAST, MEAL_TIME_DINNER, MEAL_TIME_LUNCH, MEAL_TIME_SNACK,
+};
 pub use family::{
     config_path, default_member_id, ensure_food_mutation_allowed, has_any_telegram_link,
     has_telegram_delivery, health_refresh_token_env_key, is_telegram_chat_allowed, load_config,

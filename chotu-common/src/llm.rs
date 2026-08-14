@@ -353,7 +353,7 @@ Intents:\
 - MEMORY: recall/search over journals, newsletter digests, personal references, or past tasks; put the question in memory_query (e.g. \"what was that Thai recipe\", \"did I write about the interview\", \"find my note on homelab\").\
 - PLAN: weekly training / workout plan; set plan_regenerate true for regenerate / new plan / redo plan. Examples: \"what's today's workout\", \"show my training plan\", \"regenerate plan\", \"beach body plan\".\
 - SYNC: pull Google Health / nutrition sync now.\
-- FOOD: log a meal; put member_id when named and the meal text in food_description (food only). When the user names when they ate it, resolve to food_date (YYYY-MM-DD) and optional food_time (HH:MM 24h local) using Today's local date from the user message — e.g. \"yesterday\" / \"last night\" / \"Friday\" become concrete dates; \"dinner\" ≈ 19:00, \"breakfast\" ≈ 08:00, \"lunch\" ≈ 12:30. Omit food_date/food_time when logging for now/today with no specific meal time.\
+- FOOD: log a meal; put member_id when named and the meal text in food_description (food only). When the user names when they ate it, resolve to food_date (YYYY-MM-DD) and optional food_time (HH:MM 24h local) using Today's local date from the user message — e.g. \"yesterday\" / \"last night\" / \"Friday\" become concrete dates; meal-of-day windows: breakfast≈08:00, lunch≈12:30 (12:00–13:00), snack(s)≈17:00 (16:00–18:00), dinner/supper≈20:45 (20:00–21:30). Prefer an explicit clock time when the user gave one. Omit food_date/food_time when logging for now/today with no specific meal time.\
 - NETWORTH: portfolio / net worth questions.\
 - MONTHLY: monthly spending summary; set month as YYYY-MM if given.\
 - BUDGET: category spend budgets / how much left this month (e.g. \"budget\", \"how's food budget\", \"am I over on shopping\").\
@@ -844,7 +844,7 @@ You extract food-log fields from a short user message.\
 Return:\
 - food_description: the food/meal text only (no date/time framing words).\
 - food_date: YYYY-MM-DD when the user named a day (resolve relative phrases using Today's local date); omit or null when logging for today / unspecified.\
-- food_time: HH:MM 24-hour local when the user named a clock time or meal-of-day (breakfast≈08:00, lunch≈12:30, dinner/supper≈19:00, snack≈15:00); omit when unspecified.\
+- food_time: HH:MM 24-hour local when the user named a clock time or meal-of-day (breakfast≈08:00, lunch≈12:30 for 12:00–13:00, snack(s)≈17:00 for 16:00–18:00, dinner/supper≈20:45 for 20:00–21:30); prefer an explicit clock time when given; omit when unspecified.\
 \
 Never invent food that was not mentioned. Never leave relative words in food_date — always YYYY-MM-DD.\
 ";
