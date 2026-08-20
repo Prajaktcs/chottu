@@ -396,6 +396,67 @@ impl Default for InvestmentPhilosophy {
     }
 }
 
+/// A single Brené-style core value with a personal definition.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoreValue {
+    pub name: String,
+    pub definition: String,
+}
+
+/// Personal operating values used to train evening reflection (alongside health logs).
+/// Keep the anchor list to two; satellites (courage, humility, etc.) live under `practices`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoreValues {
+    /// Exactly two preferred; more than two weakens the compass.
+    pub anchors: Vec<CoreValue>,
+    /// How integrity / courage / humility relate (tools, not listed as anchors).
+    #[serde(default)]
+    pub integrity_note: Option<String>,
+    /// Daily micro-practices and evening check-in lenses.
+    #[serde(default)]
+    pub practices: Vec<String>,
+}
+
+impl Default for CoreValues {
+    fn default() -> Self {
+        Self {
+            anchors: vec![
+                CoreValue {
+                    name: "Growth".to_string(),
+                    definition: "Valuing the state of not knowing and becoming a better person \
+                        than yesterday; noticing ego flares (defensiveness, needing to be right) \
+                        and choosing to learn anyway."
+                        .to_string(),
+                },
+                CoreValue {
+                    name: "Contribution".to_string(),
+                    definition: "Putting ego aside to serve the situation and the people in it — \
+                        macro impact, daily climate of a room, and lifting others. Speaking up \
+                        when silence withholds a needed perspective is an act of contribution."
+                        .to_string(),
+                },
+            ],
+            integrity_note: Some(
+                "Integrity is not a listed value — it is the alignment sensor between actions \
+                 and the two anchors. Courage fuels Growth; humility guards Contribution."
+                    .to_string(),
+            ),
+            practices: vec![
+                "Evening: Did I leave anything unspoken that sits heavy in my body? What stopped me?"
+                    .to_string(),
+                "Growth: Where did I choose 'I don't know / let's figure it out' over looking smart?"
+                    .to_string(),
+                "Growth: Ego autopsy — what was ego protecting (competence, status, comfort)?"
+                    .to_string(),
+                "Contribution: Did I bring a brick (clarify, insight, support) rather than perform?"
+                    .to_string(),
+                "Contribution via voice: when hesitation hit, did I reframe silence as withholding?"
+                    .to_string(),
+            ],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BucketHolding {
     pub ticker: String,
@@ -428,6 +489,9 @@ pub struct SpendBudgets {
 pub struct AppConfig {
     pub family: FamilySection,
     pub investment_philosophy: Option<InvestmentPhilosophy>,
+    /// Personal core values that shape evening reflection prompts (with health logs).
+    #[serde(default)]
+    pub core_values: Option<CoreValues>,
     pub target_allocation: Option<TargetAllocation>,
     pub spend_budgets: Option<SpendBudgets>,
     pub currency: Option<String>,
@@ -449,6 +513,7 @@ impl Default for AppConfig {
                 }],
             },
             investment_philosophy: Some(InvestmentPhilosophy::default()),
+            core_values: Some(CoreValues::default()),
             target_allocation: None,
             spend_budgets: None,
             currency: None,

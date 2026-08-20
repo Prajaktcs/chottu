@@ -55,7 +55,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
 - **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals, and training (outcome countdown + today’s planned session) — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
-- **Evening reflection**: scheduled or `/reflect` — trains toward your `core_values` in `config.yaml` (default Growth + Contribution), optionally grounded in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
+- **Evening reflection**: scheduled or `/reflect` — grounds in today’s health (nutrition, steps, sleep, energy) and spend logs, while training toward your `core_values` in `config.yaml` (default Growth + Contribution); replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
 - Local embeddings (`nomic-embed-text` via Ollama) over journals, newsletter digests, personal references, and tasks.

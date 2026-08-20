@@ -32,7 +32,8 @@ pub use family::{
     has_telegram_delivery, health_refresh_token_env_key, is_telegram_chat_allowed, load_config,
     member_for_telegram_chat, resolve_health_refresh_token, set_member_telegram_chat_id,
     telegram_chat_for_member, telegram_delivery_targets, AppConfig, FamilyMember, FamilySection,
-    InvestmentPhilosophy, TargetAllocation, AllocationBucket, BucketHolding, SpendBudgets,
+    InvestmentPhilosophy, CoreValue, CoreValues, TargetAllocation, AllocationBucket, BucketHolding,
+    SpendBudgets,
     fetch_exchange_rates, CalendarConfig, FitnessEquipment, FitnessFocus, FitnessGoals,
     FitnessWeeklyTargets, NutritionGoals,
 };
