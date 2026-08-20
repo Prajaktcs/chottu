@@ -160,12 +160,13 @@ pub async fn build_nutrition_trend_reports(
                 protein_trend,
                 steps_trend,
             );
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
             let ctx = crate::coach_enrich::enrich_coach_context(
                 pool,
                 config,
                 &member.id,
                 ctx,
-                None,
+                crate::coach_enrich::CoachEnrichOpts::for_trends(&start_date, &today),
             )
             .await;
             append_coach_tip(llm, &ctx, &mut msg).await;
