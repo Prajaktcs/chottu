@@ -457,6 +457,29 @@ impl Default for CoreValues {
     }
 }
 
+impl CoreValues {
+    /// Soft checks for a Brené-style two-anchor setup (does not mutate).
+    pub fn validation_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let n = self.anchors.len();
+        if n != 2 {
+            warnings.push(format!(
+                "core_values.anchors has {} entries; exactly two preferred (weakens the compass)",
+                n
+            ));
+        }
+        for (i, a) in self.anchors.iter().enumerate() {
+            if a.name.trim().is_empty() {
+                warnings.push(format!("core_values.anchors[{i}].name is empty"));
+            }
+            if a.definition.trim().is_empty() {
+                warnings.push(format!("core_values.anchors[{i}].definition is empty"));
+            }
+        }
+        warnings
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BucketHolding {
     pub ticker: String,
@@ -773,6 +796,11 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
                             }
                         }
                     }
+                    if let Some(cv) = config.core_values.as_ref() {
+                        for w in cv.validation_warnings() {
+                            eprintln!("Config warning: {}", w);
+                        }
+                    }
                     println!("Successfully loaded configuration from {:?}", path_ref);
                     config
                 }
@@ -1041,6 +1069,24 @@ family:
         let warnings = goals.validation_warnings("alex");
         assert!(warnings.iter().any(|w| w.contains("target_date")));
         assert!(warnings.iter().any(|w| w.contains("sessions_per_week")));
+    }
+
+    #[test]
+    fn test_core_values_validation_warnings() {
+        assert!(CoreValues::default().validation_warnings().is_empty());
+
+        let bad = CoreValues {
+            anchors: vec![CoreValue {
+                name: "   ".into(),
+                definition: "".into(),
+            }],
+            integrity_note: None,
+            practices: vec![],
+        };
+        let warnings = bad.validation_warnings();
+        assert!(warnings.iter().any(|w| w.contains("exactly two")));
+        assert!(warnings.iter().any(|w| w.contains("name is empty")));
+        assert!(warnings.iter().any(|w| w.contains("definition is empty")));
     }
 
     #[test]

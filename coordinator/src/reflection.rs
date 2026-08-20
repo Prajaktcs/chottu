@@ -125,6 +125,14 @@ pub async fn generate_reflection_prompt(
         logs_summary.push_str("No health telemetry logs for any family member today.\n");
     } else {
         for h in healths {
+            let sleep = h
+                .sleep_hours
+                .map(|s| format!("{s}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            let energy = h
+                .perceived_energy
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "N/A".to_string());
             logs_summary.push_str(&format!(
                 "- Member: {}\n  * Nutrition: {} kcal ingested (Protein: {}g, Carbs: {}g, Fats: {}g)\n  * Activity: {} steps, {} active calories burned\n  * Sleep: {} hrs\n  * Energy Level: {}\n",
                 h.family_member_id,
@@ -134,8 +142,8 @@ pub async fn generate_reflection_prompt(
                 h.fats_grams,
                 h.step_count,
                 h.active_calories_burned,
-                h.sleep_hours.unwrap_or(0.0),
-                h.perceived_energy.map(|e| e.to_string()).unwrap_or("N/A".to_string())
+                sleep,
+                energy
             ));
         }
     }
@@ -283,11 +291,14 @@ pub async fn save_reflection(
             "    active_calories_burned: {}\n",
             h.active_calories_burned
         ));
-        content.push_str(&format!("    sleep: {}\n", h.sleep_hours.unwrap_or(0.0)));
-        content.push_str(&format!(
-            "    perceived_energy: {}\n",
-            h.perceived_energy.unwrap_or(0)
-        ));
+        match h.sleep_hours {
+            Some(s) => content.push_str(&format!("    sleep: {}\n", s)),
+            None => content.push_str("    sleep: null\n"),
+        }
+        match h.perceived_energy {
+            Some(e) => content.push_str(&format!("    perceived_energy: {}\n", e)),
+            None => content.push_str("    perceived_energy: null\n"),
+        }
     }
     content.push_str("---\n\n");
 
