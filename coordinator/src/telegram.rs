@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use sqlx::SqlitePool;
 use teloxide::prelude::*;
+use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::RwLock;
 
@@ -358,15 +359,17 @@ pub async fn start_telegram_bot(
     // Background catch-up for local memory RAG index (journals / digests / refs / tasks).
     spawn_background_reindex(pool.clone());
 
-    let handler = dptree::entry().branch(
-        Update::filter_message()
-            .branch(
-                dptree::entry()
-                    .filter_command::<Command>()
-                    .endpoint(handle_command),
-            )
-            .branch(dptree::endpoint(handle_message)),
-    );
+    let handler = dptree::entry()
+        .branch(
+            Update::filter_message()
+                .branch(
+                    dptree::entry()
+                        .filter_command::<Command>()
+                        .endpoint(handle_command),
+                )
+                .branch(dptree::endpoint(handle_message)),
+        )
+        .branch(Update::filter_callback_query().endpoint(handle_callback_query));
 
     println!("Telegram Bot: starting update loop...");
     Dispatcher::builder(bot, handler)
@@ -384,6 +387,408 @@ pub async fn start_telegram_bot(
         .await;
 
     Ok(())
+}
+
+async fn handle_callback_query(
+    bot: Bot,
+    q: CallbackQuery,
+    pool: SqlitePool,
+    shared_config: SharedConfig,
+) -> Result<(), teloxide::RequestError> {
+    let Some(data) = q.data.as_deref() else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+
+    let Some(msg) = q.message.as_ref() else {
+        bot.answer_callback_query(q.id)
+            .text("Message too old — use /tasks")
+            .await?;
+        return Ok(());
+    };
+    let chat_id = msg.chat.id;
+
+    let config = shared_config.read().await.clone();
+    if !is_telegram_chat_allowed(&config, chat_id.0) {
+        bot.answer_callback_query(q.id)
+            .text("Chat not linked — send /link first")
+            .show_alert(true)
+            .await?;
+        return Ok(());
+    }
+
+    let Some((action, surface, task_id)) = parse_task_callback(data) else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+
+    match action {
+        TaskCallbackAction::Done => {
+            match complete_task_by_id(&pool, task_id).await {
+                TaskMutateOutcome::Done { title, already } => {
+                    let toast = if already {
+                        "Already done"
+                    } else {
+                        "Marked done"
+                    };
+                    bot.answer_callback_query(&q.id).text(toast).await?;
+                    if already {
+                        return Ok(());
+                    }
+                    sync_calendar_after_complete(&pool, &config, task_id).await;
+                    let note = format!("✅ Marked done: _{}_", escape_md_basic(&title));
+                    update_message_after_task_action(&bot, msg, task_id, &note, surface).await?;
+                    refresh_task_memory(&pool, task_id).await;
+                }
+                TaskMutateOutcome::NotFound => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Task not found")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::DbError => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Database error")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::Snoozed { .. } => unreachable!(),
+            }
+        }
+        TaskCallbackAction::Snooze => {
+            match snooze_task_by_id(&pool, task_id, 1).await {
+                TaskMutateOutcome::Snoozed { title, due } => {
+                    let calendar_note =
+                        sync_calendar_after_snooze(&pool, &config, task_id, &due).await;
+                    let toast = match calendar_note {
+                        Some("📅 calendar updated") => format!("Snoozed until {due} · calendar"),
+                        Some(other) => format!("Snoozed until {due} · {other}"),
+                        None => format!("Snoozed until {due}"),
+                    };
+                    bot.answer_callback_query(&q.id).text(toast).await?;
+                    let mut note = format!(
+                        "😴 Snoozed until *{}*: _{}_",
+                        due,
+                        escape_md_basic(&title)
+                    );
+                    if let Some(cal_note) = calendar_note {
+                        note.push_str(&format!(" · _{}_", cal_note));
+                    }
+                    update_message_after_task_action(&bot, msg, task_id, &note, surface).await?;
+                    refresh_task_memory(&pool, task_id).await;
+                }
+                TaskMutateOutcome::NotFound => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Task not found")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::DbError => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Database error")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::Done { .. } => unreachable!(),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskCallbackAction {
+    Done,
+    Snooze,
+}
+
+/// Where the button was attached — drives whether we rewrite the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskCallbackSurface {
+    /// Reminder or create confirmation: replace text in place.
+    Single,
+    /// `/tasks` list: keep list text, drop that task's button row.
+    List,
+}
+
+fn parse_task_callback(data: &str) -> Option<(TaskCallbackAction, TaskCallbackSurface, &str)> {
+    // Format: t:{d|s}:{1|m}:{uuid} (callback_data max 64 bytes).
+    let rest = data.strip_prefix("t:")?;
+    let (action_raw, rest) = rest.split_once(':')?;
+    let (surface_raw, task_id) = rest.split_once(':')?;
+    if task_id.len() < 8 || task_id.len() > 40 {
+        return None;
+    }
+    if !task_id
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        return None;
+    }
+    let action = match action_raw {
+        "d" => TaskCallbackAction::Done,
+        "s" => TaskCallbackAction::Snooze,
+        _ => return None,
+    };
+    let surface = match surface_raw {
+        "1" => TaskCallbackSurface::Single,
+        "m" => TaskCallbackSurface::List,
+        _ => return None,
+    };
+    Some((action, surface, task_id))
+}
+
+fn task_callback_data(action: char, surface: TaskCallbackSurface, task_id: &str) -> String {
+    let surface_tag = match surface {
+        TaskCallbackSurface::Single => '1',
+        TaskCallbackSurface::List => 'm',
+    };
+    format!("t:{}:{}:{}", action, surface_tag, task_id)
+}
+
+fn task_action_keyboard(task_id: &str, title: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![task_action_row(
+        task_id,
+        title,
+        TaskCallbackSurface::Single,
+    )])
+}
+
+fn task_list_keyboard(rows: &[(String, String)]) -> InlineKeyboardMarkup {
+    // Cap buttons so the keyboard stays usable on mobile.
+    InlineKeyboardMarkup::new(
+        rows.iter()
+            .take(15)
+            .map(|(id, title)| task_action_row(id, title, TaskCallbackSurface::List))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn task_action_row(
+    task_id: &str,
+    title: &str,
+    surface: TaskCallbackSurface,
+) -> Vec<InlineKeyboardButton> {
+    let label = truncate_chars(title.trim(), 28);
+    let done_label = if label.is_empty() {
+        "✅ Done".to_string()
+    } else {
+        format!("✅ {}", label)
+    };
+    vec![
+        InlineKeyboardButton::callback(
+            done_label,
+            task_callback_data('d', surface, task_id),
+        ),
+        InlineKeyboardButton::callback(
+            "😴 +1d",
+            task_callback_data('s', surface, task_id),
+        ),
+    ]
+}
+
+fn strip_task_buttons(
+    markup: &InlineKeyboardMarkup,
+    task_id: &str,
+) -> InlineKeyboardMarkup {
+    let rows: Vec<Vec<InlineKeyboardButton>> = markup
+        .inline_keyboard
+        .iter()
+        .filter(|row| {
+            !row.iter().any(|btn| match &btn.kind {
+                InlineKeyboardButtonKind::CallbackData(d) => {
+                    d.starts_with("t:") && d.ends_with(task_id)
+                }
+                _ => false,
+            })
+        })
+        .cloned()
+        .collect();
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// After a button action: single-task surfaces rewrite the message; list
+/// surfaces drop that task's keyboard row and send a short confirmation.
+async fn update_message_after_task_action(
+    bot: &Bot,
+    msg: &Message,
+    task_id: &str,
+    note_md: &str,
+    surface: TaskCallbackSurface,
+) -> Result<(), teloxide::RequestError> {
+    if surface == TaskCallbackSurface::Single {
+        bot.edit_message_text(msg.chat.id, msg.id, note_md)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .reply_markup(InlineKeyboardMarkup::default())
+            .await?;
+        return Ok(());
+    }
+
+    if let Some(markup) = msg.reply_markup() {
+        let next = strip_task_buttons(markup, task_id);
+        if next.inline_keyboard.is_empty() {
+            bot.edit_message_reply_markup(msg.chat.id, msg.id)
+                .reply_markup(InlineKeyboardMarkup::default())
+                .await?;
+        } else {
+            bot.edit_message_reply_markup(msg.chat.id, msg.id)
+                .reply_markup(next)
+                .await?;
+        }
+    }
+
+    bot.send_message(msg.chat.id, note_md)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum TaskMutateOutcome {
+    Done { title: String, already: bool },
+    Snoozed { title: String, due: String },
+    NotFound,
+    DbError,
+}
+
+async fn load_task_title_status(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String)>("SELECT title, status FROM tasks WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+}
+
+async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to load task {}: {:?}", task_id, e);
+            return TaskMutateOutcome::DbError;
+        }
+    };
+    let Some((title, status)) = row else {
+        return TaskMutateOutcome::NotFound;
+    };
+    if status == "done" {
+        return TaskMutateOutcome::Done {
+            title,
+            already: true,
+        };
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(task_id)
+        .execute(pool)
+        .await
+    {
+        eprintln!("Failed to mark task done: {:?}", e);
+        return TaskMutateOutcome::DbError;
+    }
+
+    TaskMutateOutcome::Done {
+        title,
+        already: false,
+    }
+}
+
+async fn snooze_task_by_id(pool: &SqlitePool, task_id: &str, days: i64) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to load task {}: {:?}", task_id, e);
+            return TaskMutateOutcome::DbError;
+        }
+    };
+    let Some((title, _)) = row else {
+        return TaskMutateOutcome::NotFound;
+    };
+
+    let due = (chrono::Local::now().date_naive() + chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let due_at = parse_due_phrase(&due).map(|p| p.due_at);
+
+    if let Err(e) = sqlx::query(
+        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(&due)
+    .bind(due_at.as_deref())
+    .bind(&now)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    {
+        eprintln!("Failed to snooze task: {:?}", e);
+        return TaskMutateOutcome::DbError;
+    }
+
+    TaskMutateOutcome::Snoozed { title, due }
+}
+
+#[cfg(test)]
+mod task_button_tests {
+    use super::*;
+
+    #[test]
+    fn parse_task_callback_accepts_done_and_snooze() {
+        let id = "a3f2b91c-1111-2222-3333-444455556666";
+        let done = format!("t:d:1:{id}");
+        let (action, surface, parsed) = parse_task_callback(&done).unwrap();
+        assert_eq!(action, TaskCallbackAction::Done);
+        assert_eq!(surface, TaskCallbackSurface::Single);
+        assert_eq!(parsed, id);
+        let snooze = format!("t:s:m:{id}");
+        let (action, surface, parsed) = parse_task_callback(&snooze).unwrap();
+        assert_eq!(action, TaskCallbackAction::Snooze);
+        assert_eq!(surface, TaskCallbackSurface::List);
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn parse_task_callback_rejects_junk() {
+        assert!(parse_task_callback("done:abc").is_none());
+        assert!(parse_task_callback("t:x:1:abcdef12").is_none());
+        assert!(parse_task_callback("t:d:1:short").is_none());
+        assert!(parse_task_callback("t:d:1:not a uuid!!!").is_none());
+        assert!(parse_task_callback("t:d:x:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_none());
+        // Legacy format without surface tag.
+        assert!(parse_task_callback("t:d:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_none());
+    }
+
+    #[test]
+    fn strip_task_buttons_removes_matching_row() {
+        let id1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let id2 = "11111111-2222-3333-4444-555555555555";
+        let markup = task_list_keyboard(&[
+            (id1.to_string(), "milk".into()),
+            (id2.to_string(), "dentist".into()),
+        ]);
+        assert_eq!(markup.inline_keyboard.len(), 2);
+        let next = strip_task_buttons(&markup, id1);
+        assert_eq!(next.inline_keyboard.len(), 1);
+        let cb = match &next.inline_keyboard[0][0].kind {
+            InlineKeyboardButtonKind::CallbackData(d) => d.as_str(),
+            _ => panic!("expected callback"),
+        };
+        assert!(cb.contains(id2));
+        assert!(cb.contains(":m:"));
+    }
+
+    #[test]
+    fn task_callback_data_fits_telegram_limit() {
+        let id = "a3f2b91c-1111-2222-3333-444455556666"; // 36 chars
+        let done = task_callback_data('d', TaskCallbackSurface::List, id);
+        let snooze = task_callback_data('s', TaskCallbackSurface::Single, id);
+        assert!(done.len() <= 64, "done callback {} bytes", done.len());
+        assert!(snooze.len() <= 64, "snooze callback {} bytes", snooze.len());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1869,6 +2274,7 @@ async fn handle_tasks(
     }
 
     let mut msg = format!("📋 *Tasks* ({}, {})\n\n", label, rows.len());
+    let mut actionable: Vec<(String, String)> = Vec::new();
     for row in &rows {
         let short_id: String = row.id.chars().take(8).collect();
         let due = row
@@ -1897,19 +2303,28 @@ async fn handle_tasks(
             assignee,
             subject
         ));
+        if row.status == "open" || row.status == "snoozed" {
+            actionable.push((row.id.clone(), row.title.clone()));
+        }
     }
 
     if label == "open" || label == "open/snoozed" || label == "snoozed" {
         msg.push_str(
-            "\n_Actions:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all|all confirm>` · \
+            "\n_Tap ✅ / 😴 below, or:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all|all confirm>` · \
              `/tasks snooze <id> [days]` · `/tasks reassign <id> <member>` · `/tasks open <id>`\n\
              _Dismiss email tasks:_ reply `unactionable` to the original reminder.",
         );
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
+    let mut send = bot
+        .send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::Markdown);
+    if !actionable.is_empty()
+        && (label == "open" || label == "open/snoozed" || label == "snoozed")
+    {
+        send = send.reply_markup(task_list_keyboard(&actionable));
+    }
+    send.await?;
 
     Ok(())
 }
@@ -2172,6 +2587,7 @@ async fn create_manual_task(
 
     bot.send_message(chat_id, msg)
         .parse_mode(teloxide::types::ParseMode::Markdown)
+        .reply_markup(task_action_keyboard(&id, &title))
         .await?;
 
     refresh_task_memory(pool, &id).await;
@@ -2232,13 +2648,14 @@ async fn poll_due_task_reminders(
 
         let msg = format!(
             "⏰ *Reminder*\n`{}` {}\n_Due {}_\n\
-             `/tasks complete {}` · `/tasks snooze {}`",
+             Tap below, or `/tasks complete {}` · `/tasks snooze {}`",
             short_id,
             escape_md_basic(&title),
             escape_md_basic(&when),
             short_id,
             short_id
         );
+        let keyboard = task_action_keyboard(&id, &title);
 
         let targets: Vec<i64> = match assigned_to.as_deref() {
             Some(mid) => match telegram_chat_for_member(config, mid) {
@@ -2253,6 +2670,7 @@ async fn poll_due_task_reminders(
             if let Err(e) = bot
                 .send_message(ChatId(*cid), msg.clone())
                 .parse_mode(teloxide::types::ParseMode::Markdown)
+                .reply_markup(keyboard.clone())
                 .await
             {
                 eprintln!(
@@ -2294,50 +2712,34 @@ async fn mark_task_complete(
     config: &AppConfig,
     id_prefix: &str,
 ) -> Result<(), teloxide::RequestError> {
-    let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, _title, _status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
 
-    if status == "done" {
-        bot.send_message(
-            chat_id,
-            format!("ℹ️ Task already done: _{}_", escape_md_basic(&title)),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
-        return Ok(());
-    }
-
-    let cal = load_task_calendar_link(pool, &id).await;
-
-    let now = chrono::Utc::now().to_rfc3339();
-    // Keep calendar_event_id until Google delete succeeds so failed cleanup can retry.
-    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&id)
-        .execute(pool)
-        .await
-    {
-        eprintln!("Failed to mark task done: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error updating task.")
-            .await?;
-        return Ok(());
-    }
-
-    if let Some(ref link) = cal {
-        if delete_linked_calendar_event(config, link).await {
-            clear_task_calendar_event_id(pool, &id).await;
+            match complete_task_by_id(pool, &id).await {
+        TaskMutateOutcome::Done { title, already } => {
+            let msg = if already {
+                format!("ℹ️ Task already done: _{}_", escape_md_basic(&title))
+            } else {
+                format!("✅ Marked done: _{}_", escape_md_basic(&title))
+            };
+            if !already {
+                sync_calendar_after_complete(pool, config, &id).await;
+                refresh_task_memory(pool, &id).await;
+            }
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
         }
+        TaskMutateOutcome::NotFound => {
+            bot.send_message(chat_id, "⚠️ Task not found.").await?;
+        }
+        TaskMutateOutcome::DbError => {
+            bot.send_message(chat_id, "❌ Database error updating task.")
+                .await?;
+        }
+        TaskMutateOutcome::Snoozed { .. } => unreachable!(),
     }
-
-    bot.send_message(
-        chat_id,
-        format!("✅ Marked done: _{}_", escape_md_basic(&title)),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
-    .await?;
-
-    refresh_task_memory(pool, &id).await;
     Ok(())
 }
 
@@ -2473,66 +2875,35 @@ async fn snooze_task(
     id_prefix: &str,
     days: i64,
 ) -> Result<(), teloxide::RequestError> {
-    let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
 
-    let due = (chrono::Local::now().date_naive() + chrono::Duration::days(days))
-        .format("%Y-%m-%d")
-        .to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    // Date-only snooze → local 09:00 that day (same default as create).
-    let due_at = parse_due_phrase(&due).map(|p| p.due_at);
-    let cal = load_task_calendar_link(pool, &id).await;
-
-    if let Err(e) = sqlx::query(
-        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(&due)
-    .bind(due_at.as_deref())
-    .bind(&now)
-    .bind(&id)
-    .execute(pool)
-    .await
-    {
-        eprintln!("Failed to snooze task: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error snoozing task.")
-            .await?;
-        return Ok(());
-    }
-
-    let mut calendar_note: Option<&'static str> = None;
-    if let (Some(ref link), Some(ref at)) = (&cal, &due_at) {
-        if link.calendar_event_id.is_some() {
-            match reschedule_linked_calendar_event(config, pool, &id, link, at).await {
-                CalendarRescheduleOutcome::Updated => {
-                    calendar_note = Some("📅 calendar updated")
-                }
-                CalendarRescheduleOutcome::NoOp => {}
-                CalendarRescheduleOutcome::StaleCleared => {
-                    calendar_note = Some("calendar event was already gone")
-                }
-                CalendarRescheduleOutcome::Failed => {
-                    calendar_note = Some("calendar update failed")
-                }
+    match snooze_task_by_id(pool, &id, days).await {
+        TaskMutateOutcome::Snoozed { title, due } => {
+            let calendar_note = sync_calendar_after_snooze(pool, config, &id, &due).await;
+            let mut msg = format!(
+                "😴 Snoozed until *{}*: _{}_",
+                due,
+                escape_md_basic(&title)
+            );
+            if let Some(note) = calendar_note {
+                msg.push_str(&format!(" · _{}_", note));
             }
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            refresh_task_memory(pool, &id).await;
         }
+        TaskMutateOutcome::NotFound => {
+            bot.send_message(chat_id, "⚠️ Task not found.").await?;
+        }
+        TaskMutateOutcome::DbError => {
+            bot.send_message(chat_id, "❌ Database error snoozing task.")
+                .await?;
+        }
+        TaskMutateOutcome::Done { .. } => unreachable!(),
     }
-
-    let mut msg = format!(
-        "😴 Snoozed until *{}*: _{}_",
-        due,
-        escape_md_basic(&title)
-    );
-    if let Some(note) = calendar_note {
-        msg.push_str(&format!(" · _{}_", note));
-    }
-
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
-
-    refresh_task_memory(pool, &id).await;
     Ok(())
 }
 
@@ -2618,6 +2989,41 @@ async fn clear_task_calendar_event_id(pool: &SqlitePool, task_id: &str) {
             "Telegram Bot: failed to clear calendar_event_id for {}: {:?}",
             task_id, e
         );
+    }
+}
+
+/// Delete the linked Google event after a task is marked done; clear the stored
+/// id only when delete succeeds (404 counts as success).
+async fn sync_calendar_after_complete(pool: &SqlitePool, config: &AppConfig, task_id: &str) {
+    let Some(link) = load_task_calendar_link(pool, task_id).await else {
+        return;
+    };
+    if link.calendar_event_id.is_none() {
+        return;
+    }
+    if delete_linked_calendar_event(config, &link).await {
+        clear_task_calendar_event_id(pool, task_id).await;
+    }
+}
+
+/// Reschedule the linked Google event after a snooze. Returns an optional
+/// user-facing note for the confirmation message.
+async fn sync_calendar_after_snooze(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    task_id: &str,
+    due_yyyy_mm_dd: &str,
+) -> Option<&'static str> {
+    let link = load_task_calendar_link(pool, task_id).await?;
+    if link.calendar_event_id.is_none() {
+        return None;
+    }
+    let due_at = parse_due_phrase(due_yyyy_mm_dd)?.due_at;
+    match reschedule_linked_calendar_event(config, pool, task_id, &link, &due_at).await {
+        CalendarRescheduleOutcome::Updated => Some("📅 calendar updated"),
+        CalendarRescheduleOutcome::NoOp => None,
+        CalendarRescheduleOutcome::StaleCleared => Some("calendar event was already gone"),
+        CalendarRescheduleOutcome::Failed => Some("calendar update failed"),
     }
 }
 
