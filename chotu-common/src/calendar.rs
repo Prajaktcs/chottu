@@ -255,6 +255,58 @@ impl GoogleCalendarClient {
             .ok_or(CalendarError::MissingEventId)
     }
 
+    /// Updates an existing event's start/end on the primary calendar (PATCH).
+    pub async fn update_event_times(
+        &self,
+        event_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+        timezone: &str,
+    ) -> Result<(), CalendarError> {
+        let access_token = self.get_access_token().await?;
+
+        let body = serde_json::json!({
+            "start": {
+                "dateTime": start.to_rfc3339(),
+                "timeZone": timezone,
+            },
+            "end": {
+                "dateTime": end.to_rfc3339(),
+                "timeZone": timezone,
+            },
+        });
+
+        let url = format!(
+            "https://www.googleapis.com/calendar/v3/calendars/primary/events/{}",
+            event_id
+        );
+
+        let resp = self
+            .http
+            .patch(&url)
+            .bearer_auth(&access_token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|source| CalendarError::Request {
+                operation: "update-event",
+                source,
+            })?;
+
+        // 404 = already gone — caller can decide whether to clear the stored id.
+        if resp.status().is_success() {
+            return Ok(());
+        }
+
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        Err(CalendarError::Api {
+            operation: "update-event",
+            status: status.as_u16(),
+            body: text,
+        })
+    }
+
     /// Deletes an event by ID from the primary calendar.
     pub async fn delete_event(&self, event_id: &str) -> Result<(), CalendarError> {
         let access_token = self.get_access_token().await?;
@@ -366,9 +418,28 @@ pub async fn schedule_at(
         .await
 }
 
+/// Moves an existing timed block to a new `start` UTC, lasting `duration_minutes`.
+pub async fn reschedule_at(
+    client: &GoogleCalendarClient,
+    event_id: &str,
+    start: DateTime<Utc>,
+    duration_minutes: i64,
+) -> Result<(), CalendarError> {
+    use chrono::Duration;
+
+    let timezone = default_calendar_timezone();
+    let end = start + Duration::minutes(clamp_event_duration_minutes(duration_minutes));
+    client
+        .update_event_times(event_id, start, end, &timezone)
+        .await
+}
+
 fn clamp_event_duration_minutes(duration_minutes: i64) -> i64 {
     duration_minutes.max(15)
 }
+
+/// Default duration used when creating/rescheduling task calendar blocks.
+pub const TASK_CALENDAR_DURATION_MINUTES: i64 = 30;
 
 /// Schedules a timed block on a member's calendar starting at local 09:00 on `date_yyyy_mm_dd`
 /// (or tomorrow if `None`), lasting `duration_minutes`. Returns the Google event ID.

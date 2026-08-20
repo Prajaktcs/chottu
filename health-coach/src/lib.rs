@@ -9,17 +9,21 @@ mod fitness_plan;
 mod sync;
 mod trends;
 
-pub use coach_enrich::{enrich_coach_context, fitness_brief_lines};
+pub use coach_enrich::{
+    enrich_coach_context, fitness_brief_lines, format_plan_progress_line, plan_week_progress_line,
+    CoachEnrichOpts,
+};
 pub use coaching::{
     append_coach_tip, generate_fitness_coach_tip, generate_nutrition_coach_tip,
     FitnessCoachContext, NutritionCoachContext,
 };
 pub use fitness_plan::{
-    classify_activity_type, count_strength_sessions, count_strengthish_sessions,
-    current_week_start_str, generate_and_store_weekly_plan, load_weekly_plan, parse_plan_json,
-    render_plan_markdown, session_for_date, session_for_date_from_stored, sum_cardio_minutes,
-    week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind, StoredWeeklyPlan,
-    WeeklyFitnessPlan,
+    activity_matches_plan_kind, classify_activity_type, count_strength_sessions,
+    count_strengthish_sessions, current_week_start_str, generate_and_store_weekly_plan,
+    load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days,
+    plan_session_adherence, render_plan_markdown, session_for_date, session_for_date_from_stored,
+    sum_cardio_minutes, week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind,
+    StoredWeeklyPlan, WeeklyFitnessPlan,
 };
 pub use sync::{
     credentials_configured, delete_google_nutrition_logs, exercise_entries_for_day,

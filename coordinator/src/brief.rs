@@ -348,18 +348,21 @@ async fn format_training_section(
         };
         any = true;
 
-        let planned_line = match health_coach::load_weekly_plan(pool, &member.id, &week_start).await
-        {
-            Ok(Some(stored)) => health_coach::session_for_date_from_stored(&stored, today).map(|p| {
+        let stored_plan = health_coach::load_weekly_plan(pool, &member.id, &week_start)
+            .await
+            .ok()
+            .flatten();
+
+        let planned_line = stored_plan.as_ref().and_then(|stored| {
+            health_coach::session_for_date_from_stored(stored, today).map(|p| {
                 let notes = p.notes.trim();
                 if notes.is_empty() {
                     format!("{} ({})", p.weekday, p.kind.as_str())
                 } else {
                     format!("{} ({}): {}", p.weekday, p.kind.as_str(), notes)
                 }
-            }),
-            _ => None,
-        };
+            })
+        });
 
         let yesterday_ex = health_coach::exercises_for_day(pool, &member.id, yesterday)
             .await
@@ -372,6 +375,22 @@ async fn format_training_section(
             planned_line.as_deref(),
             &yesterday_ex,
         ));
+
+        if let Some(stored) = stored_plan.as_ref() {
+            if let Some(progress) = health_coach::plan_week_progress_line(
+                pool,
+                &member.id,
+                &week_start,
+                &stored.plan_json,
+                today,
+            )
+            .await
+            {
+                lines.push_str("  - ");
+                lines.push_str(&progress);
+                lines.push('\n');
+            }
+        }
     }
 
     if !any {

@@ -18,7 +18,7 @@ Each day kind must be one of: rest, strength, cardio, mixed.\
 Keep notes short (one sentence) and actionable.";
 
 /// Session kind for a plan day.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum PlanDayKind {
     Rest,
@@ -583,6 +583,118 @@ where
         .sum()
 }
 
+/// Whether a logged activity kind satisfies a planned session kind.
+pub fn activity_matches_plan_kind(plan: PlanDayKind, activity: ActivityKind) -> bool {
+    match plan {
+        PlanDayKind::Rest => false,
+        PlanDayKind::Strength => matches!(
+            activity,
+            ActivityKind::Strength | ActivityKind::Mixed
+        ),
+        PlanDayKind::Cardio => matches!(activity, ActivityKind::Cardio | ActivityKind::Mixed),
+        PlanDayKind::Mixed => matches!(
+            activity,
+            ActivityKind::Strength | ActivityKind::Cardio | ActivityKind::Mixed
+        ),
+    }
+}
+
+/// Plan-session adherence from `week_start` through `as_of` (inclusive).
+///
+/// Counts non-rest plan days as planned; a day matches when any logged exercise
+/// that civil day has an activity kind compatible with the plan kind.
+///
+/// Returns `(matched, planned)`.
+pub fn plan_session_adherence(
+    week_start: &str,
+    plan: &WeeklyFitnessPlan,
+    as_of: NaiveDate,
+    exercises: &[(String, String)], // (date YYYY-MM-DD, activity_label)
+) -> (i32, i32) {
+    let Ok(start) = NaiveDate::parse_from_str(week_start, "%Y-%m-%d") else {
+        return (0, 0);
+    };
+    let end = as_of.min(start + Duration::days(6));
+    if end < start {
+        return (0, 0);
+    }
+
+    let mut by_date: std::collections::HashMap<String, Vec<ActivityKind>> =
+        std::collections::HashMap::new();
+    for (date, label) in exercises {
+        by_date
+            .entry(date.clone())
+            .or_default()
+            .push(classify_activity_type(label));
+    }
+
+    let mut planned = 0i32;
+    let mut matched = 0i32;
+    let mut day = start;
+    while day <= end {
+        let offset = (day - start).num_days() as usize;
+        let Some(session) = plan.days.get(offset) else {
+            break;
+        };
+        if session.kind != PlanDayKind::Rest {
+            planned += 1;
+            let key = day.format("%Y-%m-%d").to_string();
+            if let Some(kinds) = by_date.get(&key) {
+                if kinds
+                    .iter()
+                    .any(|k| activity_matches_plan_kind(session.kind, *k))
+                {
+                    matched += 1;
+                }
+            }
+        }
+        day += Duration::days(1);
+    }
+    (matched, planned)
+}
+
+/// Cardio (+ mixed) minutes logged on days whose plan kind is cardio or mixed,
+/// from `week_start` through `as_of`.
+pub fn plan_cardio_minutes_on_cardio_days(
+    week_start: &str,
+    plan: &WeeklyFitnessPlan,
+    as_of: NaiveDate,
+    exercises: &[(String, String, i32)], // (date, activity_label, duration_mins)
+) -> i32 {
+    let Ok(start) = NaiveDate::parse_from_str(week_start, "%Y-%m-%d") else {
+        return 0;
+    };
+    let end = as_of.min(start + Duration::days(6));
+    if end < start {
+        return 0;
+    }
+
+    let mut cardio_plan_days = std::collections::HashSet::new();
+    let mut day = start;
+    while day <= end {
+        let offset = (day - start).num_days() as usize;
+        if let Some(session) = plan.days.get(offset) {
+            if matches!(session.kind, PlanDayKind::Cardio | PlanDayKind::Mixed) {
+                cardio_plan_days.insert(day.format("%Y-%m-%d").to_string());
+            }
+        }
+        day += Duration::days(1);
+    }
+
+    exercises
+        .iter()
+        .filter_map(|(date, label, mins)| {
+            if *mins <= 0 || !cardio_plan_days.contains(date) {
+                return None;
+            }
+            match classify_activity_type(label) {
+                ActivityKind::Cardio | ActivityKind::Mixed => Some(*mins),
+                _ => None,
+            }
+        })
+        .sum()
+}
+
 /// Legacy wrapper: classifies each description's activity label (text before ` (`).
 pub fn count_strengthish_sessions(descriptions: &[String]) -> i32 {
     count_strength_sessions(descriptions.iter().map(|d| {
@@ -701,6 +813,134 @@ mod tests {
             ]),
             50
         ); // running + HIIT
+    }
+
+    #[test]
+    fn plan_session_adherence_matches_kind_by_day() {
+        let plan = WeeklyFitnessPlan {
+            theme: "Base".into(),
+            days: vec![
+                PlanDay {
+                    weekday: "Monday".into(),
+                    kind: PlanDayKind::Strength,
+                    notes: "upper".into(),
+                },
+                PlanDay {
+                    weekday: "Tuesday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Wednesday".into(),
+                    kind: PlanDayKind::Cardio,
+                    notes: "bike".into(),
+                },
+                PlanDay {
+                    weekday: "Thursday".into(),
+                    kind: PlanDayKind::Strength,
+                    notes: "lower".into(),
+                },
+                PlanDay {
+                    weekday: "Friday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Saturday".into(),
+                    kind: PlanDayKind::Mixed,
+                    notes: "circuit".into(),
+                },
+                PlanDay {
+                    weekday: "Sunday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+            ],
+        };
+        let week = "2026-08-03";
+        // Through Wednesday: Mon strength done, Wed cardio missed → 1/2
+        let wed = NaiveDate::from_ymd_opt(2026, 8, 5).unwrap();
+        let (matched, planned) = plan_session_adherence(
+            week,
+            &plan,
+            wed,
+            &[
+                ("2026-08-03".into(), "Strength Training".into()),
+                ("2026-08-04".into(), "Walking".into()), // rest day — ignored for planned
+            ],
+        );
+        assert_eq!((matched, planned), (1, 2));
+
+        // Through Saturday with Wed run + Sat HIIT → 3/4 (Mon, Wed, Sat; Thu missed)
+        let sat = NaiveDate::from_ymd_opt(2026, 8, 8).unwrap();
+        let (matched, planned) = plan_session_adherence(
+            week,
+            &plan,
+            sat,
+            &[
+                ("2026-08-03".into(), "Strength Training".into()),
+                ("2026-08-05".into(), "Running".into()),
+                ("2026-08-08".into(), "HIIT".into()),
+            ],
+        );
+        assert_eq!((matched, planned), (3, 4));
+    }
+
+    #[test]
+    fn plan_cardio_minutes_only_on_cardio_plan_days() {
+        let plan = WeeklyFitnessPlan {
+            theme: "Base".into(),
+            days: vec![
+                PlanDay {
+                    weekday: "Monday".into(),
+                    kind: PlanDayKind::Strength,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Tuesday".into(),
+                    kind: PlanDayKind::Cardio,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Wednesday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Thursday".into(),
+                    kind: PlanDayKind::Mixed,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Friday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Saturday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+                PlanDay {
+                    weekday: "Sunday".into(),
+                    kind: PlanDayKind::Rest,
+                    notes: String::new(),
+                },
+            ],
+        };
+        let week = "2026-08-03";
+        let thu = NaiveDate::from_ymd_opt(2026, 8, 6).unwrap();
+        let mins = plan_cardio_minutes_on_cardio_days(
+            week,
+            &plan,
+            thu,
+            &[
+                ("2026-08-03".into(), "Running".into(), 40), // strength day — ignore
+                ("2026-08-04".into(), "Running".into(), 30), // cardio day
+                ("2026-08-06".into(), "HIIT".into(), 20),    // mixed day
+            ],
+        );
+        assert_eq!(mins, 50);
     }
 
     #[test]
