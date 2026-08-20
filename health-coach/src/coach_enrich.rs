@@ -226,6 +226,45 @@ pub fn format_plan_progress_line(
     format!("📊 This week so far: {}", parts.join(" · "))
 }
 
+/// Load this week's exercises and format adherence for `/plan` and the morning brief.
+pub async fn plan_week_progress_line(
+    pool: &SqlitePool,
+    member_id: &str,
+    week_start: &str,
+    plan_json: &str,
+    as_of: NaiveDate,
+) -> Option<String> {
+    let plan = parse_plan_json(plan_json).ok()?;
+    let week_end = (week_start_monday(as_of) + Duration::days(6))
+        .format("%Y-%m-%d")
+        .to_string();
+    let week_ex = exercise_entries_for_range(pool, member_id, week_start, &week_end)
+        .await
+        .ok()?;
+    let labels: Vec<(String, String)> = week_ex
+        .iter()
+        .map(|e| (e.date.clone(), e.activity_label()))
+        .collect();
+    let (matched, planned) = plan_session_adherence(week_start, &plan, as_of, &labels);
+    let week_cardio = sum_cardio_minutes(
+        week_ex
+            .iter()
+            .map(|e| (e.activity_label(), e.duration_mins())),
+    );
+    let duration_rows: Vec<(String, String, i32)> = week_ex
+        .iter()
+        .map(|e| (e.date.clone(), e.activity_label(), e.duration_mins()))
+        .collect();
+    let plan_cardio =
+        plan_cardio_minutes_on_cardio_days(week_start, &plan, as_of, &duration_rows);
+    Some(format_plan_progress_line(
+        matched,
+        planned,
+        week_cardio,
+        plan_cardio,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

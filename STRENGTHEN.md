@@ -63,7 +63,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Files:** `coordinator/src/telegram.rs` (`create_manual_task`, `snooze_task`, `mark_task_complete` / `mark_all_tasks_complete`), `chotu-common/src/calendar.rs`
 
-**Done:** Snooze PATCHes start/end via `reschedule_at` (duration from `duration_minutes` or 30m); complete/complete-all delete the Google event and clear `calendar_event_id`; create path unchanged.
+**Done:** Snooze PATCHes start/end via `reschedule_at` (duration from `duration_minutes` or 30m); complete/complete-all delete the Google event and clear `calendar_event_id` only after successful delete (or confirmed 404); create path unchanged.
 
 ---
 

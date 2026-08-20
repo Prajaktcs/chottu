@@ -557,13 +557,12 @@ pub async fn list_completable_open_tasks(
 }
 
 /// Mark open/snoozed tasks as done. Returns each completed task (empty when
-/// there was nothing to complete).
+/// there was nothing to complete), including any `calendar_event_id` that was
+/// present at completion time.
 ///
-/// When `assignee_filter` is `Some(member_id)`, only that member's tasks plus
-/// unassigned tasks are completed. When `None`, every open/snoozed task is completed.
-///
-/// Also clears `calendar_event_id` on completed rows so callers can delete the
-/// Google event without racing a concurrent reschedule.
+/// Does **not** clear `calendar_event_id` — callers should delete the Google
+/// event first, then clear the stored id only after a successful delete (or
+/// confirmed 404) so a failed cleanup can be retried.
 pub async fn complete_all_open_tasks(
     pool: &SqlitePool,
     now_rfc3339: &str,
@@ -588,7 +587,7 @@ pub async fn complete_all_open_tasks(
 
     if !rows.is_empty() {
         let mut qb = sqlx::QueryBuilder::new(
-            "UPDATE tasks SET status = 'done', calendar_event_id = NULL, updated_at = ",
+            "UPDATE tasks SET status = 'done', updated_at = ",
         );
         qb.push_bind(now_rfc3339);
         qb.push(" WHERE status IN ('open', 'snoozed')");
@@ -761,7 +760,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_all_open_tasks_returns_and_clears_calendar_event_id() {
+    async fn complete_all_open_tasks_returns_calendar_event_id_without_clearing() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("complete_all_cal.db");
         let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
@@ -786,11 +785,12 @@ mod tests {
         assert_eq!(completed[0].calendar_event_id.as_deref(), Some("evt-123"));
         assert_eq!(completed[0].assigned_to.as_deref(), Some("alex"));
 
+        // Id is kept until the caller successfully deletes the Google event.
         let stored: Option<String> =
             sqlx::query_scalar("SELECT calendar_event_id FROM tasks WHERE id = 't-cal'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(stored.is_none());
+        assert_eq!(stored.as_deref(), Some("evt-123"));
     }
 }
