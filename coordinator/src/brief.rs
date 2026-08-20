@@ -23,9 +23,10 @@ struct BriefBillRow {
 
 /// Assemble a Markdown morning brief for Telegram.
 ///
-/// When `for_member_id` is set (linked personal DM), nutrition and training
-/// sections include **only that member** so fitness goals / health metrics stay
-/// private to them. Household shared chats (`None`) keep the family-wide view.
+/// When `for_member_id` is set (linked personal DM), calendar, tasks, nutrition,
+/// and training sections are scoped to that member so private chats do not see
+/// the household surface. Shared bills stay household-wide by design.
+/// Household shared chats (`None`) keep the family-wide view.
 pub async fn compose_morning_brief(
     pool: &SqlitePool,
     config: &AppConfig,
@@ -51,10 +52,10 @@ pub async fn compose_morning_brief(
     }
 
     out.push_str("\n📅 *Today*\n");
-    out.push_str(&format_brief_calendar_section(config, &today).await);
+    out.push_str(&format_brief_calendar_section(config, &today, for_member_id).await);
 
     out.push_str("\n✅ *Tasks*\n");
-    out.push_str(&format_tasks_section(pool, &today).await);
+    out.push_str(&format_tasks_section(pool, &today, for_member_id).await);
 
     out.push_str("\n💳 *Bills*\n");
     out.push_str(&format_bills_section(pool, &today).await);
@@ -70,7 +71,25 @@ pub async fn compose_morning_brief(
     out
 }
 
-async fn format_tasks_section(pool: &SqlitePool, today: &str) -> String {
+/// Open tasks visible in a morning brief for the given chat scope.
+///
+/// Linked DMs (`Some`): assignee match or unassigned — same rule as
+/// `/tasks complete all`. Household (`None`): all open tasks.
+fn task_in_brief_scope(assigned_to: Option<&str>, for_member_id: Option<&str>) -> bool {
+    match for_member_id {
+        None => true,
+        Some(mid) => match assigned_to {
+            None => true,
+            Some(a) => a.eq_ignore_ascii_case(mid),
+        },
+    }
+}
+
+async fn format_tasks_section(
+    pool: &SqlitePool,
+    today: &str,
+    for_member_id: Option<&str>,
+) -> String {
     let Some(today_date) = NaiveDateExt::parse(today) else {
         return "_Could not load tasks._\n".to_string();
     };
@@ -81,14 +100,19 @@ async fn format_tasks_section(pool: &SqlitePool, today: &str) -> String {
         .format("%Y-%m-%d")
         .to_string();
 
-    let rows: Vec<BriefTaskRow> = match sqlx::query_as::<_, BriefTaskRow>(
-        "SELECT id, title, due_date, assigned_to FROM tasks \
-         WHERE status = 'open' \
-         ORDER BY due_date IS NULL, due_date ASC, created_at DESC LIMIT 40",
-    )
-    .fetch_all(pool)
-    .await
-    {
+    let mut qb = sqlx::QueryBuilder::new(
+        "SELECT id, title, due_date, assigned_to FROM tasks WHERE status = 'open'",
+    );
+    if let Some(member_id) = for_member_id {
+        // COLLATE NOCASE matches task_in_brief_scope's eq_ignore_ascii_case so
+        // casing differences don't get dropped before LIMIT 40.
+        qb.push(" AND (assigned_to = ");
+        qb.push_bind(member_id);
+        qb.push(" COLLATE NOCASE OR assigned_to IS NULL)");
+    }
+    qb.push(" ORDER BY due_date IS NULL, due_date ASC, created_at DESC LIMIT 40");
+
+    let rows: Vec<BriefTaskRow> = match qb.build_query_as::<BriefTaskRow>().fetch_all(pool).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Morning brief: tasks query failed: {:?}", e);
@@ -98,6 +122,7 @@ async fn format_tasks_section(pool: &SqlitePool, today: &str) -> String {
 
     let mut prioritized: Vec<&BriefTaskRow> = rows
         .iter()
+        .filter(|t| task_in_brief_scope(t.assigned_to.as_deref(), for_member_id))
         .filter(|t| match t.due_date.as_deref() {
             // Undated open tasks still belong on the brief.
             None => true,
@@ -360,5 +385,26 @@ struct NaiveDateExt;
 impl NaiveDateExt {
     fn parse(date: &str) -> Option<chrono::NaiveDate> {
         chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_in_brief_scope;
+
+    #[test]
+    fn household_brief_shows_all_assignees() {
+        assert!(task_in_brief_scope(None, None));
+        assert!(task_in_brief_scope(Some("alex"), None));
+        assert!(task_in_brief_scope(Some("jordan"), None));
+    }
+
+    #[test]
+    fn linked_dm_brief_keeps_mine_and_unassigned() {
+        assert!(task_in_brief_scope(None, Some("alex")));
+        assert!(task_in_brief_scope(Some("alex"), Some("alex")));
+        assert!(task_in_brief_scope(Some("Alex"), Some("alex")));
+        assert!(!task_in_brief_scope(Some("jordan"), Some("alex")));
+        assert!(!task_in_brief_scope(Some("alex"), Some("jordan")));
     }
 }

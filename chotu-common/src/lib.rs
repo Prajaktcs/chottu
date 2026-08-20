@@ -36,8 +36,8 @@ pub use family::{
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
-    format_brief_calendar_section, local_day_bounds_utc, truncate, week_bounds_utc,
-    CalendarConflict, CalendarWindow, FamilyCalendarError, FamilyEventsFetch,
+    format_brief_calendar_section, local_day_bounds_utc, member_in_calendar_scope, truncate,
+    week_bounds_utc, CalendarConflict, CalendarWindow, FamilyCalendarError, FamilyEventsFetch,
 };
 pub use calendar::{
     build_calendar_client, default_calendar_timezone, schedule_at, schedule_timed_block,
