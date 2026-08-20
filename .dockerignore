@@ -1,9 +1,0 @@
-target/
-.git/
-.env
-chotu.db
-chotu.db-wal
-chotu.db-shm
-.antigravitycli/
-.gemini/
-*.log

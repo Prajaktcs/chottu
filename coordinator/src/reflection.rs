@@ -104,6 +104,7 @@ pub async fn generate_reflection_prompt(
     txs: &[SimpleTx],
     healths: &[HealthFamilySummary],
     date: &str,
+    core_values: Option<&chotu_common::CoreValues>,
 ) -> Result<String> {
     // Format the logs to feed to LLM
     let mut logs_summary = String::new();
@@ -124,6 +125,14 @@ pub async fn generate_reflection_prompt(
         logs_summary.push_str("No health telemetry logs for any family member today.\n");
     } else {
         for h in healths {
+            let sleep = h
+                .sleep_hours
+                .map(|s| format!("{s}"))
+                .unwrap_or_else(|| "N/A".to_string());
+            let energy = h
+                .perceived_energy
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "N/A".to_string());
             logs_summary.push_str(&format!(
                 "- Member: {}\n  * Nutrition: {} kcal ingested (Protein: {}g, Carbs: {}g, Fats: {}g)\n  * Activity: {} steps, {} active calories burned\n  * Sleep: {} hrs\n  * Energy Level: {}\n",
                 h.family_member_id,
@@ -133,20 +142,34 @@ pub async fn generate_reflection_prompt(
                 h.fats_grams,
                 h.step_count,
                 h.active_calories_burned,
-                h.sleep_hours.unwrap_or(0.0),
-                h.perceived_energy.map(|e| e.to_string()).unwrap_or("N/A".to_string())
+                sleep,
+                energy
             ));
         }
     }
 
-    let system_prompt = "You are Chotu's Evening Reflection Engine, an AI journaling assistant for the family. \
-You must construct a highly personalized reflection prompt (1-3 sentences) based ONLY on the provided financial and family health logs for today. \
-Avoid referencing general, non-provided, or generic advice. \
-Acknowledge specific achievements or note specific trends (e.g., high step count, late night meal, zero spend day, category spend) only if they are present in the logs. \
-End with one or two open-ended questions asking the user to reflect on their day. \
-Do not include any other text, reasoning, frontmatter, or commentary. Only return the final reflection prompt.";
+    let values = core_values
+        .cloned()
+        .unwrap_or_else(chotu_common::CoreValues::default);
+    let values_block = format_core_values_for_prompt(&values);
 
-    let user_prompt = format!("Date: {}\nLogs:\n{}", date, logs_summary);
+    let system_prompt = "You are Chotu's Evening Reflection Engine. Each night you write a short \
+journal prompt that does TWO jobs equally — do not drop either:\n\
+1) HEALTH: Ground in today's nutrition, steps/activity, sleep, and energy when those logs exist. \
+Cite specific numbers or trends (high/low protein, steps, sleep hours, late eating, perceived energy). \
+If health logs are empty, say so briefly and skip invented metrics.\n\
+2) VALUES: Train the user to solidify and live their two core values (Growth + Contribution by default). \
+Integrity is the alignment sensor; courage fuels Growth; humility guards Contribution — do not list those as separate core values. \
+Prefer one values lens per night from the practice list (unspoken/heavy-body, ego autopsy, 'I don't know', bring-a-brick, silence-as-withholding).\n\n\
+Spend/financial logs are optional supporting color when clearly relevant.\n\n\
+Write 2–4 sentences, then 1–2 sharp questions that cover both health AND values (one question can combine them). \
+Be concrete — no pep talk, therapy clichés, or inventing events. \
+Do not include reasoning, frontmatter, or commentary. Only return the final reflection prompt.";
+
+    let user_prompt = format!(
+        "Date: {}\n\n=== Core Values (operating system) ===\n{}\n\n=== Today's logs ===\n{}",
+        date, values_block, logs_summary
+    );
 
     let prompt = llm
         .generate_prompt(system_prompt, &user_prompt)
@@ -157,6 +180,24 @@ Do not include any other text, reasoning, frontmatter, or commentary. Only retur
     let cleaned_prompt = strip_think_blocks(&prompt);
 
     Ok(cleaned_prompt)
+}
+
+fn format_core_values_for_prompt(values: &chotu_common::CoreValues) -> String {
+    let mut out = String::new();
+    out.push_str("Anchors:\n");
+    for a in &values.anchors {
+        out.push_str(&format!("- {}: {}\n", a.name, a.definition));
+    }
+    if let Some(note) = &values.integrity_note {
+        out.push_str(&format!("\nIntegrity / tools:\n{}\n", note));
+    }
+    if !values.practices.is_empty() {
+        out.push_str("\nPractice lenses (pick what fits tonight):\n");
+        for p in &values.practices {
+            out.push_str(&format!("- {}\n", p));
+        }
+    }
+    out
 }
 
 fn strip_think_blocks(text: &str) -> String {
@@ -250,11 +291,14 @@ pub async fn save_reflection(
             "    active_calories_burned: {}\n",
             h.active_calories_burned
         ));
-        content.push_str(&format!("    sleep: {}\n", h.sleep_hours.unwrap_or(0.0)));
-        content.push_str(&format!(
-            "    perceived_energy: {}\n",
-            h.perceived_energy.unwrap_or(0)
-        ));
+        match h.sleep_hours {
+            Some(s) => content.push_str(&format!("    sleep: {}\n", s)),
+            None => content.push_str("    sleep: null\n"),
+        }
+        match h.perceived_energy {
+            Some(e) => content.push_str(&format!("    perceived_energy: {}\n", e)),
+            None => content.push_str("    perceived_energy: null\n"),
+        }
     }
     content.push_str("---\n\n");
 
@@ -288,5 +332,15 @@ mod tests {
 
         let input_no_think = "Hello world";
         assert_eq!(strip_think_blocks(input_no_think), "Hello world");
+    }
+
+    #[test]
+    fn format_core_values_includes_anchors_and_practices() {
+        let values = chotu_common::CoreValues::default();
+        let formatted = format_core_values_for_prompt(&values);
+        assert!(formatted.contains("Growth"));
+        assert!(formatted.contains("Contribution"));
+        assert!(formatted.contains("Practice lenses"));
+        assert!(formatted.contains("Ego autopsy") || formatted.contains("ego"));
     }
 }

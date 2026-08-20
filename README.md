@@ -55,7 +55,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
 - **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals, and training (outcome countdown + today’s planned session) — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
-- **Evening reflection**: scheduled or `/reflect` — trains toward your `core_values` in `config.yaml` (default Growth + Contribution), optionally grounded in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
+- **Evening reflection**: scheduled or `/reflect` — grounds in today’s health (nutrition, steps, sleep, energy) and spend logs, while training toward your `core_values` in `config.yaml` (default Growth + Contribution); replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
 - Local embeddings (`nomic-embed-text` via Ollama) over journals, newsletter digests, personal references, and tasks.
@@ -79,7 +79,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - **Private goals & health**: `config.yaml` and `.env` are gitignored. Put real `nutrition_goals` / `fitness_goals` / constraints only in your local `config.yaml` — not in the public example. Linked personal Telegram DMs receive **only that member’s** nutrition, training plan, coach tips, sync details, and trends; other adults’ fitness goals are not fan‑out to the household.
 - **Future medical records** (planned): private local ingest only; never committed or shared across family DMs; coach may use user-confirmed constraints, not diagnoses.
 - **Zero-`unsafe` Rust** workspace policy (see `ARCHITECTURE.md`).
-- Runs as a Cargo workspace supervisor (`make run`) or via Docker on non-macOS hosts.
+- Runs as a Cargo workspace supervisor (`make run`).
 
 ---
 
@@ -112,7 +112,6 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 - Financial ledger, monthly summary, category budgets + spend alerts, net worth from portfolio statements
 - Configurable stock research (OpenRouter + Finnhub: propose → cap filter → score → judge)
 - Document drop folder for batch CSV/PDF imports
-- Docker image for Linux / cloud deployment
 
 ---
 
@@ -235,28 +234,6 @@ Chotu uses browser redirects to secure logins locally without public ports.
 Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's schedule", "this week", "remind me to call the dentist tomorrow 3pm", "morning brief", "how's today", "open tasks", "what's today's workout", "show my training plan", "regenerate plan", "what was that recipe I saved", "log 2 eggs for praj", "yesterday's dinner was pasta", "sync health", "trends last 14 days", "net worth", "monthly spend", "how's food budget"). Unclear messages get a short clarifying question instead of the full command list.
 
 **Food photos:** send a barcode, product package, or plated meal. Caption is optional; without a member id it logs for the linked DM member (e.g. `half the bowl` or `praj half the bowl`). Linked DMs reject captions that target another member. Barcodes look up [Open Food Facts](https://world.openfoodfacts.org/); packages and plates use Gemini vision. Nutrients are logged the same way as `/food` (including Google Health push when that member is linked).
-
----
-
-## Docker Deployment (Non-macOS Platforms)
-
-A multi-stage `Dockerfile` is provided to run Project Chotu on Linux, Windows, or cloud environments.
-
-### 1. Build the Image
-```bash
-docker build -t chotu:latest .
-```
-
-### 2. Run the Container
-```bash
-docker run -d \
-  --name chotu-agent \
-  -p 8080:8080 \
-  -v $(pwd)/.env:/app/.env \
-  -v $(pwd)/chotu.db:/app/chotu.db \
-  -v $(pwd)/config.yaml:/app/config.yaml \
-  chotu:latest
-```
 
 ---
 

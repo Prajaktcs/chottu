@@ -68,6 +68,19 @@ family:
 currency: "CAD"
 email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
 
+# Optional: two core values that shape evening /reflect prompts (alongside health logs).
+# Prefer exactly two anchors; nest courage/humility as tools. Integrity = alignment sensor.
+# core_values:
+#   anchors:
+#     - name: Growth
+#       definition: "Valuing not knowing and becoming better than yesterday."
+#     - name: Contribution
+#       definition: "Serving the situation and people; speaking up when silence withholds."
+#   integrity_note: "Integrity connects actions to the two anchors; courage fuels Growth."
+#   practices:
+#     - "Did I leave anything unspoken that sits heavy in my body?"
+#     - "Ego autopsy — what was ego protecting?"
+
 # Optional household category spend budgets (base currency). Telegram `/budget set`
 # overrides these; 80%/100% Telegram alerts fan out to linked DMs (and
 # TELEGRAM_CHAT_ID if set).

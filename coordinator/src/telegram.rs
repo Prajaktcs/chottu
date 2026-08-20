@@ -4540,7 +4540,14 @@ async fn handle_reflect_trigger(
     };
 
     // 2. Generate prompt
-    match crate::reflection::generate_reflection_prompt(llm, &txs, &healths, &date_str).await
+    match crate::reflection::generate_reflection_prompt(
+        llm,
+        &txs,
+        &healths,
+        &date_str,
+        config.core_values.as_ref(),
+    )
+    .await
     {
         Ok(prompt) => {
             // Update state to wait for reflection response
