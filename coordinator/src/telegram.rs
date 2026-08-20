@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use sqlx::SqlitePool;
 use teloxide::prelude::*;
+use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::RwLock;
 
@@ -357,15 +358,17 @@ pub async fn start_telegram_bot(
     // Background catch-up for local memory RAG index (journals / digests / refs / tasks).
     spawn_background_reindex(pool.clone());
 
-    let handler = dptree::entry().branch(
-        Update::filter_message()
-            .branch(
-                dptree::entry()
-                    .filter_command::<Command>()
-                    .endpoint(handle_command),
-            )
-            .branch(dptree::endpoint(handle_message)),
-    );
+    let handler = dptree::entry()
+        .branch(
+            Update::filter_message()
+                .branch(
+                    dptree::entry()
+                        .filter_command::<Command>()
+                        .endpoint(handle_command),
+                )
+                .branch(dptree::endpoint(handle_message)),
+        )
+        .branch(Update::filter_callback_query().endpoint(handle_callback_query));
 
     println!("Telegram Bot: starting update loop...");
     Dispatcher::builder(bot, handler)
@@ -383,6 +386,368 @@ pub async fn start_telegram_bot(
         .await;
 
     Ok(())
+}
+
+async fn handle_callback_query(
+    bot: Bot,
+    q: CallbackQuery,
+    pool: SqlitePool,
+    shared_config: SharedConfig,
+) -> Result<(), teloxide::RequestError> {
+    let Some(data) = q.data.as_deref() else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+
+    let Some(msg) = q.message.as_ref() else {
+        bot.answer_callback_query(q.id)
+            .text("Message too old — use /tasks")
+            .await?;
+        return Ok(());
+    };
+    let chat_id = msg.chat.id;
+
+    let config = shared_config.read().await.clone();
+    if !is_telegram_chat_allowed(&config, chat_id.0) {
+        bot.answer_callback_query(q.id)
+            .text("Chat not linked — send /link first")
+            .show_alert(true)
+            .await?;
+        return Ok(());
+    }
+
+    let Some((action, task_id)) = parse_task_callback(data) else {
+        bot.answer_callback_query(q.id).await?;
+        return Ok(());
+    };
+
+    match action {
+        TaskCallbackAction::Done => {
+            match complete_task_by_id(&pool, task_id).await {
+                TaskMutateOutcome::Done { title, already } => {
+                    let toast = if already {
+                        "Already done"
+                    } else {
+                        "Marked done"
+                    };
+                    bot.answer_callback_query(&q.id).text(toast).await?;
+                    if already {
+                        return Ok(());
+                    }
+                    let note = format!("✅ Marked done: _{}_", escape_md_basic(&title));
+                    update_message_after_task_action(
+                        &bot,
+                        msg,
+                        task_id,
+                        &note,
+                        /* clear_all_buttons */ true,
+                    )
+                    .await?;
+                    refresh_task_memory(&pool, task_id).await;
+                }
+                TaskMutateOutcome::NotFound => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Task not found")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::DbError => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Database error")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::Snoozed { .. } => unreachable!(),
+            }
+        }
+        TaskCallbackAction::Snooze => {
+            match snooze_task_by_id(&pool, task_id, 1).await {
+                TaskMutateOutcome::Snoozed { title, due } => {
+                    bot.answer_callback_query(&q.id)
+                        .text(format!("Snoozed until {due}"))
+                        .await?;
+                    let note = format!(
+                        "😴 Snoozed until *{}*: _{}_",
+                        due,
+                        escape_md_basic(&title)
+                    );
+                    update_message_after_task_action(&bot, msg, task_id, &note, true).await?;
+                    refresh_task_memory(&pool, task_id).await;
+                }
+                TaskMutateOutcome::NotFound => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Task not found")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::DbError => {
+                    bot.answer_callback_query(&q.id)
+                        .text("Database error")
+                        .show_alert(true)
+                        .await?;
+                }
+                TaskMutateOutcome::Done { .. } => unreachable!(),
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskCallbackAction {
+    Done,
+    Snooze,
+}
+
+fn parse_task_callback(data: &str) -> Option<(TaskCallbackAction, &str)> {
+    // Format: t:d:{uuid} or t:s:{uuid} (callback_data max 64 bytes).
+    let rest = data.strip_prefix("t:")?;
+    let (action_raw, task_id) = rest.split_once(':')?;
+    if task_id.len() < 8 || task_id.len() > 40 {
+        return None;
+    }
+    if !task_id
+        .chars()
+        .all(|c| c.is_ascii_hexdigit() || c == '-')
+    {
+        return None;
+    }
+    let action = match action_raw {
+        "d" => TaskCallbackAction::Done,
+        "s" => TaskCallbackAction::Snooze,
+        _ => return None,
+    };
+    Some((action, task_id))
+}
+
+fn task_action_keyboard(task_id: &str, title: &str) -> InlineKeyboardMarkup {
+    InlineKeyboardMarkup::new(vec![task_action_row(task_id, title)])
+}
+
+fn task_list_keyboard(rows: &[(String, String)]) -> InlineKeyboardMarkup {
+    // Cap buttons so the keyboard stays usable on mobile.
+    InlineKeyboardMarkup::new(
+        rows.iter()
+            .take(15)
+            .map(|(id, title)| task_action_row(id, title))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn task_action_row(task_id: &str, title: &str) -> Vec<InlineKeyboardButton> {
+    let label = truncate_chars(title.trim(), 28);
+    let done_label = if label.is_empty() {
+        "✅ Done".to_string()
+    } else {
+        format!("✅ {}", label)
+    };
+    vec![
+        InlineKeyboardButton::callback(done_label, format!("t:d:{}", task_id)),
+        InlineKeyboardButton::callback("😴 +1d", format!("t:s:{}", task_id)),
+    ]
+}
+
+fn strip_task_buttons(
+    markup: &InlineKeyboardMarkup,
+    task_id: &str,
+) -> InlineKeyboardMarkup {
+    let done_cb = format!("t:d:{}", task_id);
+    let snooze_cb = format!("t:s:{}", task_id);
+    let rows: Vec<Vec<InlineKeyboardButton>> = markup
+        .inline_keyboard
+        .iter()
+        .filter(|row| {
+            !row.iter().any(|btn| match &btn.kind {
+                InlineKeyboardButtonKind::CallbackData(d) => d == &done_cb || d == &snooze_cb,
+                _ => false,
+            })
+        })
+        .cloned()
+        .collect();
+    InlineKeyboardMarkup::new(rows)
+}
+
+/// After a button action: for single-task messages (reminder), replace text and
+/// clear buttons; for multi-task lists, drop that task's row and keep the rest.
+async fn update_message_after_task_action(
+    bot: &Bot,
+    msg: &Message,
+    task_id: &str,
+    note_md: &str,
+    prefer_replace_single: bool,
+) -> Result<(), teloxide::RequestError> {
+    let row_count = msg
+        .reply_markup()
+        .map(|m| m.inline_keyboard.len())
+        .unwrap_or(0);
+
+    if prefer_replace_single && row_count <= 1 {
+        bot.edit_message_text(msg.chat.id, msg.id, note_md)
+            .parse_mode(teloxide::types::ParseMode::Markdown)
+            .reply_markup(InlineKeyboardMarkup::default())
+            .await?;
+        return Ok(());
+    }
+
+    if let Some(markup) = msg.reply_markup() {
+        let next = strip_task_buttons(markup, task_id);
+        if next.inline_keyboard.is_empty() {
+            bot.edit_message_reply_markup(msg.chat.id, msg.id)
+                .reply_markup(InlineKeyboardMarkup::default())
+                .await?;
+        } else {
+            bot.edit_message_reply_markup(msg.chat.id, msg.id)
+                .reply_markup(next)
+                .await?;
+        }
+    }
+
+    bot.send_message(msg.chat.id, note_md)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum TaskMutateOutcome {
+    Done { title: String, already: bool },
+    Snoozed { title: String, due: String },
+    NotFound,
+    DbError,
+}
+
+async fn load_task_title_status(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String)>("SELECT title, status FROM tasks WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+}
+
+async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to load task {}: {:?}", task_id, e);
+            return TaskMutateOutcome::DbError;
+        }
+    };
+    let Some((title, status)) = row else {
+        return TaskMutateOutcome::NotFound;
+    };
+    if status == "done" {
+        return TaskMutateOutcome::Done {
+            title,
+            already: true,
+        };
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(task_id)
+        .execute(pool)
+        .await
+    {
+        eprintln!("Failed to mark task done: {:?}", e);
+        return TaskMutateOutcome::DbError;
+    }
+
+    TaskMutateOutcome::Done {
+        title,
+        already: false,
+    }
+}
+
+async fn snooze_task_by_id(pool: &SqlitePool, task_id: &str, days: i64) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to load task {}: {:?}", task_id, e);
+            return TaskMutateOutcome::DbError;
+        }
+    };
+    let Some((title, _)) = row else {
+        return TaskMutateOutcome::NotFound;
+    };
+
+    let due = (chrono::Local::now().date_naive() + chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let due_at = parse_due_phrase(&due).map(|p| p.due_at);
+
+    if let Err(e) = sqlx::query(
+        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(&due)
+    .bind(due_at.as_deref())
+    .bind(&now)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    {
+        eprintln!("Failed to snooze task: {:?}", e);
+        return TaskMutateOutcome::DbError;
+    }
+
+    TaskMutateOutcome::Snoozed { title, due }
+}
+
+#[cfg(test)]
+mod task_button_tests {
+    use super::*;
+
+    #[test]
+    fn parse_task_callback_accepts_done_and_snooze() {
+        let id = "a3f2b91c-1111-2222-3333-444455556666";
+        let done = format!("t:d:{id}");
+        let (action, parsed) = parse_task_callback(&done).unwrap();
+        assert_eq!(action, TaskCallbackAction::Done);
+        assert_eq!(parsed, id);
+        let snooze = format!("t:s:{id}");
+        let (action, parsed) = parse_task_callback(&snooze).unwrap();
+        assert_eq!(action, TaskCallbackAction::Snooze);
+        assert_eq!(parsed, id);
+    }
+
+    #[test]
+    fn parse_task_callback_rejects_junk() {
+        assert!(parse_task_callback("done:abc").is_none());
+        assert!(parse_task_callback("t:x:abcdef12").is_none());
+        assert!(parse_task_callback("t:d:short").is_none());
+        assert!(parse_task_callback("t:d:not a uuid!!!").is_none());
+    }
+
+    #[test]
+    fn strip_task_buttons_removes_matching_row() {
+        let id1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+        let id2 = "11111111-2222-3333-4444-555555555555";
+        let markup = task_list_keyboard(&[
+            (id1.to_string(), "milk".into()),
+            (id2.to_string(), "dentist".into()),
+        ]);
+        assert_eq!(markup.inline_keyboard.len(), 2);
+        let next = strip_task_buttons(&markup, id1);
+        assert_eq!(next.inline_keyboard.len(), 1);
+        let cb = match &next.inline_keyboard[0][0].kind {
+            InlineKeyboardButtonKind::CallbackData(d) => d.as_str(),
+            _ => panic!("expected callback"),
+        };
+        assert!(cb.contains(id2));
+    }
+
+    #[test]
+    fn task_callback_data_fits_telegram_limit() {
+        let id = "a3f2b91c-1111-2222-3333-444455556666"; // 36 chars
+        let done = format!("t:d:{}", id);
+        let snooze = format!("t:s:{}", id);
+        assert!(done.len() <= 64, "done callback {} bytes", done.len());
+        assert!(snooze.len() <= 64, "snooze callback {} bytes", snooze.len());
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1868,6 +2233,7 @@ async fn handle_tasks(
     }
 
     let mut msg = format!("📋 *Tasks* ({}, {})\n\n", label, rows.len());
+    let mut actionable: Vec<(String, String)> = Vec::new();
     for row in &rows {
         let short_id: String = row.id.chars().take(8).collect();
         let due = row
@@ -1896,19 +2262,28 @@ async fn handle_tasks(
             assignee,
             subject
         ));
+        if row.status == "open" || row.status == "snoozed" {
+            actionable.push((row.id.clone(), row.title.clone()));
+        }
     }
 
     if label == "open" || label == "open/snoozed" || label == "snoozed" {
         msg.push_str(
-            "\n_Actions:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all|all confirm>` · \
+            "\n_Tap ✅ / 😴 below, or:_ `/tasks add [member] <title> [due|by <when>]` · `/task <title> [by <when>]` · `/tasks complete <id|all|all confirm>` · \
              `/tasks snooze <id> [days]` · `/tasks reassign <id> <member>` · `/tasks open <id>`\n\
              _Dismiss email tasks:_ reply `unactionable` to the original reminder.",
         );
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
+    let mut send = bot
+        .send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::Markdown);
+    if !actionable.is_empty()
+        && (label == "open" || label == "open/snoozed" || label == "snoozed")
+    {
+        send = send.reply_markup(task_list_keyboard(&actionable));
+    }
+    send.await?;
 
     Ok(())
 }
@@ -2171,6 +2546,7 @@ async fn create_manual_task(
 
     bot.send_message(chat_id, msg)
         .parse_mode(teloxide::types::ParseMode::Markdown)
+        .reply_markup(task_action_keyboard(&id, &title))
         .await?;
 
     refresh_task_memory(pool, &id).await;
@@ -2231,13 +2607,14 @@ async fn poll_due_task_reminders(
 
         let msg = format!(
             "⏰ *Reminder*\n`{}` {}\n_Due {}_\n\
-             `/tasks complete {}` · `/tasks snooze {}`",
+             Tap below, or `/tasks complete {}` · `/tasks snooze {}`",
             short_id,
             escape_md_basic(&title),
             escape_md_basic(&when),
             short_id,
             short_id
         );
+        let keyboard = task_action_keyboard(&id, &title);
 
         let targets: Vec<i64> = match assigned_to.as_deref() {
             Some(mid) => match telegram_chat_for_member(config, mid) {
@@ -2252,6 +2629,7 @@ async fn poll_due_task_reminders(
             if let Err(e) = bot
                 .send_message(ChatId(*cid), msg.clone())
                 .parse_mode(teloxide::types::ParseMode::Markdown)
+                .reply_markup(keyboard.clone())
                 .await
             {
                 eprintln!(
@@ -2292,41 +2670,33 @@ async fn mark_task_complete(
     pool: &SqlitePool,
     id_prefix: &str,
 ) -> Result<(), teloxide::RequestError> {
-    let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, _title, _status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
 
-    if status == "done" {
-        bot.send_message(
-            chat_id,
-            format!("ℹ️ Task already done: _{}_", escape_md_basic(&title)),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
-        return Ok(());
+    match complete_task_by_id(pool, &id).await {
+        TaskMutateOutcome::Done { title, already } => {
+            let msg = if already {
+                format!("ℹ️ Task already done: _{}_", escape_md_basic(&title))
+            } else {
+                format!("✅ Marked done: _{}_", escape_md_basic(&title))
+            };
+            bot.send_message(chat_id, msg)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await?;
+            if !already {
+                refresh_task_memory(pool, &id).await;
+            }
+        }
+        TaskMutateOutcome::NotFound => {
+            bot.send_message(chat_id, "⚠️ Task not found.").await?;
+        }
+        TaskMutateOutcome::DbError => {
+            bot.send_message(chat_id, "❌ Database error updating task.")
+                .await?;
+        }
+        TaskMutateOutcome::Snoozed { .. } => unreachable!(),
     }
-
-    let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&id)
-        .execute(pool)
-        .await
-    {
-        eprintln!("Failed to mark task done: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error updating task.")
-            .await?;
-        return Ok(());
-    }
-
-    bot.send_message(
-        chat_id,
-        format!("✅ Marked done: _{}_", escape_md_basic(&title)),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
-    .await?;
-
-    refresh_task_memory(pool, &id).await;
     Ok(())
 }
 
@@ -2448,45 +2818,33 @@ async fn snooze_task(
     id_prefix: &str,
     days: i64,
 ) -> Result<(), teloxide::RequestError> {
-    let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
 
-    let due = (chrono::Local::now().date_naive() + chrono::Duration::days(days))
-        .format("%Y-%m-%d")
-        .to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    // Date-only snooze → local 09:00 that day (same default as create).
-    let due_at = parse_due_phrase(&due).map(|p| p.due_at);
-
-    if let Err(e) = sqlx::query(
-        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(&due)
-    .bind(due_at.as_deref())
-    .bind(&now)
-    .bind(&id)
-    .execute(pool)
-    .await
-    {
-        eprintln!("Failed to snooze task: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error snoozing task.")
+    match snooze_task_by_id(pool, &id, days).await {
+        TaskMutateOutcome::Snoozed { title, due } => {
+            bot.send_message(
+                chat_id,
+                format!(
+                    "😴 Snoozed until *{}*: _{}_",
+                    due,
+                    escape_md_basic(&title)
+                ),
+            )
+            .parse_mode(teloxide::types::ParseMode::Markdown)
             .await?;
-        return Ok(());
+            refresh_task_memory(pool, &id).await;
+        }
+        TaskMutateOutcome::NotFound => {
+            bot.send_message(chat_id, "⚠️ Task not found.").await?;
+        }
+        TaskMutateOutcome::DbError => {
+            bot.send_message(chat_id, "❌ Database error snoozing task.")
+                .await?;
+        }
+        TaskMutateOutcome::Done { .. } => unreachable!(),
     }
-
-    bot.send_message(
-        chat_id,
-        format!(
-            "😴 Snoozed until *{}*: _{}_",
-            due,
-            escape_md_basic(&title)
-        ),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
-    .await?;
-
-    refresh_task_memory(pool, &id).await;
     Ok(())
 }
 
