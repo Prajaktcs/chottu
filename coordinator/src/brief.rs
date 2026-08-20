@@ -104,9 +104,11 @@ async fn format_tasks_section(
         "SELECT id, title, due_date, assigned_to FROM tasks WHERE status = 'open'",
     );
     if let Some(member_id) = for_member_id {
+        // COLLATE NOCASE matches task_in_brief_scope's eq_ignore_ascii_case so
+        // casing differences don't get dropped before LIMIT 40.
         qb.push(" AND (assigned_to = ");
         qb.push_bind(member_id);
-        qb.push(" OR assigned_to IS NULL)");
+        qb.push(" COLLATE NOCASE OR assigned_to IS NULL)");
     }
     qb.push(" ORDER BY due_date IS NULL, due_date ASC, created_at DESC LIMIT 40");
 

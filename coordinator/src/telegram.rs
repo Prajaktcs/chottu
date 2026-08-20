@@ -894,21 +894,26 @@ impl Drop for ProgressNudge {
 /// parse as member/description instead of becoming the food description.
 fn strip_leading_food_command(input: &str) -> &str {
     let trimmed = input.trim();
-    let prefix = "/food";
-    if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        let rest = &trimmed[prefix.len()..];
-        if rest.is_empty() {
-            return "";
-        }
-        if rest.starts_with(char::is_whitespace) {
-            return rest.trim();
-        }
-        if let Some(after_at) = rest.strip_prefix('@') {
-            return after_at
-                .split_once(char::is_whitespace)
-                .map(|(_, args)| args.trim())
-                .unwrap_or("");
-        }
+    const PREFIX: &str = "/food";
+    let Some(head) = trimmed.get(..PREFIX.len()) else {
+        return trimmed;
+    };
+    if !head.eq_ignore_ascii_case(PREFIX) {
+        return trimmed;
+    }
+    // PREFIX is ASCII, so PREFIX.len() is a char boundary after the get() check.
+    let rest = trimmed.get(PREFIX.len()..).unwrap_or("");
+    if rest.is_empty() {
+        return "";
+    }
+    if rest.chars().next().is_some_and(char::is_whitespace) {
+        return rest.trim();
+    }
+    if let Some(after_at) = rest.strip_prefix('@') {
+        return after_at
+            .split_once(|c: char| c.is_whitespace())
+            .map(|(_, args)| args.trim())
+            .unwrap_or("");
     }
     trimmed
 }
