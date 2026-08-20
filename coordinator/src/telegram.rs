@@ -416,7 +416,7 @@ async fn handle_callback_query(
         return Ok(());
     }
 
-    let Some((action, task_id)) = parse_task_callback(data) else {
+    let Some((action, surface, task_id)) = parse_task_callback(data) else {
         bot.answer_callback_query(q.id).await?;
         return Ok(());
     };
@@ -435,14 +435,7 @@ async fn handle_callback_query(
                         return Ok(());
                     }
                     let note = format!("✅ Marked done: _{}_", escape_md_basic(&title));
-                    update_message_after_task_action(
-                        &bot,
-                        msg,
-                        task_id,
-                        &note,
-                        /* clear_all_buttons */ true,
-                    )
-                    .await?;
+                    update_message_after_task_action(&bot, msg, task_id, &note, surface).await?;
                     refresh_task_memory(&pool, task_id).await;
                 }
                 TaskMutateOutcome::NotFound => {
@@ -471,7 +464,7 @@ async fn handle_callback_query(
                         due,
                         escape_md_basic(&title)
                     );
-                    update_message_after_task_action(&bot, msg, task_id, &note, true).await?;
+                    update_message_after_task_action(&bot, msg, task_id, &note, surface).await?;
                     refresh_task_memory(&pool, task_id).await;
                 }
                 TaskMutateOutcome::NotFound => {
@@ -500,10 +493,20 @@ enum TaskCallbackAction {
     Snooze,
 }
 
-fn parse_task_callback(data: &str) -> Option<(TaskCallbackAction, &str)> {
-    // Format: t:d:{uuid} or t:s:{uuid} (callback_data max 64 bytes).
+/// Where the button was attached — drives whether we rewrite the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaskCallbackSurface {
+    /// Reminder or create confirmation: replace text in place.
+    Single,
+    /// `/tasks` list: keep list text, drop that task's button row.
+    List,
+}
+
+fn parse_task_callback(data: &str) -> Option<(TaskCallbackAction, TaskCallbackSurface, &str)> {
+    // Format: t:{d|s}:{1|m}:{uuid} (callback_data max 64 bytes).
     let rest = data.strip_prefix("t:")?;
-    let (action_raw, task_id) = rest.split_once(':')?;
+    let (action_raw, rest) = rest.split_once(':')?;
+    let (surface_raw, task_id) = rest.split_once(':')?;
     if task_id.len() < 8 || task_id.len() > 40 {
         return None;
     }
@@ -518,11 +521,28 @@ fn parse_task_callback(data: &str) -> Option<(TaskCallbackAction, &str)> {
         "s" => TaskCallbackAction::Snooze,
         _ => return None,
     };
-    Some((action, task_id))
+    let surface = match surface_raw {
+        "1" => TaskCallbackSurface::Single,
+        "m" => TaskCallbackSurface::List,
+        _ => return None,
+    };
+    Some((action, surface, task_id))
+}
+
+fn task_callback_data(action: char, surface: TaskCallbackSurface, task_id: &str) -> String {
+    let surface_tag = match surface {
+        TaskCallbackSurface::Single => '1',
+        TaskCallbackSurface::List => 'm',
+    };
+    format!("t:{}:{}:{}", action, surface_tag, task_id)
 }
 
 fn task_action_keyboard(task_id: &str, title: &str) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![task_action_row(task_id, title)])
+    InlineKeyboardMarkup::new(vec![task_action_row(
+        task_id,
+        title,
+        TaskCallbackSurface::Single,
+    )])
 }
 
 fn task_list_keyboard(rows: &[(String, String)]) -> InlineKeyboardMarkup {
@@ -530,12 +550,16 @@ fn task_list_keyboard(rows: &[(String, String)]) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(
         rows.iter()
             .take(15)
-            .map(|(id, title)| task_action_row(id, title))
+            .map(|(id, title)| task_action_row(id, title, TaskCallbackSurface::List))
             .collect::<Vec<_>>(),
     )
 }
 
-fn task_action_row(task_id: &str, title: &str) -> Vec<InlineKeyboardButton> {
+fn task_action_row(
+    task_id: &str,
+    title: &str,
+    surface: TaskCallbackSurface,
+) -> Vec<InlineKeyboardButton> {
     let label = truncate_chars(title.trim(), 28);
     let done_label = if label.is_empty() {
         "✅ Done".to_string()
@@ -543,8 +567,14 @@ fn task_action_row(task_id: &str, title: &str) -> Vec<InlineKeyboardButton> {
         format!("✅ {}", label)
     };
     vec![
-        InlineKeyboardButton::callback(done_label, format!("t:d:{}", task_id)),
-        InlineKeyboardButton::callback("😴 +1d", format!("t:s:{}", task_id)),
+        InlineKeyboardButton::callback(
+            done_label,
+            task_callback_data('d', surface, task_id),
+        ),
+        InlineKeyboardButton::callback(
+            "😴 +1d",
+            task_callback_data('s', surface, task_id),
+        ),
     ]
 }
 
@@ -552,14 +582,14 @@ fn strip_task_buttons(
     markup: &InlineKeyboardMarkup,
     task_id: &str,
 ) -> InlineKeyboardMarkup {
-    let done_cb = format!("t:d:{}", task_id);
-    let snooze_cb = format!("t:s:{}", task_id);
     let rows: Vec<Vec<InlineKeyboardButton>> = markup
         .inline_keyboard
         .iter()
         .filter(|row| {
             !row.iter().any(|btn| match &btn.kind {
-                InlineKeyboardButtonKind::CallbackData(d) => d == &done_cb || d == &snooze_cb,
+                InlineKeyboardButtonKind::CallbackData(d) => {
+                    d.starts_with("t:") && d.ends_with(task_id)
+                }
                 _ => false,
             })
         })
@@ -568,21 +598,16 @@ fn strip_task_buttons(
     InlineKeyboardMarkup::new(rows)
 }
 
-/// After a button action: for single-task messages (reminder), replace text and
-/// clear buttons; for multi-task lists, drop that task's row and keep the rest.
+/// After a button action: single-task surfaces rewrite the message; list
+/// surfaces drop that task's keyboard row and send a short confirmation.
 async fn update_message_after_task_action(
     bot: &Bot,
     msg: &Message,
     task_id: &str,
     note_md: &str,
-    prefer_replace_single: bool,
+    surface: TaskCallbackSurface,
 ) -> Result<(), teloxide::RequestError> {
-    let row_count = msg
-        .reply_markup()
-        .map(|m| m.inline_keyboard.len())
-        .unwrap_or(0);
-
-    if prefer_replace_single && row_count <= 1 {
+    if surface == TaskCallbackSurface::Single {
         bot.edit_message_text(msg.chat.id, msg.id, note_md)
             .parse_mode(teloxide::types::ParseMode::Markdown)
             .reply_markup(InlineKeyboardMarkup::default())
@@ -704,22 +729,27 @@ mod task_button_tests {
     #[test]
     fn parse_task_callback_accepts_done_and_snooze() {
         let id = "a3f2b91c-1111-2222-3333-444455556666";
-        let done = format!("t:d:{id}");
-        let (action, parsed) = parse_task_callback(&done).unwrap();
+        let done = format!("t:d:1:{id}");
+        let (action, surface, parsed) = parse_task_callback(&done).unwrap();
         assert_eq!(action, TaskCallbackAction::Done);
+        assert_eq!(surface, TaskCallbackSurface::Single);
         assert_eq!(parsed, id);
-        let snooze = format!("t:s:{id}");
-        let (action, parsed) = parse_task_callback(&snooze).unwrap();
+        let snooze = format!("t:s:m:{id}");
+        let (action, surface, parsed) = parse_task_callback(&snooze).unwrap();
         assert_eq!(action, TaskCallbackAction::Snooze);
+        assert_eq!(surface, TaskCallbackSurface::List);
         assert_eq!(parsed, id);
     }
 
     #[test]
     fn parse_task_callback_rejects_junk() {
         assert!(parse_task_callback("done:abc").is_none());
-        assert!(parse_task_callback("t:x:abcdef12").is_none());
-        assert!(parse_task_callback("t:d:short").is_none());
-        assert!(parse_task_callback("t:d:not a uuid!!!").is_none());
+        assert!(parse_task_callback("t:x:1:abcdef12").is_none());
+        assert!(parse_task_callback("t:d:1:short").is_none());
+        assert!(parse_task_callback("t:d:1:not a uuid!!!").is_none());
+        assert!(parse_task_callback("t:d:x:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_none());
+        // Legacy format without surface tag.
+        assert!(parse_task_callback("t:d:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_none());
     }
 
     #[test]
@@ -738,13 +768,14 @@ mod task_button_tests {
             _ => panic!("expected callback"),
         };
         assert!(cb.contains(id2));
+        assert!(cb.contains(":m:"));
     }
 
     #[test]
     fn task_callback_data_fits_telegram_limit() {
         let id = "a3f2b91c-1111-2222-3333-444455556666"; // 36 chars
-        let done = format!("t:d:{}", id);
-        let snooze = format!("t:s:{}", id);
+        let done = task_callback_data('d', TaskCallbackSurface::List, id);
+        let snooze = task_callback_data('s', TaskCallbackSurface::Single, id);
         assert!(done.len() <= 64, "done callback {} bytes", done.len());
         assert!(snooze.len() <= 64, "snooze callback {} bytes", snooze.len());
     }
