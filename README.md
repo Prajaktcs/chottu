@@ -55,7 +55,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
 - **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals, and training (outcome countdown + today’s planned session) — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
-- **Evening reflection**: scheduled or `/reflect` — grounds a journal prompt in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
+- **Evening reflection**: scheduled or `/reflect` — trains toward your `core_values` in `config.yaml` (default Growth + Contribution), optionally grounded in the day’s ledger + health data; replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
 - Local embeddings (`nomic-embed-text` via Ollama) over journals, newsletter digests, personal references, and tasks.
@@ -223,7 +223,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
-| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Actions: `/tasks complete <id\|all>` (linked DM: yours + unassigned; household needs `/tasks complete all confirm`), `/tasks snooze <id> [days]`, `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Actions: `/tasks complete <id\|all>` (linked DM: yours + unassigned; household needs `/tasks complete all confirm`; cancels linked calendar events), `/tasks snooze <id> [days]` (moves linked calendar events), `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
 | `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Shared-universe stock research via OpenRouter + Finnhub (propose → cap filter → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |

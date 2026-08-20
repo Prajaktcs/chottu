@@ -17,11 +17,12 @@ use chotu_common::{
     has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
     effective_food_time, parse_due_phrase, pending_budget_alerts, resolve_food_log_timing,
-    save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token, schedule_at,
-    set_budget_override, set_member_telegram_chat_id, spawn_background_reindex, split_task_add_args,
-    start_redirect_listener, telegram_chat_for_member, telegram_delivery_targets, AppConfig,
-    CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, InvestmentPhilosophy,
-    MemoryIndex, UserIntent,
+    reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
+    save_health_refresh_token, schedule_at, set_budget_override, set_member_telegram_chat_id,
+    spawn_background_reindex, split_task_add_args, start_redirect_listener,
+    telegram_chat_for_member, telegram_delivery_targets, AppConfig, CalendarWindow, ChotuLlm,
+    CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient, InvestmentPhilosophy,
+    MemoryIndex, UserIntent, TASK_CALENDAR_DURATION_MINUTES,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 use teloxide::net::Download;
@@ -1700,7 +1701,7 @@ async fn handle_tasks(
                     mark_all_tasks_complete(bot, chat_id, pool, config, confirm).await
                 }
                 Some(ref id) if id.len() >= 4 => {
-                    mark_task_complete(bot, chat_id, pool, id).await
+                    mark_task_complete(bot, chat_id, pool, config, id).await
                 }
                 _ => {
                     bot.send_message(
@@ -1719,7 +1720,7 @@ async fn handle_tasks(
             return mark_all_tasks_complete(bot, chat_id, pool, config, confirm).await;
         }
         "done" if second.is_some_and(looks_like_task_id_prefix) => {
-            return mark_task_complete(bot, chat_id, pool, second.unwrap()).await;
+            return mark_task_complete(bot, chat_id, pool, config, second.unwrap()).await;
         }
         "snooze" => {
             return match second {
@@ -1728,7 +1729,7 @@ async fn handle_tasks(
                         .and_then(|t| t.parse::<i64>().ok())
                         .unwrap_or(1)
                         .clamp(1, 90);
-                    snooze_task(bot, chat_id, pool, id, days).await
+                    snooze_task(bot, chat_id, pool, config, id, days).await
                 }
                 _ => {
                     bot.send_message(
@@ -2075,7 +2076,7 @@ async fn create_manual_task(
                                     &title,
                                     Some("Created via Telegram"),
                                     start,
-                                    30,
+                                    TASK_CALENDAR_DURATION_MINUTES,
                                 )
                                 .await
                                 {
@@ -2290,6 +2291,7 @@ async fn mark_task_complete(
     bot: &Bot,
     chat_id: ChatId,
     pool: &SqlitePool,
+    config: &AppConfig,
     id_prefix: &str,
 ) -> Result<(), teloxide::RequestError> {
     let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
@@ -2306,17 +2308,25 @@ async fn mark_task_complete(
         return Ok(());
     }
 
+    let cal = load_task_calendar_link(pool, &id).await;
+
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&id)
-        .execute(pool)
-        .await
+    if let Err(e) = sqlx::query(
+        "UPDATE tasks SET status = 'done', calendar_event_id = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(&now)
+    .bind(&id)
+    .execute(pool)
+    .await
     {
         eprintln!("Failed to mark task done: {:?}", e);
         bot.send_message(chat_id, "❌ Database error updating task.")
             .await?;
         return Ok(());
+    }
+
+    if let Some(ref link) = cal {
+        delete_linked_calendar_event(config, link).await;
     }
 
     bot.send_message(
@@ -2407,6 +2417,17 @@ async fn mark_all_tasks_complete(
         return Ok(());
     }
 
+    for row in &rows {
+        if row.calendar_event_id.is_some() {
+            let link = TaskCalendarLink {
+                calendar_event_id: row.calendar_event_id.clone(),
+                assigned_to: row.assigned_to.clone(),
+                duration_minutes: None,
+            };
+            delete_linked_calendar_event(config, &link).await;
+        }
+    }
+
     let count = rows.len();
     let mut msg = if linked_member.is_some() {
         format!(
@@ -2420,14 +2441,14 @@ async fn mark_all_tasks_complete(
             if count == 1 { "" } else { "s" }
         )
     };
-    for (i, (_id, title)) in rows.iter().enumerate() {
+    for (i, row) in rows.iter().enumerate() {
         if i >= 15 {
             msg.push_str(&format!("_…and {} more_", count - 15));
             break;
         }
         msg.push_str(&format!(
             "• {}\n",
-            escape_md_basic(&truncate_chars(title, 80))
+            escape_md_basic(&truncate_chars(&row.title, 80))
         ));
     }
 
@@ -2435,8 +2456,8 @@ async fn mark_all_tasks_complete(
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
 
-    for (id, _) in &rows {
-        refresh_task_memory(pool, id).await;
+    for row in &rows {
+        refresh_task_memory(pool, &row.id).await;
     }
     Ok(())
 }
@@ -2445,6 +2466,7 @@ async fn snooze_task(
     bot: &Bot,
     chat_id: ChatId,
     pool: &SqlitePool,
+    config: &AppConfig,
     id_prefix: &str,
     days: i64,
 ) -> Result<(), teloxide::RequestError> {
@@ -2458,6 +2480,7 @@ async fn snooze_task(
     let now = chrono::Utc::now().to_rfc3339();
     // Date-only snooze → local 09:00 that day (same default as create).
     let due_at = parse_due_phrase(&due).map(|p| p.due_at);
+    let cal = load_task_calendar_link(pool, &id).await;
 
     if let Err(e) = sqlx::query(
         "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
@@ -2475,19 +2498,172 @@ async fn snooze_task(
         return Ok(());
     }
 
-    bot.send_message(
-        chat_id,
-        format!(
-            "😴 Snoozed until *{}*: _{}_",
-            due,
-            escape_md_basic(&title)
-        ),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
-    .await?;
+    let mut calendar_note: Option<&'static str> = None;
+    if let (Some(ref link), Some(ref at)) = (&cal, &due_at) {
+        if link.calendar_event_id.is_some() {
+            match reschedule_linked_calendar_event(config, pool, &id, link, at).await {
+                Ok(true) => calendar_note = Some("📅 calendar updated"),
+                Ok(false) => {}
+                Err(()) => calendar_note = Some("calendar update failed"),
+            }
+        }
+    }
+
+    let mut msg = format!(
+        "😴 Snoozed until *{}*: _{}_",
+        due,
+        escape_md_basic(&title)
+    );
+    if let Some(note) = calendar_note {
+        msg.push_str(&format!(" · _{}_", note));
+    }
+
+    bot.send_message(chat_id, msg)
+        .parse_mode(teloxide::types::ParseMode::Markdown)
+        .await?;
 
     refresh_task_memory(pool, &id).await;
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct TaskCalendarLink {
+    calendar_event_id: Option<String>,
+    assigned_to: Option<String>,
+    duration_minutes: Option<i64>,
+}
+
+async fn load_task_calendar_link(pool: &SqlitePool, task_id: &str) -> Option<TaskCalendarLink> {
+    let row: Option<(Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
+        "SELECT calendar_event_id, assigned_to, duration_minutes FROM tasks WHERE id = ?",
+    )
+    .bind(task_id)
+    .fetch_optional(pool)
+    .await
+    .unwrap_or_else(|e| {
+        eprintln!(
+            "Telegram Bot: failed to load calendar link for task {}: {:?}",
+            task_id, e
+        );
+        None
+    });
+
+    row.map(|(calendar_event_id, assigned_to, duration_minutes)| TaskCalendarLink {
+        calendar_event_id,
+        assigned_to,
+        duration_minutes,
+    })
+}
+
+fn calendar_client_for_assignee(
+    config: &AppConfig,
+    assigned_to: Option<&str>,
+) -> Option<GoogleCalendarClient> {
+    let mid = assigned_to?;
+    let member = config.family.members.iter().find(|m| m.id == mid)?;
+    build_calendar_client(member)
+}
+
+async fn delete_linked_calendar_event(config: &AppConfig, link: &TaskCalendarLink) {
+    let Some(event_id) = link
+        .calendar_event_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    else {
+        return;
+    };
+    let Some(client) = calendar_client_for_assignee(config, link.assigned_to.as_deref()) else {
+        eprintln!(
+            "Telegram Bot: skip calendar delete for event {} (no client for assignee {:?})",
+            event_id, link.assigned_to
+        );
+        return;
+    };
+    match client.delete_event(event_id).await {
+        Ok(()) => {
+            println!("Telegram Bot: deleted calendar event {}", event_id);
+        }
+        Err(e) => {
+            eprintln!(
+                "Telegram Bot: failed to delete calendar event {}: {:?}",
+                event_id, e
+            );
+        }
+    }
+}
+
+/// Reschedule the linked Google event to `due_at_rfc3339`. Returns Ok(true) when
+/// an API update succeeded, Ok(false) when there was nothing to update, Err(()) on
+/// failure (including clearing a stale event id after 404).
+async fn reschedule_linked_calendar_event(
+    config: &AppConfig,
+    pool: &SqlitePool,
+    task_id: &str,
+    link: &TaskCalendarLink,
+    due_at_rfc3339: &str,
+) -> Result<bool, ()> {
+    let Some(event_id) = link
+        .calendar_event_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(false);
+    };
+    let Some(client) = calendar_client_for_assignee(config, link.assigned_to.as_deref()) else {
+        eprintln!(
+            "Telegram Bot: skip calendar reschedule for event {} (no client for assignee {:?})",
+            event_id, link.assigned_to
+        );
+        return Err(());
+    };
+    let Ok(due_dt) = chrono::DateTime::parse_from_rfc3339(due_at_rfc3339) else {
+        eprintln!(
+            "Telegram Bot: invalid due_at for calendar reschedule: {}",
+            due_at_rfc3339
+        );
+        return Err(());
+    };
+    let start = due_dt.with_timezone(&chrono::Utc);
+    let duration = link
+        .duration_minutes
+        .unwrap_or(TASK_CALENDAR_DURATION_MINUTES);
+    match reschedule_at(&client, event_id, start, duration).await {
+        Ok(()) => {
+            println!(
+                "Telegram Bot: rescheduled calendar event {} to {}",
+                event_id, due_at_rfc3339
+            );
+            Ok(true)
+        }
+        Err(chotu_common::CalendarError::Api { status: 404, .. }) => {
+            eprintln!(
+                "Telegram Bot: calendar event {} missing on snooze; clearing stored id",
+                event_id
+            );
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = sqlx::query(
+                "UPDATE tasks SET calendar_event_id = NULL, updated_at = ? WHERE id = ?",
+            )
+            .bind(&now)
+            .bind(task_id)
+            .execute(pool)
+            .await
+            {
+                eprintln!(
+                    "Telegram Bot: failed to clear stale calendar_event_id for {}: {:?}",
+                    task_id, e
+                );
+            }
+            Err(())
+        }
+        Err(e) => {
+            eprintln!(
+                "Telegram Bot: failed to reschedule calendar event {}: {:?}",
+                event_id, e
+            );
+            Err(())
+        }
+    }
 }
 
 async fn reassign_task(
@@ -2729,6 +2905,14 @@ async fn handle_plan(
                 }
                 msg.push('\n');
             }
+            if let Some(progress) =
+                plan_week_progress_line(pool, &member_id, &week_start, &stored.plan_json, today)
+                    .await
+            {
+                msg.push('\n');
+                msg.push_str(&progress);
+                msg.push('\n');
+            }
             bot.send_message(chat_id, msg)
                 .parse_mode(teloxide::types::ParseMode::Markdown)
                 .await?;
@@ -2766,6 +2950,14 @@ async fn handle_plan(
                     msg.push('\n');
                 }
             }
+            if let Some(progress) =
+                plan_week_progress_line(pool, &member_id, &week_start, &stored.plan_json, today)
+                    .await
+            {
+                msg.push('\n');
+                msg.push_str(&progress);
+                msg.push('\n');
+            }
             bot.send_message(chat_id, msg)
                 .parse_mode(teloxide::types::ParseMode::Markdown)
                 .await?;
@@ -2777,6 +2969,49 @@ async fn handle_plan(
         }
     }
     Ok(())
+}
+
+async fn plan_week_progress_line(
+    pool: &SqlitePool,
+    member_id: &str,
+    week_start: &str,
+    plan_json: &str,
+    today: chrono::NaiveDate,
+) -> Option<String> {
+    let plan = health_coach::parse_plan_json(plan_json).ok()?;
+    let week_end = (health_coach::week_start_monday(today) + chrono::Duration::days(6))
+        .format("%Y-%m-%d")
+        .to_string();
+    let week_ex = health_coach::exercise_entries_for_range(pool, member_id, week_start, &week_end)
+        .await
+        .ok()?;
+    let labels: Vec<(String, String)> = week_ex
+        .iter()
+        .map(|e| (e.date.clone(), e.activity_label()))
+        .collect();
+    let (matched, planned) =
+        health_coach::plan_session_adherence(week_start, &plan, today, &labels);
+    let week_cardio = health_coach::sum_cardio_minutes(
+        week_ex
+            .iter()
+            .map(|e| (e.activity_label(), e.duration_mins())),
+    );
+    let duration_rows: Vec<(String, String, i32)> = week_ex
+        .iter()
+        .map(|e| (e.date.clone(), e.activity_label(), e.duration_mins()))
+        .collect();
+    let plan_cardio = health_coach::plan_cardio_minutes_on_cardio_days(
+        week_start,
+        &plan,
+        today,
+        &duration_rows,
+    );
+    Some(health_coach::format_plan_progress_line(
+        matched,
+        planned,
+        week_cardio,
+        plan_cardio,
+    ))
 }
 
 async fn handle_cal(
@@ -3286,7 +3521,7 @@ async fn handle_status(
                 config,
                 &h.family_member_id,
                 ctx,
-                Some(&date_str),
+                health_coach::CoachEnrichOpts::for_day(&date_str),
             )
             .await;
             pending.push((member_report, Some(ctx)));
@@ -3910,7 +4145,8 @@ async fn handle_reflect_trigger(
     };
 
     // 2. Generate prompt
-    match crate::reflection::generate_reflection_prompt(llm, &txs, &healths, &date_str).await {
+    match crate::reflection::generate_reflection_prompt(llm, &txs, &healths, &date_str).await
+    {
         Ok(prompt) => {
             // Update state to wait for reflection response
             {

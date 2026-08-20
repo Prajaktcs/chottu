@@ -348,18 +348,21 @@ async fn format_training_section(
         };
         any = true;
 
-        let planned_line = match health_coach::load_weekly_plan(pool, &member.id, &week_start).await
-        {
-            Ok(Some(stored)) => health_coach::session_for_date_from_stored(&stored, today).map(|p| {
+        let stored_plan = health_coach::load_weekly_plan(pool, &member.id, &week_start)
+            .await
+            .ok()
+            .flatten();
+
+        let planned_line = stored_plan.as_ref().and_then(|stored| {
+            health_coach::session_for_date_from_stored(stored, today).map(|p| {
                 let notes = p.notes.trim();
                 if notes.is_empty() {
                     format!("{} ({})", p.weekday, p.kind.as_str())
                 } else {
                     format!("{} ({}): {}", p.weekday, p.kind.as_str(), notes)
                 }
-            }),
-            _ => None,
-        };
+            })
+        });
 
         let yesterday_ex = health_coach::exercises_for_day(pool, &member.id, yesterday)
             .await
@@ -372,6 +375,56 @@ async fn format_training_section(
             planned_line.as_deref(),
             &yesterday_ex,
         ));
+
+        if let Some(stored) = stored_plan.as_ref() {
+            if let Ok(plan) = health_coach::parse_plan_json(&stored.plan_json) {
+                let week_end = (health_coach::week_start_monday(today) + chrono::Duration::days(6))
+                    .format("%Y-%m-%d")
+                    .to_string();
+                if let Ok(week_ex) = health_coach::exercise_entries_for_range(
+                    pool,
+                    &member.id,
+                    &week_start,
+                    &week_end,
+                )
+                .await
+                {
+                    let labels: Vec<(String, String)> = week_ex
+                        .iter()
+                        .map(|e| (e.date.clone(), e.activity_label()))
+                        .collect();
+                    let (matched, planned) = health_coach::plan_session_adherence(
+                        &week_start,
+                        &plan,
+                        today,
+                        &labels,
+                    );
+                    let week_cardio = health_coach::sum_cardio_minutes(
+                        week_ex
+                            .iter()
+                            .map(|e| (e.activity_label(), e.duration_mins())),
+                    );
+                    let duration_rows: Vec<(String, String, i32)> = week_ex
+                        .iter()
+                        .map(|e| (e.date.clone(), e.activity_label(), e.duration_mins()))
+                        .collect();
+                    let plan_cardio = health_coach::plan_cardio_minutes_on_cardio_days(
+                        &week_start,
+                        &plan,
+                        today,
+                        &duration_rows,
+                    );
+                    lines.push_str("  - ");
+                    lines.push_str(&health_coach::format_plan_progress_line(
+                        matched,
+                        planned,
+                        week_cardio,
+                        plan_cardio,
+                    ));
+                    lines.push('\n');
+                }
+            }
+        }
     }
 
     if !any {

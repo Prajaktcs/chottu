@@ -53,15 +53,17 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 4. Task ↔ calendar sync on snooze / complete
-- [ ] On snooze: update the linked Google Calendar event time when `calendar_event_id` is set
-- [ ] On complete (single or bulk): cancel/delete the linked calendar event
-- [ ] Keep create-path behavior (manual task with due time → calendar event) unchanged
+- [x] On snooze: update the linked Google Calendar event time when `calendar_event_id` is set
+- [x] On complete (single or bulk): cancel/delete the linked calendar event
+- [x] Keep create-path behavior (manual task with due time → calendar event) unchanged
 
 **Why:** Create writes a calendar event and stores `calendar_event_id`; snooze only bumps SQLite dates; complete never cancels the event.
 
 **Effort:** S–M
 
 **Files:** `coordinator/src/telegram.rs` (`create_manual_task`, `snooze_task`, `mark_task_complete` / `mark_all_tasks_complete`), `chotu-common/src/calendar.rs`
+
+**Done:** Snooze PATCHes start/end via `reschedule_at` (duration from `duration_minutes` or 30m); complete/complete-all delete the Google event and clear `calendar_event_id`; create path unchanged.
 
 ---
 
@@ -81,15 +83,17 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 6. Coach plan / progress wiring
-- [ ] Stop attaching “today’s plan” blindly into `/trends` context when the day has no plan row
-- [ ] Pass real exercise dates into enrich so day exercises are not always empty
-- [ ] Track cardio minutes and session adherence vs plan kind (depends on item 1 for clean data)
+- [x] Stop attaching “today’s plan” blindly into `/trends` context when the day has no plan row
+- [x] Pass real exercise dates into enrich so day exercises are not always empty
+- [x] Track cardio minutes and session adherence vs plan kind (depends on item 1 for clean data)
 
 **Why:** `enrich_coach_context` always attaches today’s plan even for trends; cardio/adherence aren’t tracked beyond keyword counts.
 
 **Effort:** S–M
 
 **Files:** `health-coach/src/coach_enrich.rs`, `health-coach/src/trends.rs`, `health-coach/src/fitness_plan.rs`, `coordinator/src/brief.rs`, `coordinator/src/telegram.rs` (`handle_plan`)
+
+**Done:** `CoachEnrichOpts` — trends skip today’s plan and load exercises for the trend window; status uses `for_day`. `plan_session_adherence` + `plan_cardio_minutes_on_cardio_days` feed coach tips, `/plan`, and morning brief.
 
 ---
 
@@ -126,10 +130,10 @@ Not prioritized, but known thin spots:
 |------|-----|
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
-| Family privacy | Allowlist + link hijack guards are good; remaining leaks are items 4 and 7 above; household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
+| Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 (memory RAG); household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
 
 ## Suggested order
 
-Max quality per week: **4 → 6 → 7 → 8** (items 1–3 and 5 done).
+Max quality per week: **7 → 8** (items 1–6 done).
 
-Item 4 (task ↔ calendar sync) remains optional if snooze/complete calendar drift is not a priority; otherwise take 6 next.
+Take 7 next (memory RAG owner boundary).

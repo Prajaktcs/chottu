@@ -42,6 +42,11 @@ pub struct FitnessCoachContext {
     /// Cardio (+ mixed) minutes logged this week vs weekly target.
     pub week_cardio_minutes: Option<i32>,
     pub week_cardio_target: Option<i32>,
+    /// Non-rest plan days matched vs planned (Mon..today).
+    pub plan_sessions_matched: Option<i32>,
+    pub plan_sessions_planned: Option<i32>,
+    /// Cardio (+ mixed) minutes on days planned as cardio/mixed (Mon..today).
+    pub plan_cardio_minutes: Option<i32>,
     /// Optional trend arrows for calories / protein / steps (↑ ↓ →).
     pub calorie_trend: Option<&'static str>,
     pub protein_trend: Option<&'static str>,
@@ -99,6 +104,9 @@ impl FitnessCoachContext {
             week_strength_target: None,
             week_cardio_minutes: None,
             week_cardio_target: None,
+            plan_sessions_matched: None,
+            plan_sessions_planned: None,
+            plan_cardio_minutes: None,
             calorie_trend: None,
             protein_trend: None,
             steps_trend: None,
@@ -116,6 +124,9 @@ impl FitnessCoachContext {
         week_strength_target: Option<i32>,
         week_cardio_minutes: Option<i32>,
         week_cardio_target: Option<i32>,
+        plan_sessions_matched: Option<i32>,
+        plan_sessions_planned: Option<i32>,
+        plan_cardio_minutes: Option<i32>,
     ) -> Self {
         self.fitness_goals = fitness.cloned();
         self.days_until_target = days_until_target;
@@ -132,6 +143,9 @@ impl FitnessCoachContext {
         self.week_strength_target = week_strength_target;
         self.week_cardio_minutes = week_cardio_minutes;
         self.week_cardio_target = week_cardio_target;
+        self.plan_sessions_matched = plan_sessions_matched;
+        self.plan_sessions_planned = plan_sessions_planned;
+        self.plan_cardio_minutes = plan_cardio_minutes;
         self
     }
 
@@ -173,6 +187,9 @@ impl FitnessCoachContext {
             week_strength_target: None,
             week_cardio_minutes: None,
             week_cardio_target: None,
+            plan_sessions_matched: None,
+            plan_sessions_planned: None,
+            plan_cardio_minutes: None,
             calorie_trend: Some(calorie_trend),
             protein_trend: Some(protein_trend),
             steps_trend: Some(steps_trend),
@@ -296,6 +313,22 @@ impl FitnessCoachContext {
         }
         if let (Some(done), Some(target)) = (self.week_cardio_minutes, self.week_cardio_target) {
             lines.push(format!("Cardio minutes this week: {}/{}", done, target));
+        }
+        if let (Some(matched), Some(planned)) =
+            (self.plan_sessions_matched, self.plan_sessions_planned)
+        {
+            if planned > 0 {
+                lines.push(format!(
+                    "Plan adherence this week: {}/{} sessions matched",
+                    matched, planned
+                ));
+            }
+        }
+        if let Some(mins) = self.plan_cardio_minutes {
+            lines.push(format!(
+                "Cardio minutes on planned cardio/mixed days: {}",
+                mins
+            ));
         }
 
         lines.join("\n")
@@ -500,6 +533,9 @@ mod tests {
                 Some(3),
                 Some(40),
                 Some(90),
+                Some(1),
+                Some(2),
+                Some(20),
             );
         let prompt = ctx.to_user_prompt();
         assert!(prompt.contains("Intent: beach body"));
@@ -509,6 +545,8 @@ mod tests {
         assert!(prompt.contains("low-impact cardio"));
         assert!(prompt.contains("Strength sessions this week: 1/3"));
         assert!(prompt.contains("Cardio minutes this week: 40/90"));
+        assert!(prompt.contains("Plan adherence this week: 1/2 sessions matched"));
+        assert!(prompt.contains("Cardio minutes on planned cardio/mixed days: 20"));
         assert!(prompt.contains("Active calories: 400/400kcal"));
     }
 

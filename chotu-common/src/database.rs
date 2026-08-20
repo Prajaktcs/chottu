@@ -524,6 +524,15 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// A task row returned after marking it done via [`complete_all_open_tasks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedTaskRow {
+    pub id: String,
+    pub title: String,
+    pub calendar_event_id: Option<String>,
+    pub assigned_to: Option<String>,
+}
+
 /// List open/snoozed tasks that would be completed by [`complete_all_open_tasks`].
 ///
 /// When `assignee_filter` is `Some(member_id)`, only tasks assigned to that member
@@ -547,20 +556,24 @@ pub async fn list_completable_open_tasks(
         .await
 }
 
-/// Mark open/snoozed tasks as done. Returns `(id, title)` for each completed task
-/// (empty when there was nothing to complete).
+/// Mark open/snoozed tasks as done. Returns each completed task (empty when
+/// there was nothing to complete).
 ///
 /// When `assignee_filter` is `Some(member_id)`, only that member's tasks plus
 /// unassigned tasks are completed. When `None`, every open/snoozed task is completed.
+///
+/// Also clears `calendar_event_id` on completed rows so callers can delete the
+/// Google event without racing a concurrent reschedule.
 pub async fn complete_all_open_tasks(
     pool: &SqlitePool,
     now_rfc3339: &str,
     assignee_filter: Option<&str>,
-) -> Result<Vec<(String, String)>, sqlx::Error> {
+) -> Result<Vec<CompletedTaskRow>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let rows = {
         let mut qb = sqlx::QueryBuilder::new(
-            "SELECT id, title FROM tasks WHERE status IN ('open', 'snoozed')",
+            "SELECT id, title, calendar_event_id, assigned_to FROM tasks \
+             WHERE status IN ('open', 'snoozed')",
         );
         if let Some(member_id) = assignee_filter {
             qb.push(" AND (assigned_to = ");
@@ -568,14 +581,14 @@ pub async fn complete_all_open_tasks(
             qb.push(" OR assigned_to IS NULL)");
         }
         qb.push(" ORDER BY due_date IS NULL, due_date ASC, created_at ASC");
-        qb.build_query_as::<(String, String)>()
+        qb.build_query_as::<(String, String, Option<String>, Option<String>)>()
             .fetch_all(&mut *tx)
             .await?
     };
 
     if !rows.is_empty() {
         let mut qb = sqlx::QueryBuilder::new(
-            "UPDATE tasks SET status = 'done', updated_at = ",
+            "UPDATE tasks SET status = 'done', calendar_event_id = NULL, updated_at = ",
         );
         qb.push_bind(now_rfc3339);
         qb.push(" WHERE status IN ('open', 'snoozed')");
@@ -588,7 +601,15 @@ pub async fn complete_all_open_tasks(
     }
 
     tx.commit().await?;
-    Ok(rows)
+    Ok(rows
+        .into_iter()
+        .map(|(id, title, calendar_event_id, assigned_to)| CompletedTaskRow {
+            id,
+            title,
+            calendar_event_id,
+            assigned_to,
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -687,7 +708,7 @@ mod tests {
         let completed = complete_all_open_tasks(&pool, &now, None).await.unwrap();
         assert_eq!(completed.len(), 2);
         let titles: std::collections::HashSet<_> =
-            completed.iter().map(|(_, t)| t.as_str()).collect();
+            completed.iter().map(|r| r.title.as_str()).collect();
         assert!(titles.contains("change fob battery"));
         assert!(titles.contains("call dentist"));
 
@@ -722,7 +743,7 @@ mod tests {
             .await
             .unwrap();
         let titles: std::collections::HashSet<_> =
-            completed.iter().map(|(_, t)| t.as_str()).collect();
+            completed.iter().map(|r| r.title.as_str()).collect();
         assert_eq!(completed.len(), 2);
         assert!(titles.contains("alex task"));
         assert!(titles.contains("shared chore"));
@@ -737,5 +758,39 @@ mod tests {
         assert_eq!(map["t-alex"], "done");
         assert_eq!(map["t-unassigned"], "done");
         assert_eq!(map["t-jordan"], "open");
+    }
+
+    #[tokio::test]
+    async fn complete_all_open_tasks_returns_and_clears_calendar_event_id() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("complete_all_cal.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source, calendar_event_id) \
+             VALUES (?, ?, ?, ?, ?, NULL, NULL, 'open', 'manual', ?)",
+        )
+        .bind("t-cal")
+        .bind(&now)
+        .bind(&now)
+        .bind("dentist")
+        .bind(Some("alex"))
+        .bind(Some("evt-123"))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let completed = complete_all_open_tasks(&pool, &now, None).await.unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].calendar_event_id.as_deref(), Some("evt-123"));
+        assert_eq!(completed[0].assigned_to.as_deref(), Some("alex"));
+
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT calendar_event_id FROM tasks WHERE id = 't-cal'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(stored.is_none());
     }
 }

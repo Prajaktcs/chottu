@@ -16,7 +16,9 @@ pub mod quotes;
 pub mod yahoo_profile;
 pub mod spend_budget;
 
-pub use database::{complete_all_open_tasks, init_db, list_completable_open_tasks};
+pub use database::{
+    complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
+};
 pub use due_parse::{
     is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
     split_task_add_args, ParsedDue,
@@ -40,9 +42,9 @@ pub use agenda::{
     week_bounds_utc, CalendarConflict, CalendarWindow, FamilyCalendarError, FamilyEventsFetch,
 };
 pub use calendar::{
-    build_calendar_client, default_calendar_timezone, schedule_at, schedule_timed_block,
-    CalendarError,
-    CalendarEvent, GoogleCalendarClient,
+    build_calendar_client, default_calendar_timezone, reschedule_at, schedule_at,
+    schedule_timed_block, CalendarError, CalendarEvent, GoogleCalendarClient,
+    TASK_CALENDAR_DURATION_MINUTES,
 };
 pub use google_health::{
     parse_exercise_data_points, ExerciseSession, GoogleHealthClient, GoogleHealthFoodSummary,

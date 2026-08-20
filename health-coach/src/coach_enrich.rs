@@ -7,18 +7,49 @@ use sqlx::SqlitePool;
 use crate::coaching::FitnessCoachContext;
 use crate::fitness_plan::{
     count_strength_sessions, current_week_start_str, load_weekly_plan, parse_plan_json,
-    session_for_date, sum_cardio_minutes, week_start_monday,
+    plan_cardio_minutes_on_cardio_days, plan_session_adherence, session_for_date,
+    sum_cardio_minutes, week_start_monday, WeeklyFitnessPlan,
 };
 use crate::sync::{exercise_entries_for_range, exercises_for_day};
 
-/// Enrich a day/trend coach context with fitness goals, today's plan, and exercises.
+/// Options for [`enrich_coach_context`].
+#[derive(Debug, Clone, Copy)]
+pub struct CoachEnrichOpts<'a> {
+    /// When true, attach today's planned session (for `/status`). Trends should pass false.
+    pub include_today_plan: bool,
+    /// Load exercise blurbs for a single civil day (YYYY-MM-DD).
+    pub exercise_date: Option<&'a str>,
+    /// When set, load exercise blurbs for an inclusive date range (overrides single-day list).
+    pub exercise_range: Option<(&'a str, &'a str)>,
+}
+
+impl<'a> CoachEnrichOpts<'a> {
+    /// `/status`-style: today's plan + that day's exercises.
+    pub fn for_day(exercise_date: &'a str) -> Self {
+        Self {
+            include_today_plan: true,
+            exercise_date: Some(exercise_date),
+            exercise_range: None,
+        }
+    }
+
+    /// `/trends`-style: no today's plan; exercises across the trend window.
+    pub fn for_trends(start: &'a str, end: &'a str) -> Self {
+        Self {
+            include_today_plan: false,
+            exercise_date: None,
+            exercise_range: Some((start, end)),
+        }
+    }
+}
+
+/// Enrich a day/trend coach context with fitness goals, plan progress, and exercises.
 pub async fn enrich_coach_context(
     pool: &SqlitePool,
     config: &AppConfig,
     member_id: &str,
     ctx: FitnessCoachContext,
-    // When set, load exercises for this civil day; otherwise skip day exercises.
-    exercise_date: Option<&str>,
+    opts: CoachEnrichOpts<'_>,
 ) -> FitnessCoachContext {
     let member = config
         .family
@@ -33,15 +64,35 @@ pub async fn enrich_coach_context(
     let days_until = fitness.and_then(|g| g.days_until_target(today));
 
     let week_start = current_week_start_str();
-    let planned = if let Ok(Some(stored)) = load_weekly_plan(pool, member_id, &week_start).await {
-        parse_plan_json(&stored.plan_json)
-            .ok()
-            .and_then(|plan| session_for_date(&week_start, &plan, today).cloned())
+    let stored_plan = load_weekly_plan(pool, member_id, &week_start)
+        .await
+        .ok()
+        .flatten();
+    let parsed_plan: Option<WeeklyFitnessPlan> = stored_plan
+        .as_ref()
+        .and_then(|s| parse_plan_json(&s.plan_json).ok());
+
+    let planned = if opts.include_today_plan {
+        parsed_plan
+            .as_ref()
+            .and_then(|plan| session_for_date(&week_start, plan, today).cloned())
     } else {
         None
     };
 
-    let exercises = if let Some(date) = exercise_date {
+    let exercises = if let Some((start, end)) = opts.exercise_range {
+        exercise_entries_for_range(pool, member_id, start, end)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .take(12)
+            .map(|e| format!("{}: {}", e.date, e.description))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect()
+    } else if let Some(date) = opts.exercise_date {
         exercises_for_day(pool, member_id, date)
             .await
             .unwrap_or_default()
@@ -70,6 +121,28 @@ pub async fn enrich_coach_context(
     let strength_target = targets.and_then(|t| t.strength_sessions);
     let cardio_target = targets.and_then(|t| t.cardio_minutes);
 
+    let (plan_matched, plan_planned, plan_cardio) = if let Some(ref plan) = parsed_plan {
+        let label_rows: Vec<(String, String)> = week_ex
+            .iter()
+            .map(|e| (e.date.clone(), e.activity_label()))
+            .collect();
+        let (matched, planned_n) =
+            plan_session_adherence(&week_start_s, plan, today, &label_rows);
+        let duration_rows: Vec<(String, String, i32)> = week_ex
+            .iter()
+            .map(|e| (e.date.clone(), e.activity_label(), e.duration_mins()))
+            .collect();
+        let cardio_on_plan =
+            plan_cardio_minutes_on_cardio_days(&week_start_s, plan, today, &duration_rows);
+        (
+            Some(matched),
+            Some(planned_n),
+            Some(cardio_on_plan),
+        )
+    } else {
+        (None, None, None)
+    };
+
     ctx.with_fitness(
         fitness,
         days_until,
@@ -79,6 +152,9 @@ pub async fn enrich_coach_context(
         strength_target,
         Some(cardio_done),
         cardio_target,
+        plan_matched,
+        plan_planned,
+        plan_cardio,
     )
 }
 
@@ -127,6 +203,29 @@ pub fn fitness_brief_lines(
     out
 }
 
+/// One-line week progress for `/plan` replies.
+pub fn format_plan_progress_line(
+    matched: i32,
+    planned: i32,
+    week_cardio_minutes: i32,
+    plan_cardio_minutes: i32,
+) -> String {
+    let mut parts = Vec::new();
+    if planned > 0 {
+        parts.push(format!("{}/{} sessions matched", matched, planned));
+    } else {
+        parts.push("no sessions planned yet this week".to_string());
+    }
+    parts.push(format!("{} min cardio logged", week_cardio_minutes));
+    if plan_cardio_minutes > 0 || planned > 0 {
+        parts.push(format!(
+            "{} min on planned cardio/mixed days",
+            plan_cardio_minutes
+        ));
+    }
+    format!("📊 This week so far: {}", parts.join(" · "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -155,5 +254,29 @@ mod tests {
         assert!(md.contains("296 days"));
         assert!(md.contains("Tuesday (strength): lower body"));
         assert!(md.contains("Weights 40m"));
+    }
+
+    #[test]
+    fn plan_progress_line_formats_counts() {
+        let line = format_plan_progress_line(2, 3, 45, 30);
+        assert!(line.contains("2/3 sessions matched"));
+        assert!(line.contains("45 min cardio logged"));
+        assert!(line.contains("30 min on planned cardio/mixed days"));
+    }
+
+    #[test]
+    fn enrich_opts_day_vs_trends() {
+        let day = CoachEnrichOpts::for_day("2026-08-20");
+        assert!(day.include_today_plan);
+        assert_eq!(day.exercise_date, Some("2026-08-20"));
+        assert!(day.exercise_range.is_none());
+
+        let trends = CoachEnrichOpts::for_trends("2026-08-14", "2026-08-20");
+        assert!(!trends.include_today_plan);
+        assert!(trends.exercise_date.is_none());
+        assert_eq!(
+            trends.exercise_range,
+            Some(("2026-08-14", "2026-08-20"))
+        );
     }
 }
