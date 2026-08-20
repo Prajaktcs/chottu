@@ -181,17 +181,35 @@ pub fn is_declined(ev: &CalendarEvent) -> bool {
         .unwrap_or(false)
 }
 
-/// Fetch + merge events for all linked family calendars in `[from, to)`.
+/// Whether a family member's calendar should be fetched for this agenda scope.
+///
+/// `None` = household / unlinked chat (all members). `Some(id)` = linked personal
+/// DM — only that member's calendar.
+pub fn member_in_calendar_scope(member_id: &str, for_member_id: Option<&str>) -> bool {
+    match for_member_id {
+        Some(only) => member_id.eq_ignore_ascii_case(only),
+        None => true,
+    }
+}
+
+/// Fetch + merge events for linked family calendars in `[from, to)`.
+///
+/// When `for_member_id` is set (linked personal DM), only that member's calendar
+/// is fetched so private chats do not see the household agenda.
 pub async fn fetch_family_events(
     config: &AppConfig,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
+    for_member_id: Option<&str>,
 ) -> FamilyEventsFetch {
     let mut events: Vec<CalendarEvent> = Vec::new();
     let mut any_client = false;
     let mut errors: Vec<FamilyCalendarError> = Vec::new();
 
     for member in &config.family.members {
+        if !member_in_calendar_scope(&member.id, for_member_id) {
+            continue;
+        }
         let Some(client) = build_calendar_client(member) else {
             continue;
         };
@@ -389,12 +407,19 @@ fn format_errors_footer(errors: &[FamilyCalendarError]) -> String {
 }
 
 /// Full `/cal` Markdown reply for a window (timeline + conflicts).
-pub async fn compose_calendar_agenda(config: &AppConfig, window: CalendarWindow) -> String {
+///
+/// When `for_member_id` is set (linked personal DM), only that member's calendar
+/// is included.
+pub async fn compose_calendar_agenda(
+    config: &AppConfig,
+    window: CalendarWindow,
+    for_member_id: Option<&str>,
+) -> String {
     let Some((from, to)) = window_bounds_utc(window) else {
         return "_Could not resolve calendar date bounds._".to_string();
     };
 
-    let fetch = fetch_family_events(config, from, to).await;
+    let fetch = fetch_family_events(config, from, to, for_member_id).await;
 
     if !fetch.any_client {
         return format!(
@@ -449,12 +474,19 @@ pub async fn compose_calendar_agenda(config: &AppConfig, window: CalendarWindow)
 }
 
 /// Morning-brief calendar section (today only, shorter cap, no conflicts).
-pub async fn format_brief_calendar_section(config: &AppConfig, today: &str) -> String {
+///
+/// When `for_member_id` is set (linked personal DM), only that member's calendar
+/// is included.
+pub async fn format_brief_calendar_section(
+    config: &AppConfig,
+    today: &str,
+    for_member_id: Option<&str>,
+) -> String {
     let Some((day_start_utc, day_end_utc)) = local_day_bounds_utc(today) else {
         return "_Could not resolve today's date bounds._\n".to_string();
     };
 
-    let fetch = fetch_family_events(config, day_start_utc, day_end_utc).await;
+    let fetch = fetch_family_events(config, day_start_utc, day_end_utc, for_member_id).await;
 
     if !fetch.any_client {
         return "_No calendars linked — `/login calendar <member>`._\n".to_string();
@@ -626,5 +658,15 @@ mod tests {
         let mut b = a.clone();
         b.member_name = "Sam".to_string();
         assert!(find_conflicts(&[a, b]).is_empty());
+    }
+
+    #[test]
+    fn test_member_in_calendar_scope() {
+        assert!(member_in_calendar_scope("alex", None));
+        assert!(member_in_calendar_scope("jordan", None));
+        assert!(member_in_calendar_scope("alex", Some("alex")));
+        assert!(member_in_calendar_scope("Alex", Some("alex")));
+        assert!(!member_in_calendar_scope("jordan", Some("alex")));
+        assert!(!member_in_calendar_scope("alex", Some("jordan")));
     }
 }

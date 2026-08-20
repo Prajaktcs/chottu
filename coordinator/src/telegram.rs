@@ -890,6 +890,29 @@ impl Drop for ProgressNudge {
     }
 }
 
+/// Strip a leading `/food` or `/food@bot` so photo captions like `/food pray`
+/// parse as member/description instead of becoming the food description.
+fn strip_leading_food_command(input: &str) -> &str {
+    let trimmed = input.trim();
+    let prefix = "/food";
+    if trimmed.len() >= prefix.len() && trimmed[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        let rest = &trimmed[prefix.len()..];
+        if rest.is_empty() {
+            return "";
+        }
+        if rest.starts_with(char::is_whitespace) {
+            return rest.trim();
+        }
+        if let Some(after_at) = rest.strip_prefix('@') {
+            return after_at
+                .split_once(char::is_whitespace)
+                .map(|(_, args)| args.trim())
+                .unwrap_or("");
+        }
+    }
+    trimmed
+}
+
 /// Parse optional leading member id from `/food` args or a photo caption.
 /// When omitted, defaults to the member linked to this chat (else primary).
 fn resolve_food_member_and_description(
@@ -2629,7 +2652,7 @@ async fn handle_brief(
     bot.send_message(chat_id, "☀️ Building morning brief...")
         .await?;
 
-    // Linked DMs get private nutrition/training; shared household chat sees family-wide.
+    // Linked DMs get private calendar/tasks/nutrition/training; household chat stays family-wide.
     let for_member = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
     let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
     bot.send_message(chat_id, report)
@@ -2779,7 +2802,12 @@ async fn handle_cal(
         return Ok(());
     };
 
-    let report = compose_calendar_agenda(config, window).await;
+    let report = compose_calendar_agenda(
+        config,
+        window,
+        member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str()),
+    )
+    .await;
     bot.send_message(chat_id, report)
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
@@ -4008,6 +4036,20 @@ async fn handle_message(
     };
 
     if let Some(ConversationState::WaitingForReflection { date, prompt }) = active_state {
+        // Photos have no `text()` (captions don't count). Don't treat them as an
+        // empty journal reply — that's the food-photo path, including captions
+        // like `/food pray`. Slash commands still cancel via `handle_command`.
+        if msg.photo().is_some() {
+            handle_food_photo(&bot, chat_id, &msg, &pool, &llm, &gemini_client, &config)
+                .await?;
+            bot.send_message(
+                chat_id,
+                "Evening reflection is still open — type your journal reply, or send a command to cancel.",
+            )
+            .await?;
+            return Ok(());
+        }
+
         let response_text = msg.text().unwrap_or("").trim();
         if response_text.is_empty() {
             bot.send_message(chat_id, "Reflection text cannot be empty. Please type your reflection or send a command to cancel.").await?;
@@ -4101,7 +4143,7 @@ async fn handle_food_photo(
     };
     // Last PhotoSize is the largest resolution.
     let best = photos.last().expect("non-empty photo sizes");
-    let caption = msg.caption().unwrap_or("").trim();
+    let caption = strip_leading_food_command(msg.caption().unwrap_or(""));
 
     let (member_id, caption_rest) =
         resolve_food_member_and_description(caption, config, chat_id.0);
@@ -5483,6 +5525,24 @@ mod tests {
             currency: Some("CAD".to_string()),
             ..AppConfig::default()
         }
+    }
+
+    #[test]
+    fn strip_leading_food_command_from_captions() {
+        assert_eq!(strip_leading_food_command("/food pray"), "pray");
+        assert_eq!(strip_leading_food_command("/FOOD pray leftover"), "pray leftover");
+        assert_eq!(strip_leading_food_command("/food@chottu pray"), "pray");
+        assert_eq!(strip_leading_food_command("  /food  praj oats "), "praj oats");
+        assert_eq!(strip_leading_food_command("/food"), "");
+        assert_eq!(strip_leading_food_command("/food@chottu"), "");
+        assert_eq!(
+            strip_leading_food_command("pray leftover rice"),
+            "pray leftover rice"
+        );
+        assert_eq!(
+            strip_leading_food_command("/foodie special"),
+            "/foodie special"
+        );
     }
 
     #[test]

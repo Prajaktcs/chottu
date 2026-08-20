@@ -66,15 +66,17 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 5. Morning brief privacy (tasks + calendar)
-- [ ] In linked DMs, filter open tasks to the recipient (or clearly labeled assignee scope)
-- [ ] In linked DMs, filter calendar to the recipient’s relevant events (not full `fetch_family_events`)
-- [ ] Leave shared bills/household sections intentional; do not regress nutrition/fitness `for_member_id` scoping
+- [x] In linked DMs, filter open tasks to the recipient (or clearly labeled assignee scope)
+- [x] In linked DMs, filter calendar to the recipient’s relevant events (not full `fetch_family_events`)
+- [x] Leave shared bills/household sections intentional; do not regress nutrition/fitness `for_member_id` scoping
 
 **Why:** Nutrition/training honor `for_member_id` in linked DMs; tasks and calendar still leak the household surface into private chats.
 
 **Effort:** M
 
 **Files:** `coordinator/src/brief.rs`, `chotu-common/src/agenda.rs` (`format_brief_calendar_section` / `compose_calendar_agenda`), brief scheduler in `coordinator/src/telegram.rs`
+
+**Done:** Linked DM briefs/`/cal` fetch only the recipient’s calendar; brief tasks use assignee = me OR unassigned (same as complete-all). Household chats unchanged; bills stay shared.
 
 ---
 
@@ -124,10 +126,10 @@ Not prioritized, but known thin spots:
 |------|-----|
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
-| Family privacy | Allowlist + link hijack guards are good; remaining leaks are items 4–5 and 7 above; household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
+| Family privacy | Allowlist + link hijack guards are good; remaining leaks are items 4 and 7 above; household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
 
 ## Suggested order
 
-Max quality per week: **4 → 5 → 6 → 7 → 8** (items 1–3 done).
+Max quality per week: **4 → 6 → 7 → 8** (items 1–3 and 5 done).
 
-Items 4–5 are the next privacy/reliability wins before larger wiring work.
+Item 4 (task ↔ calendar sync) remains optional if snooze/complete calendar drift is not a priority; otherwise take 6 next.
