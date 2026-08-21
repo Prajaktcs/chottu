@@ -10,7 +10,7 @@ Manual morning digest (also scheduled ~07:00 local; override with `MORNING_BRIEF
 
 **Looks like**
 
-```
+```text
 ☀️ Building morning brief...
 *Morning brief — 2026-08-20*
 
@@ -31,7 +31,7 @@ Plain text: `morning brief`, `how's today`.
 
 Family-merged agenda from linked Google Calendars. Default `today`. Flags overlapping timed events across members.
 
-```
+```text
 /cal
 /cal tomorrow
 /cal week
@@ -47,7 +47,7 @@ Needs `/login calendar <member>` + `calendar:` in config for each adult you care
 
 ### List
 
-```
+```text
 /tasks
 /tasks open
 /tasks all
@@ -60,7 +60,7 @@ Open/snoozed lists include inline **✅ Done** / **😴 +1d** buttons (no id typ
 
 ### Add
 
-```
+```text
 /task call dentist tomorrow 3pm
 /tasks add praj buy milk due Friday
 /tasks add remind me to submit timesheet by tomorrow
@@ -93,7 +93,7 @@ Starts the evening journaling loop (also schedulable when delivery targets exist
 
 **Looks like**
 
-```
+```text
 Querying daily metrics and generating evening reflection prompt via local Ollama...
 
 📝 Evening Journaling Reflection Prompt:

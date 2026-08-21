@@ -1,11 +1,15 @@
 # Software Requirements Specification (SRS)
+
 ## Project Name: Project Chotu (Personal Financial & Family Reflection Suite)
+
 ## Target Stack: Rust (Asynchronous Tokio Runtime), Local Ollama API, Cloud Gemini API, SQLite Database, Teloxide (Telegram)
 
 ---
 
 ## 1. System Overview & Educational Objectives
+
 Project Chotu—named after the agile, hyper-efficient apprentice helper in Mumbai slang—is a self-hosted, local-first multi-agent system designed to manage daily family financial metrics, multi-user health logging, and asynchronous personal journaling.
+
 * **User Learning Objective:** The developer is mastering Rust systems patterns (lifetimes, async execution, type safety, and concurrency). The agent **must not** generate code blocks without explaining ownership boundaries, `tokio::spawn` mechanics, or structural error handling (`Result`/`Option`).
 * **Antigravity Operational Mandate:** The agent must operate exclusively in **Planning Mode**. Before any file mutations, it must generate a step-by-step task artifact and wait for user comment approval via the Manager View.
 
@@ -15,7 +19,7 @@ Project Chotu—named after the agile, hyper-efficient apprentice helper in Mumb
 
 To maximize data privacy and eliminate API overhead, Project Chotu implements a dual-layer compute architecture based on payload density and cognitive load.
 
-```
+```text
 ┌────────────────────────────────────────────────────────┐
 │               Incoming Pipeline Payload                │
 └────────────────────────────────────────────────────────┘
@@ -31,6 +35,7 @@ To maximize data privacy and eliminate API overhead, Project Chotu implements a 
 ```
 
 ### Compute Tier Boundaries
+
 * **Tier 1: Local Ollama (`localhost:11434`)** -> Handles standard text strings, rule-based classification hooks, and context-isolated prompt generation. Models: `llama3.2:3b` for fast triage, `deepseek-r1:8b` for structured night-time reflection.
 * **Tier 2: Cloud Gemini API** -> Triggered dynamically via Rust match arms when handling multi-page compound PDF statements, long-context semantic trend analysis over multi-month journal logs, or web-grounded family health research tasks.
 
@@ -39,26 +44,30 @@ To maximize data privacy and eliminate API overhead, Project Chotu implements a 
 ## 3. Core Agent Lifecycle & Operational Boundaries
 
 ### Agent 1: "The Streamer" (Email Triage Daemon)
+
 * **Objective:** Securely idle on an IMAP mailbox, filter incoming promotional clutter, and parse transactional alerts.
 * **Anti-Hallucination Guardrail:** Native structural JSON schema constraints applied at the Ollama API request level. The agent cannot output raw conversational text.
-* **Classification Arms:** 
+* **Classification Arms:**
   * `TRASH` -> Moved to an isolated `AI-Trash` staging label for manual user review/purge.
   * `ARCHIVE` -> Receipts/logs committed to a history log.
   * `LEDGER_STREAM` -> Transaction payload forwarded to the storage layer.
 
 ### Agent 2: "The Janitor" (Document Drop Worker)
+
 * **Objective:** Asynchronously monitor `~/chotu_drop/` for batch file mutations (CSVs, PDFs).
-* **Compute Tier Logic:** 
+* **Compute Tier Logic:**
   * Standard CSVs -> Parsed natively by the Rust `csv` crate (Zero LLM use).
   * Single-page direct text PDFs -> Handled by local `llama3.2:3b`.
   * Multi-page/Scanned Image PDFs -> Escalated to `CloudGemini` for advanced multi-modal extraction.
 
 ### Agent 3: "The Coordinator & Bookkeeper" (Evening Reflection Engine)
+
 * **Objective:** Drive the asynchronous nightly reflection loop via Telegram and recalculate portfolio metrics via market data endpoints.
 * **RAG Boundary:** The system prompt strips away global model knowledge. The engine can *only* summarize and construct prompts explicitly grounded in the day's compiled SQLite transaction logs.
 * **Journal Storage:** Saves daily reflections as human-readable Markdown files in a local directory (`~/chotu_brain/Journal/YYYY/MM/YYYY-MM-DD.md`) formatted with structured YAML frontmatter.
 
 ### Agent 4: "The Health Coach" (Multi-User Family Sync)
+
 * **Objective:** Ingest, isolate, and maintain daily nutrition, activity, and sleep telemetry for the entire family household (User, Wife, Toddler).
 * **Ingestion Channels:**
   * **Food/Symptom Logs:** Parses incoming text strings via Telegram tagged with identifiers (e.g., `/food`, `/kid`), offloading unstructured nutritional descriptions to `CloudGemini` for calorie/macro approximation.

@@ -6,7 +6,7 @@ Local RAG over journals, newsletter digests, personal references, and tasks.
 
 ## `/memory <question>`
 
-```
+```text
 /memory what was that pasta recipe I saved?
 /memory when is the dentist appointment task?
 ```
@@ -19,7 +19,7 @@ Local RAG over journals, newsletter digests, personal references, and tasks.
 
 **Looks like**
 
-```
+```text
 🧠 Searching memory...
 <short answer with grounding from retrieved snippets>
 ```
@@ -32,7 +32,7 @@ Plain text often routes here too: `what was that recipe I saved`.
 
 Rebuilds the embedding index after bulk journal/digest changes or a model swap.
 
-```
+```text
 /memory reindex
 ```
 

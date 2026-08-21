@@ -10,7 +10,7 @@ Shows the current Telegram chat id.
 
 **Looks like**
 
-```
+```text
 Your Chat ID is: 123456789
 ```
 
@@ -22,13 +22,13 @@ Use once to fill optional `TELEGRAM_CHAT_ID` in `.env`, or just proceed with `/l
 
 Private DMs only. Writes `telegram_chat_id` on that member in `config.yaml`.
 
-```
+```text
 /link praj
 ```
 
 **Looks like (success)**
 
-```
+```text
 ✅ Linked this chat to praj (Praj).
 Food and tasks without a member id will default to you.
 ```
@@ -43,7 +43,7 @@ Food and tasks without a member id will default to you.
 
 ## `/whoami`
 
-```
+```text
 You are linked as praj (Praj).
 ```
 

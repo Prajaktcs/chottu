@@ -1,0 +1,10 @@
+{
+  "globs": [
+    "*.md",
+    "docs/**/*.md",
+    "evals/**/*.md"
+  ],
+  "ignores": [
+    "evals/research/results/**"
+  ]
+}

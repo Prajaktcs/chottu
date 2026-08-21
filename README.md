@@ -20,6 +20,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 ## What It Can Do
 
 ### Email intelligence (Streamer)
+
 - Idle on Gmail via IMAP + OAuth2 and classify every message with a local Ollama model into one of nine categories:
   - **LEDGER_STREAM** — purchases, transfers, refunds, points redemptions → financial ledger
   - **FINANCIAL_BILL** — upcoming bills / due dates → bill tracking + calendar
@@ -34,11 +35,13 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Dual compute tier: local Ollama for triage; Gemini for multimodal / long-context; OpenRouter for multi-model stock research.
 
 ### Document drop (Janitor)
+
 - Watches `~/chotu_drop/` for CSVs and PDFs (bank exports, statements).
 - Parses CSVs natively (no LLM); escalates multi-page / scanned PDFs to Gemini.
 - Deduplicates ledger rows, archives processed files, and keeps the SQLite store tidy.
 
 ### Family health & nutrition (Health Coach)
+
 - Multi-member household profiles (`config.yaml`: adults/kids, optional per-member nutrition + fitness goals).
 - Two-way **Google Health** sync: pull daily calories/macros/activity/exercises; push Telegram-logged meals back per linked member. Evening sync ~8:45 local; **late steps sync ~11:00 PM ET** (override with `HEALTH_LATE_SYNC_HOUR` / `HEALTH_LATE_SYNC_TZ`) with a private nudge toward the daily step goal (config `nutrition_goals.steps`, default 10 000).
 - Log food by text (`/food`), plain-language chat (“log 2 eggs for praj”), or **photo**:
@@ -49,6 +52,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - Weekly training plans via `/plan` (Ollama, stored per member/week); morning brief includes today’s session and days-to-target.
 
 ### Tasks, calendar & morning brief (Coordinator)
+
 - Tasks from email action items **or** Telegram (`/tasks add`, “remind me to…”); manage via `/tasks` (list, complete, snooze, reassign, reopen).
 - Timed reminders: one Telegram ping when a task’s `due_at` is reached (assignee’s linked DM, else household targets).
 - **Per-person Telegram DMs**: each adult runs `/link <member_id>` in a private chat; food/tasks without a member id default to that person. Once any member is linked, unknown chats are rejected (`/chat` and `/link` still work for setup).
@@ -58,11 +62,13 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - **Evening reflection**: scheduled or `/reflect` — grounds in today’s health (nutrition, steps, sleep, energy) and spend logs, while training toward your `core_values` in `config.yaml` (default Growth + Contribution); replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
+
 - Local embeddings (`nomic-embed-text` via Ollama) over journals, newsletter digests, personal references, and tasks.
 - Ask in natural language (`/memory …` or “what was that recipe I saved”); answers prefer local Ollama, Gemini only as fallback.
 - `/memory reindex` rebuilds the embedding index.
 
 ### Finance & investing (Finance Advisor + ledger)
+
 - Continuous ledger from email receipts and drop-folder imports.
 - `/monthly` spend summaries; `/networth` from cash + holdings (FX-aware when rates are available).
 - Category **spend budgets** (`spend_budgets` in `config.yaml` or `/budget set`): progress via `/budget`, appended on `/monthly`, and mid-month Telegram pushes at 80% / 100%.
@@ -70,16 +76,18 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - `/research` — OpenRouter shared-universe research: multi-propose → Finnhub market-cap filter → score (GPT-5.6 Sol + Opus 5 + Kimi K3) → Kimi K3 judge. Optional company args seed the universe and skip propose.
 
 ### Natural-language Telegram UX
+
 - Slash commands for everything above, **plus** free-text intent routing (“what's today”, “remind me to call the dentist tomorrow 3pm”, “morning brief”, “open tasks”, “net worth”, “trends last 14 days”, “sync health”, …).
 - Unclear messages get a short clarifying question instead of dumping the full command list.
 - Interactive `/login` for Google Health, Gmail, and Calendar (local OAuth callback; tokens written to `.env`).
 
 ### Privacy & platform posture
+
 - **Local-first**: SQLite (`chotu.db`), local Ollama for triage/memory/reflection; cloud only where multimodal (Gemini) or multi-model research (OpenRouter) needs it.
 - **Private goals & health**: `config.yaml` and `.env` are gitignored. Put real `nutrition_goals` / `fitness_goals` / constraints only in your local `config.yaml` — not in the public example. Linked personal Telegram DMs receive **only that member’s** nutrition, training plan, coach tips, sync details, and trends; other adults’ fitness goals are not fan‑out to the household.
 - **Future medical records** (planned): private local ingest only; never committed or shared across family DMs; coach may use user-confirmed constraints, not diagnoses.
 - **Zero-`unsafe` Rust** workspace policy (see `ARCHITECTURE.md`).
-- Runs as a Cargo workspace supervisor (`make run`).
+- Runs as a Cargo workspace supervisor (`just run`).
 
 ---
 
@@ -122,10 +130,12 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 3. **Ollama**: Install [Ollama](https://ollama.com/) locally for offline email classification and memory.
    Small 3–4B models (`llama3.2:3b`, `qwen3.5:4b`) work but misclassify edge cases often.
    Prefer `qwen3.5:9b` for triage accuracy (next step up from 4b in the Qwen 3.5 family):
+
    ```bash
    ollama pull qwen3.5:9b
    ollama pull nomic-embed-text
    ```
+
    Set `OLLAMA_MODEL=qwen3.5:9b` in `.env`. Optional: `OLLAMA_EMBED_MODEL=nomic-embed-text` (default) for `/memory` RAG.
 
 ---
@@ -133,13 +143,17 @@ Shared library: `chotu-common` (DB, OAuth, LLM clients, calendar, memory, family
 ## Getting Started
 
 ### 1. Initial Setup
+
 Initialize configuration templates and dummy databases:
+
 ```bash
-make setup
+just setup
 ```
 
 ### 2. Configure Environment Variables (`.env`)
+
 Fill in the credentials inside your `.env` file:
+
 ```env
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 # Optional shared fallback for household pushes (brief, budgets, stock, reflection).
@@ -168,14 +182,16 @@ CHOTU_OAUTH_CLIENT_SECRET=your_google_gmail_client_secret
 CHOTU_EMAIL_USER=your_email@gmail.com
 ```
 
-`GEMINI_API_KEY` is used for multimodal work (food photos, document ingest, nutrition). `OPENROUTER_API_KEY` powers `/research` LLMs (propose → score → judge). `FINNHUB_API_KEY` verifies market caps on the shared universe (optional; without it, model-estimated bands are used).
+`TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY` are both required for `just run` (the Telegram coordinator exits without Gemini). Gemini also powers multimodal work (food photos, document ingest, nutrition). `OPENROUTER_API_KEY` powers `/research` LLMs (propose → score → judge). `FINNHUB_API_KEY` verifies market caps on the shared universe (optional; without it, model-estimated bands are used).
 
 Also edit `config.yaml` (from `config.yaml.example`) for family members, nutrition/fitness goals, currency, and investment philosophy. Each adult should DM the bot and run `/link <member_id>` so food/tasks default to them and proactive messages reach their inbox.
 
 ### 3. Run the Agent
+
 Run the supervisor and bot coordinator:
+
 ```bash
-make run
+just run
 ```
 
 ---
@@ -185,6 +201,7 @@ make run
 Chotu uses browser redirects to secure logins locally without public ports.
 
 ### A. Google Health (per family member)
+
 1. Register a project in the [Google Cloud Console](https://console.cloud.google.com/).
 2. Enable the **Google Health API** and configure the **OAuth Consent Screen** (add each family member's Google account email as a test user).
 3. Create a **Web Application** credential, setting the Authorized redirect URI to `http://localhost:8080/callback`.
@@ -193,11 +210,13 @@ Chotu uses browser redirects to secure logins locally without public ports.
 6. Chotu saves `HEALTH_REFRESH_TOKEN_<MEMBER>` to `.env` (the primary member also keeps legacy `FITBIT_REFRESH_TOKEN`). Re-run login if you previously authorized read-only scopes.
 
 ### B. Gmail (IMAP Email sync)
+
 1. Using the same Google Cloud Console project, add your email to credentials (`CHOTU_EMAIL_USER`).
 2. Add `CHOTU_OAUTH_CLIENT_ID` and `CHOTU_OAUTH_CLIENT_SECRET` to `.env`.
 3. Send `/login gmail` in Telegram and click the authorization link.
 
 ### C. Google Calendar (per family member)
+
 1. Ensure each adult has a `calendar:` block in `config.yaml` (see `config.yaml.example`).
 2. Enable the **Google Calendar API** on the same OAuth client used for Gmail.
 3. Send `/login calendar <member_id>` (e.g. `/login calendar praj`) and authorize with that member's Google account.
@@ -222,7 +241,8 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
-| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Open/snoozed lists and due reminders include **✅ Done** / **😴 +1d** inline buttons (no id typing). Slash actions still work: `/tasks complete <id\|all>` (linked DM: yours + unassigned; household needs `/tasks complete all confirm`; cancels linked calendar events), `/tasks snooze <id> [days]` (moves linked calendar events), `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. || `/reflect` | Manually trigger the evening reflection loop. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Open/snoozed lists and due reminders include **✅ Done** / **😴 +1d** inline buttons (no id typing). Slash actions still work: `/tasks complete <id\|all>` (linked DM: yours + unassigned; household needs `/tasks complete all confirm`; cancels linked calendar events), `/tasks snooze <id> [days]` (moves linked calendar events), `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
+| `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Shared-universe stock research via OpenRouter + Finnhub (propose → cap filter → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
 | `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
 | `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
@@ -248,8 +268,9 @@ Deeper notes (services/API keys, command walkthroughs with example replies):
 ## Development
 
 Run unit tests across the entire cargo workspace:
+
 ```bash
-make test
+just test
 ```
 
 See `ARCHITECTURE.md` for safety/concurrency guidelines and `TODO.md` for the roadmap.

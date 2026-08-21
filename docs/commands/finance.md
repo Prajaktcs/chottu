@@ -8,7 +8,7 @@ Ledger rows come from email triage (Streamer) and `~/chotu_drop/` imports (Janit
 
 ## `/monthly [YYYY-MM]`
 
-```
+```text
 /monthly
 /monthly 2026-07
 ```
@@ -39,7 +39,7 @@ Invested net worth from `portfolio_holdings` (live quotes via Yahoo when holding
 
 **Looks like**
 
-```
+```text
 🔍 Fetching live quotes via Yahoo Finance...
 
 💰 Project Chotu Net Worth Summary (CAD)
@@ -68,14 +68,14 @@ Shared-universe research via **OpenRouter** (not Gemini):
 4. Judge synthesizes shortlist
 5. Report saved under the brain/research path
 
-```
+```text
 /research
 /research Apple, Nvidia
 ```
 
 **Looks like (progress stream)**
 
-```
+```text
 🔎 [1/…] Proposing universe…
 📏 [2/…] Filtering by market cap…
 🧪 [3/…] Scoring (model …)…
@@ -86,7 +86,7 @@ Shared-universe research via **OpenRouter** (not Gemini):
 
 Without `OPENROUTER_API_KEY`:
 
-```
+```text
 ❌ Stock research requires OPENROUTER_API_KEY in .env. Gemini is not used for /research.
 ```
 

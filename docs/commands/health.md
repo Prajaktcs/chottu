@@ -8,7 +8,7 @@ Linked personal DMs only see **that member’s** health/fitness. Household / unl
 
 ## `/food [member_id] <description>`
 
-```
+```text
 /food 2 eggs and toast
 /food praj yesterday's dinner pasta
 ```
@@ -17,7 +17,7 @@ Defaults member to the linked DM. Relative day/time phrases are resolved via loc
 
 **Looks like**
 
-```
+```text
 Got it — logging food for praj...
 ✅ Logged for praj (today):
 • 2 eggs and toast — ~420 kcal | P 28g C 22g F 24g
@@ -44,7 +44,7 @@ Removes the last Telegram food entry (and its Google Health log if synced). Rebu
 
 ## `/adjustfood [member_id] <cal> <P> <C> <F>`
 
-```
+```text
 /adjustfood 2100 160 200 70
 ```
 
@@ -64,12 +64,12 @@ Manual pull of today’s nutrition/activity for every linked Google Health accou
 
 **Looks like**
 
-```
+```text
 🔄 Syncing Google Health for linked members...
 ✅ praj: 1840 kcal | 9200 steps | …
 ```
 
-Works without `GEMINI_API_KEY`; needs Health OAuth tokens.
+Works once the Telegram bot is running (`just run` requires `GEMINI_API_KEY`). The Health Coach sync path itself does not need Gemini for the pull/merge; OAuth Health tokens are what matter for `/sync`.
 
 ---
 
@@ -88,7 +88,7 @@ Linked DM → only your health block. Household → all members with data.
 
 Default `7`. Multi-day nutrition/activity plus a short coach tip per member with data.
 
-```
+```text
 /trends
 /trends 14
 ```
@@ -108,7 +108,7 @@ Requires non-empty `fitness_goals` for the (linked) member in `config.yaml`.
 
 **Looks like**
 
-```
+```text
 🏋️ Building this week's training plan (local Ollama)…
 <markdown week plan>
 📌 Today: strength — upper body
@@ -117,7 +117,7 @@ Week progress: 2/4 sessions …
 
 Without goals:
 
-```
+```text
 ⚠️ No fitness_goals for praj in config.yaml yet.
 Add intent / target_date / sessions_per_week, then try /plan again.
 ```

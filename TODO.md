@@ -1,9 +1,11 @@
 # Project Chotu To-Do List
 
 ## Strengthen existing (see STRENGTHEN.md)
+
 - Prefer hardening shipped surfaces over new domains; work the checklist in [`STRENGTHEN.md`](STRENGTHEN.md) one PR at a time.
 
 ## Nutrition & Health Coach
+
 - [x] For the agent to send status reports or trends on how the nutrition is going
 - [x] Investigate if there is anything that we need to adjust in the nutrition phase
 - [x] Improve formatting of the `/status` command response (currently contains a very long text list of macros/micros/minerals)
@@ -17,12 +19,14 @@
 - [x] Two-way food sync: push Telegram `/food` to Google Health; `/sync` treats Google as shared store
 
 ## Tasks & Calendar
+
 - [x] Telegram `/tasks` to list open tasks and mark them complete
 - [x] Optional: snooze / reassign tasks from Telegram
 
 ## Personal Agent
 
 ### Short path (build in order)
+
 - [x] Free-text intent router over existing tools (status, tasks, food, sync, trends, networth, monthly)
 - [x] Multimodal food capture (Telegram photo of barcode / package / plate → Open Food Facts + Gemini → food log)
 - [x] Morning brief (proactive daily digest: calendar, open tasks, bills due, nutrition vs goals)
@@ -30,6 +34,7 @@
 - [x] Queryable memory over journals / digests / personal references / tasks (local RAG)
 
 ### Later domains
+
 - [x] Calendar read/query UX (“what's today?”, conflicts)
 - [x] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
 - [x] Spend alerts / category budgets
@@ -40,5 +45,6 @@
 - [ ] Medical-record–aware coaching (private local ingest only; never commit or fan-out across family DMs; user-confirmed constraints → macros/plan; never diagnose)
 
 ### Non-goals
+
 - Outbound email / SMTP / creating drafts or replies
 - Executive shell actions or arbitrary file deletion outside designated storage

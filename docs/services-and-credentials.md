@@ -1,6 +1,6 @@
 # Services & credentials
 
-Everything Chotu talks to, mapped to env vars. Fill values in `.env` after `make setup`. Never commit `.env` or paste live keys into docs/PRs.
+Everything Chotu talks to, mapped to env vars. Fill values in `.env` after `just setup`. Never commit `.env` or paste live keys into docs/PRs.
 
 Family shape, goals, budgets, and investment philosophy live in `config.yaml` (from `config.yaml.example`). Per-member OAuth refresh tokens are written into `.env` by `/login`, not into YAML.
 
@@ -11,11 +11,12 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 | Need | Env / config | Notes |
 | :--- | :--- | :--- |
 | Telegram bot | `TELEGRAM_BOT_TOKEN` (or legacy `TELOXIDE_TOKEN`) | From [@BotFather](https://t.me/BotFather) |
+| Gemini | `GEMINI_API_KEY` | **Required for `just run`** (Telegram coordinator won’t start without it) |
 | Optional shared chat | `TELEGRAM_CHAT_ID` | Fallback for household pushes; prefer `/link` per adult |
-| Local LLM | Ollama running + `OLLAMA_MODEL` | Default model `qwen3.5:9b`; pull embeddings too |
+| Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
 | Family roster | `config.yaml` → `family.members` | At least one adult `id` for `/link` |
 
-Without Telegram, the supervisor can still run agents, but you have no command UX.
+Without Telegram + Gemini, you can’t use the normal `just run` UX. Other agents (e.g. Health Coach scheduled sync) can still run in-process once the supervisor is up, but the bot path requires both keys.
 
 ---
 
@@ -26,15 +27,19 @@ Without Telegram, the supervisor can still run agents, but you have no command U
 | `OLLAMA_HOST` | `http://localhost` | Base host |
 | `OLLAMA_PORT` | `11434` | Port |
 | `OLLAMA_BASE_URL` | derived from host+port | Embeddings client override |
-| `OLLAMA_MODEL` | `qwen3.5:9b` | Email triage, memory answers, reflection, coach tips, `/plan` |
+| `OLLAMA_MODEL` | `qwen3.5:4b` from `just setup` | Email triage, memory answers, reflection, coach tips, `/plan` |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | `/memory` RAG index |
 
 ```bash
-ollama pull qwen3.5:9b
+# What just prereqs pulls today:
+ollama pull qwen3.5:4b
 ollama pull nomic-embed-text
+
+# Recommended upgrade for better triage (set OLLAMA_MODEL accordingly):
+ollama pull qwen3.5:9b
 ```
 
-Smaller 3–4B models work but misclassify more often.
+Smaller 3–4B models work but misclassify more often; prefer `qwen3.5:9b` when you can.
 
 ---
 
@@ -42,7 +47,7 @@ Smaller 3–4B models work but misclassify more often.
 
 | Service | Env | Required? | Powers |
 | :--- | :--- | :--- | :--- |
-| Gemini | `GEMINI_API_KEY` | Optional but recommended | Food photos (package/plate), PDF ingest, some nutrition parsing. Scheduled health sync still runs without it. |
+| Gemini | `GEMINI_API_KEY` | **Required for Telegram (`just run`)** | Food photos (package/plate), PDF ingest, some nutrition parsing. Health Coach scheduled sync can still run without multimodal Gemini fills. |
 | OpenRouter | `OPENROUTER_API_KEY` | For `/research` | Propose → score → judge panel. Bot logs that research is disabled if unset. |
 | Finnhub | `FINNHUB_API_KEY` | Optional | Market-cap filter on research universe; without it, model-estimated bands are used. |
 
@@ -109,7 +114,7 @@ Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 
 | Missing | Behavior |
 | :--- | :--- |
-| `GEMINI_API_KEY` | No photo/PDF multimodal; scheduled Google Health sync still runs |
+| `GEMINI_API_KEY` | `just run` / Telegram bot will not start. Health Coach sync logic can still run without Gemini nutrient fills once something else hosts it. |
 | `OPENROUTER_API_KEY` | `/research` refuses with a clear error |
 | `FINNHUB_API_KEY` | Research continues with estimated cap bands |
 | Gmail refresh token | Streamer skips IMAP until `/login gmail` |
@@ -121,11 +126,11 @@ Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 
 ## Setup order (practical)
 
-1. Rust + Ollama models + `make setup`
-2. `TELEGRAM_BOT_TOKEN` → `make run` → DM the bot → `/chat` → optional `TELEGRAM_CHAT_ID`
+1. Rust + Ollama models + `just setup` (+ `just prereqs` to pull models)
+2. `TELEGRAM_BOT_TOKEN` **and** `GEMINI_API_KEY` → `just run` → DM the bot → `/chat` → optional `TELEGRAM_CHAT_ID`
 3. Edit `config.yaml` members → each adult `/link <id>`
 4. Google OAuth clients → `/login health …`, `/login gmail`, `/login calendar …`
-5. Add `GEMINI_API_KEY` when you want photos/PDFs
+5. Optionally set `OLLAMA_MODEL=qwen3.5:9b` (and pull that model) for better triage
 6. Add OpenRouter (+ Finnhub) when you want `/research`
 
 See also: root README “Linking Accounts” and command pages under [`commands/`](./commands/).

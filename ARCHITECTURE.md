@@ -29,11 +29,13 @@ This document outlines the architectural standards, Rust best practices, and saf
 We distinguish between **application binaries** (agents) and **libraries** (`chotu-common`):
 
 ### In `chotu-common` (Library Crate)
+
 * Do **not** use `anyhow` for errors that callers might need to inspect and handle.
 * Instead, define semantic, strongly-typed error enums using the `thiserror` crate (or custom implementations of the `std::error::Error` trait). This allows calling agents to match on specific error kinds.
 * Avoid `.unwrap()` or `.expect()`. Use the `?` operator or map errors explicitly.
 
 ### In Agent Binaries (`streamer`, `janitor`, `coordinator`)
+
 * Use the `anyhow` crate for high-level error propagation and context.
 * Add context to errors using `context("...")` to produce human-readable backtraces when an agent fails.
 
