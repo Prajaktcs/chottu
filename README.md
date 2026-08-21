@@ -237,6 +237,14 @@ Plain-text messages also work for common asks (e.g. "what's today", "tomorrow's 
 
 ---
 
+## Operator docs
+
+Deeper notes (services/API keys, command walkthroughs with example replies):
+
+→ **[`docs/README.md`](docs/README.md)**
+
+---
+
 ## Development
 
 Run unit tests across the entire cargo workspace:
