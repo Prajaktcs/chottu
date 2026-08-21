@@ -7,6 +7,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ## Backlog (priority order)
 
 ### 1. Structured exercise progress
+
 - [x] Stop flattening Google Health activity fields into free-text descriptions
 - [x] Persist activity type, duration, active kcal, start/end on `exercise_log`
 - [x] Wire coach/plan progress to real fields (kill keyword heuristics like `"gym"` / `"workout"` for strength)
@@ -23,6 +24,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 2. Safer `/tasks complete all`
+
 - [x] Scope to assignee / “mine only” when invoked from a linked personal DM
 - [x] Require confirmation before a household-wide wipe
 - [x] Avoid completing another member’s open/snoozed backlog by accident
@@ -38,6 +40,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 3. Food mutation guards in linked DMs
+
 - [x] From a linked personal DM, only allow food mutations for the chat’s member
 - [x] Block `/food`, `/adjustfood`, `/undofood`, `/clearfood` (and free-text `FOOD` with another `member_id`) targeting other members
 - [x] Keep household chat able to log for any member (existing behavior)
@@ -53,6 +56,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 4. Task ↔ calendar sync on snooze / complete
+
 - [x] On snooze: update the linked Google Calendar event time when `calendar_event_id` is set
 - [x] On complete (single or bulk): cancel/delete the linked calendar event
 - [x] Keep create-path behavior (manual task with due time → calendar event) unchanged
@@ -68,6 +72,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 5. Morning brief privacy (tasks + calendar)
+
 - [x] In linked DMs, filter open tasks to the recipient (or clearly labeled assignee scope)
 - [x] In linked DMs, filter calendar to the recipient’s relevant events (not full `fetch_family_events`)
 - [x] Leave shared bills/household sections intentional; do not regress nutrition/fitness `for_member_id` scoping
@@ -83,6 +88,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 6. Coach plan / progress wiring
+
 - [x] Stop attaching “today’s plan” blindly into `/trends` context when the day has no plan row
 - [x] Pass real exercise dates into enrich so day exercises are not always empty
 - [x] Track cardio minutes and session adherence vs plan kind (depends on item 1 for clean data)
@@ -98,6 +104,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 7. Memory RAG owner boundary
+
 - [ ] Scope search/index by owner / `member_id` so a linked DM cannot RAG the whole household brain
 - [ ] Follow-on: avoid loading every `memory_chunks` row for in-process cosine scan (ANN / pruning)
 
@@ -110,6 +117,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 ---
 
 ### 8. Research bench finish
+
 - [ ] Commit `tool_choice: Auto` for OpenRouter structured extraction in `chotu-common/src/llm.rs` (Qwen thinking mode rejects `required`)
 - [ ] Finish a clean Sol vs Qwen run with `summary.md` and a decision under the harness rule
 - [ ] Tighten metrics: composite currently ignores `interest_label_accuracy`; `validate_score_report` only checks ticker coverage
@@ -127,7 +135,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 Not prioritized, but known thin spots:
 
 | Area | Gap |
-|------|-----|
+| ------ | ----- |
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
 | Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 (memory RAG); household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |

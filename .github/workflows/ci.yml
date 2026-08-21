@@ -18,6 +18,23 @@ env:
   CARGO_INCREMENTAL: "0"
 
 jobs:
+  markdownlint:
+    name: markdownlint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Lint Markdown
+        uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: |
+            *.md
+            docs/**/*.md
+            evals/**/*.md
+            !evals/research/results/**
+
   test:
     name: cargo test
     runs-on: ubuntu-latest
