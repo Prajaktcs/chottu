@@ -50,9 +50,9 @@ async fn main() -> Result<()> {
     // 3. Spawn the agents concurrently as Tokio tasks
     println!("Spawning agent tasks on Tokio runtime...");
 
-    // Streamer Agent task
+    // Streamer Agent task (email). Same Ollama slot as Telegram; mail waits.
     let streamer_pool = pool.clone();
-    let streamer_llm = llm.clone();
+    let streamer_llm = llm.clone().into_background();
     let streamer_config = config.clone();
     let streamer_task = tokio::spawn(async move {
         if let Err(e) = streamer::run(streamer_pool, streamer_llm, streamer_config).await {

@@ -9,6 +9,7 @@ pub mod llm;
 pub mod memory;
 pub mod models;
 pub mod oauth;
+pub mod ollama_lane;
 pub mod calendar;
 pub mod open_food_facts;
 pub mod finnhub;
@@ -62,6 +63,7 @@ pub use llm::{
     PersonalReferenceExtraction, IntentKind, IntentClassification, UserIntent,
     FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind,
 };
+pub use ollama_lane::OllamaPriority;
 pub use open_food_facts::{lookup_barcode, OpenFoodFactsProduct};
 pub use finnhub::{
     cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,

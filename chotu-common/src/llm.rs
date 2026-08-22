@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use crate::models::{EmailMetadata, OllamaClassificationResponse};
+use crate::ollama_lane::{OllamaLane, OllamaPriority};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
 use rig_core::message::ToolChoice;
@@ -579,11 +582,13 @@ Classification: PERSONAL_REFERENCE (Reason: Personal note containing reference i
 Submit a structured classification with a brief reason explaining why that category was chosen.\
 ";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChotuLlm {
     client: ollama::Client,
     model: String,
     prompt_path: Option<String>,
+    priority: OllamaPriority,
+    lane: Arc<OllamaLane>,
 }
 
 impl ChotuLlm {
@@ -600,6 +605,8 @@ impl ChotuLlm {
             client,
             model: model.to_string(),
             prompt_path: None,
+            priority: OllamaPriority::Interactive,
+            lane: OllamaLane::new(),
         }
     }
 
@@ -609,7 +616,19 @@ impl ChotuLlm {
             client: ollama::Client::new(Nothing).unwrap(),
             model: model.to_string(),
             prompt_path: None,
+            priority: OllamaPriority::Interactive,
+            lane: OllamaLane::new(),
         }
+    }
+
+    /// Email / IMAP clone: wait while Telegram holds or wants the Ollama slot.
+    pub fn into_background(mut self) -> Self {
+        self.priority = OllamaPriority::Background;
+        self
+    }
+
+    async fn with_slot<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        self.lane.run(self.priority, fut).await
     }
 
     /// Set an optional path to a text file containing a custom system prompt.
@@ -624,18 +643,19 @@ impl ChotuLlm {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, LlmError> {
-        let agent = self
-            .client
-            .agent(&self.model)
-            .preamble(system_prompt)
-            .build();
+        self.with_slot(async {
+            let agent = self
+                .client
+                .agent(&self.model)
+                .preamble(system_prompt)
+                .build();
 
-        let response = agent
-            .prompt(user_prompt)
-            .await
-            .map_err(|e| LlmError::Client(e.to_string()))?;
-
-        Ok(response)
+            agent
+                .prompt(user_prompt)
+                .await
+                .map_err(|e| LlmError::Client(e.to_string()))
+        })
+        .await
     }
 
     /// Faster generation for grounded tasks (memory RAG): no thinking, capped output.
@@ -644,24 +664,25 @@ impl ChotuLlm {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, LlmError> {
-        let agent = self
-            .client
-            .agent(&self.model)
-            .preamble(system_prompt)
-            .temperature(0.2)
-            .max_tokens(400)
-            .additional_params(serde_json::json!({
-                "think": false,
-                "num_predict": 400,
-            }))
-            .build();
+        self.with_slot(async {
+            let agent = self
+                .client
+                .agent(&self.model)
+                .preamble(system_prompt)
+                .temperature(0.2)
+                .max_tokens(400)
+                .additional_params(serde_json::json!({
+                    "think": false,
+                    "num_predict": 400,
+                }))
+                .build();
 
-        let response = agent
-            .prompt(user_prompt)
-            .await
-            .map_err(|e| LlmError::Client(e.to_string()))?;
-
-        Ok(response)
+            agent
+                .prompt(user_prompt)
+                .await
+                .map_err(|e| LlmError::Client(e.to_string()))
+        })
+        .await
     }
 
     /// Public structured extraction against the configured Ollama model.
@@ -686,17 +707,20 @@ impl ChotuLlm {
     where
         T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
     {
-        let extractor = self
-            .client
-            .extractor::<T>(&self.model)
-            .preamble(system_prompt)
-            .retries(2)
-            .build();
+        self.with_slot(async {
+            let extractor = self
+                .client
+                .extractor::<T>(&self.model)
+                .preamble(system_prompt)
+                .retries(2)
+                .build();
 
-        extractor
-            .extract(user_prompt)
-            .await
-            .map_err(|e| LlmError::Client(e.to_string()))
+            extractor
+                .extract(user_prompt)
+                .await
+                .map_err(|e| LlmError::Client(e.to_string()))
+        })
+        .await
     }
 
     /// Telegram free-text only: disable Qwen thinking and skip extra retries.
@@ -708,21 +732,24 @@ impl ChotuLlm {
     where
         T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
     {
-        let extractor = self
-            .client
-            .extractor::<T>(&self.model)
-            .preamble(system_prompt)
-            .retries(0)
-            .additional_params(serde_json::json!({
-                "think": false,
-                "num_predict": 256,
-            }))
-            .build();
+        self.with_slot(async {
+            let extractor = self
+                .client
+                .extractor::<T>(&self.model)
+                .preamble(system_prompt)
+                .retries(0)
+                .additional_params(serde_json::json!({
+                    "think": false,
+                    "num_predict": 256,
+                }))
+                .build();
 
-        extractor
-            .extract(user_prompt)
-            .await
-            .map_err(|e| LlmError::Client(e.to_string()))
+            extractor
+                .extract(user_prompt)
+                .await
+                .map_err(|e| LlmError::Client(e.to_string()))
+        })
+        .await
     }
 
     fn format_email_user_prompt(email: &EmailMetadata) -> String {
