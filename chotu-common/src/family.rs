@@ -832,23 +832,19 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
                             eprintln!("Config warning: {}", w);
                         }
                     }
-                    if let Some(tz_raw) = config.timezone.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-                        if crate::schedule::parse_iana_timezone(tz_raw).is_none() {
-                            eprintln!(
-                                "Config warning: timezone `{tz_raw}` is not a valid IANA tz database name; using {}",
-                                config.resolved_timezone_name()
-                            );
-                        }
+                    for w in crate::schedule::timezone_validation_warnings(config.timezone.as_deref())
+                    {
+                        eprintln!("Config warning: {}", w);
                     }
                     if let Some(sched) = config.schedules.as_ref() {
                         for w in sched.validation_warnings() {
                             eprintln!("Config warning: {}", w);
                         }
                     }
+                    let tz_name = config.resolved_timezone_name();
                     println!(
                         "Successfully loaded configuration from {:?} (timezone {})",
-                        path_ref,
-                        config.resolved_timezone_name()
+                        path_ref, tz_name
                     );
                     config
                 }

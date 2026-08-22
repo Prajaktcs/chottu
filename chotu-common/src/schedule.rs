@@ -40,23 +40,23 @@ pub struct AgentSchedules {
 
 impl AgentSchedules {
     pub fn morning_brief(&self) -> Option<ClockTime> {
-        parse_schedule_slot("morning_brief", self.morning_brief.as_deref())
+        parse_schedule_slot(self.morning_brief.as_deref())
     }
 
     pub fn portfolio(&self) -> Option<ClockTime> {
-        parse_schedule_slot("portfolio", self.portfolio.as_deref())
+        parse_schedule_slot(self.portfolio.as_deref())
     }
 
     pub fn reflection(&self) -> Option<ClockTime> {
-        parse_schedule_slot("reflection", self.reflection.as_deref())
+        parse_schedule_slot(self.reflection.as_deref())
     }
 
     pub fn health_evening_sync(&self) -> Option<ClockTime> {
-        parse_schedule_slot("health_evening_sync", self.health_evening_sync.as_deref())
+        parse_schedule_slot(self.health_evening_sync.as_deref())
     }
 
     pub fn health_late_steps(&self) -> Option<ClockTime> {
-        parse_schedule_slot("health_late_steps", self.health_late_steps.as_deref())
+        parse_schedule_slot(self.health_late_steps.as_deref())
     }
 
     pub fn validation_warnings(&self) -> Vec<String> {
@@ -98,17 +98,8 @@ pub fn parse_hhmm(raw: &str) -> Option<ClockTime> {
     Some(ClockTime { hour, minute })
 }
 
-fn parse_schedule_slot(name: &str, raw: Option<&str>) -> Option<ClockTime> {
-    let s = raw.map(str::trim).filter(|s| !s.is_empty())?;
-    match parse_hhmm(s) {
-        Some(t) => Some(t),
-        None => {
-            eprintln!(
-                "Config warning: schedules.{name} `{s}` is not a valid 24-hour HH:MM; job disabled"
-            );
-            None
-        }
-    }
+fn parse_schedule_slot(raw: Option<&str>) -> Option<ClockTime> {
+    parse_hhmm(raw.unwrap_or(""))
 }
 
 /// Parse an IANA tz database name (`America/Toronto`, `UTC`, …).
@@ -121,27 +112,43 @@ pub fn parse_iana_timezone(name: &str) -> Option<Tz> {
 }
 
 /// Resolve agent timezone: config `timezone`, else `CHOTU_TIMEZONE`, else America/Toronto.
+/// Side-effect free; emit [`timezone_validation_warnings`] once at config load.
 pub fn resolve_timezone_name(config_timezone: Option<&str>) -> String {
     if let Some(name) = config_timezone.map(str::trim).filter(|s| !s.is_empty()) {
         if parse_iana_timezone(name).is_some() {
             return name.to_string();
         }
-        eprintln!(
-            "Config warning: timezone `{name}` is not a valid IANA tz database name; \
-             falling back"
-        );
     }
     if let Ok(env_name) = std::env::var("CHOTU_TIMEZONE") {
         let env_name = env_name.trim();
         if parse_iana_timezone(env_name).is_some() {
             return env_name.to_string();
         }
-        eprintln!(
-            "Config warning: CHOTU_TIMEZONE `{env_name}` is not a valid IANA tz database name; \
-             using {DEFAULT_TIMEZONE}"
-        );
     }
     DEFAULT_TIMEZONE.to_string()
+}
+
+/// Warnings for invalid config/env timezone. Call once from `load_config`, not per tick.
+pub fn timezone_validation_warnings(config_timezone: Option<&str>) -> Vec<String> {
+    let mut out = Vec::new();
+    let resolved = resolve_timezone_name(config_timezone);
+    if let Some(name) = config_timezone.map(str::trim).filter(|s| !s.is_empty()) {
+        if parse_iana_timezone(name).is_none() {
+            out.push(format!(
+                "timezone `{name}` is not a valid IANA tz database name; using {resolved}"
+            ));
+        }
+        return out;
+    }
+    if let Ok(env_name) = std::env::var("CHOTU_TIMEZONE") {
+        let env_name = env_name.trim();
+        if !env_name.is_empty() && parse_iana_timezone(env_name).is_none() {
+            out.push(format!(
+                "CHOTU_TIMEZONE `{env_name}` is not a valid IANA tz database name; using {resolved}"
+            ));
+        }
+    }
+    out
 }
 
 pub fn resolve_tz(config_timezone: Option<&str>) -> Tz {
@@ -201,6 +208,11 @@ reflection: "   "
         assert!(parse_iana_timezone("Not/AZone").is_none());
         assert_eq!(resolve_timezone_name(Some("America/Toronto")), "America/Toronto");
         assert_eq!(resolve_timezone_name(Some("")), DEFAULT_TIMEZONE);
+        let warns = timezone_validation_warnings(Some("Not/AZone"));
+        assert_eq!(warns.len(), 1);
+        assert!(warns[0].contains("Not/AZone"));
+        assert!(warns[0].contains(DEFAULT_TIMEZONE));
+        assert!(timezone_validation_warnings(Some("America/Toronto")).is_empty());
     }
 
     #[test]
