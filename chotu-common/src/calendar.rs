@@ -395,9 +395,10 @@ pub fn build_calendar_client(member: &crate::family::FamilyMember) -> Option<Goo
     Some(GoogleCalendarClient::new(client_id, client_secret, refresh_token))
 }
 
-/// IANA timezone used when creating calendar events (env `CHOTU_TIMEZONE`, default America/Toronto).
+/// IANA timezone used when creating calendar events.
+/// Prefers `CHOTU_TIMEZONE` (set from config `timezone` at boot), else `America/Toronto`.
 pub fn default_calendar_timezone() -> String {
-    std::env::var("CHOTU_TIMEZONE").unwrap_or_else(|_| "America/Toronto".to_string())
+    crate::schedule::resolve_timezone_name(None)
 }
 
 /// Schedules a timed block starting at `start` UTC, lasting `duration_minutes`.
@@ -441,8 +442,9 @@ fn clamp_event_duration_minutes(duration_minutes: i64) -> i64 {
 /// Default duration used when creating/rescheduling task calendar blocks.
 pub const TASK_CALENDAR_DURATION_MINUTES: i64 = 30;
 
-/// Schedules a timed block on a member's calendar starting at local 09:00 on `date_yyyy_mm_dd`
-/// (or tomorrow if `None`), lasting `duration_minutes`. Returns the Google event ID.
+/// Schedules a timed block on a member's calendar starting at 09:00 in the agent
+/// IANA timezone on `date_yyyy_mm_dd` (or tomorrow if `None`), lasting `duration_minutes`.
+/// The Google API receives UTC instants plus the IANA zone label.
 pub async fn schedule_timed_block(
     client: &GoogleCalendarClient,
     title: &str,
@@ -450,9 +452,13 @@ pub async fn schedule_timed_block(
     date_yyyy_mm_dd: Option<&str>,
     duration_minutes: i64,
 ) -> Result<String, CalendarError> {
-    use chrono::{Duration, Local, NaiveDate, NaiveTime, TimeZone};
+    use chrono::{Duration, NaiveDate, NaiveTime, TimeZone};
+    use chrono_tz::Tz;
 
-    let local_today = Local::now().date_naive();
+    let tz: Tz = default_calendar_timezone()
+        .parse()
+        .unwrap_or(chrono_tz::America::Toronto);
+    let today = Utc::now().with_timezone(&tz).date_naive();
     let target_date = match date_yyyy_mm_dd {
         Some(d) => NaiveDate::parse_from_str(d, "%Y-%m-%d").map_err(|source| {
             CalendarError::InvalidDate {
@@ -460,13 +466,12 @@ pub async fn schedule_timed_block(
                 source,
             }
         })?,
-        None => local_today + Duration::days(1),
+        None => today + Duration::days(1),
     };
 
     let start_naive = target_date
         .and_time(NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default());
-    // Interpret wall-clock time in the machine's local offset, then convert to UTC for the API.
-    let start = match Local.from_local_datetime(&start_naive) {
+    let start = match tz.from_local_datetime(&start_naive) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
             dt.with_timezone(&Utc)
         }

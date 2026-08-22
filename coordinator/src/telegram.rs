@@ -17,7 +17,7 @@ use chotu_common::{
     fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
     has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
-    effective_food_time, parse_due_phrase, pending_budget_alerts, resolve_food_log_timing,
+    effective_food_time, parse_due_phrase_tz, pending_budget_alerts, resolve_food_log_timing,
     reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
     save_health_refresh_token, schedule_at, set_budget_override, set_member_telegram_chat_id,
     spawn_background_reindex, split_task_add_args, start_redirect_listener,
@@ -162,154 +162,123 @@ pub async fn start_telegram_bot(
         );
     }
     let conversation_states: StateMap = Arc::new(RwLock::new(HashMap::new()));
+    {
+        let describe = |label: &str, clock: Option<chotu_common::ClockTime>| match clock {
+            Some(t) => format!("{label} {:02}:{:02}", t.hour, t.minute),
+            None => format!("{label} off"),
+        };
+        println!(
+            "Telegram Bot: timezone {} (IANA). {} · {} · {} (sends when linked chats or TELEGRAM_CHAT_ID exist).",
+            config.resolved_timezone_name(),
+            describe("brief", config.schedule_clock(chotu_common::AgentSchedules::morning_brief)),
+            describe("portfolio", config.schedule_clock(chotu_common::AgentSchedules::portfolio)),
+            describe("reflection", config.schedule_clock(chotu_common::AgentSchedules::reflection)),
+        );
+    }
     let shared_config: SharedConfig = Arc::new(RwLock::new(config));
 
-    // Spawn proactive evening reflection scheduler when any delivery target exists.
+    // Proactive jobs from config.yaml `schedules` (blank/omitted = not scheduled).
     let sched_bot = bot.clone();
     let sched_pool = pool.clone();
     let sched_llm = llm.clone();
     let sched_states = conversation_states.clone();
     let sched_config = shared_config.clone();
     tokio::spawn(async move {
-        use chrono::Timelike;
-        println!(
-            "Telegram Bot: Proactive reflection scheduler running (sends when linked chats or TELEGRAM_CHAT_ID exist)."
-        );
-        let mut last_sent_date = String::new();
+        let mut last_brief = String::new();
+        let mut last_portfolio = String::new();
+        let mut last_reflect = String::new();
         loop {
-            let now = chrono::Local::now();
+            let cfg = sched_config.read().await.clone();
+            let now = cfg.now_in_tz();
             let date_str = now.format("%Y-%m-%d").to_string();
-            if now.hour() == 21 && now.minute() == 0 && date_str != last_sent_date {
-                let cfg = sched_config.read().await.clone();
-                let targets = telegram_delivery_targets(&cfg);
-                if targets.is_empty() {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                    continue;
-                }
-                println!("Telegram Bot: Scheduled time (9:00 PM) reached. Pushing evening reflection...");
-                let mut any_ok = false;
-                for cid in targets {
-                    if let Err(e) = handle_reflect_trigger(
-                        &sched_bot,
-                        ChatId(cid),
-                        &sched_pool,
-                        &sched_llm,
-                        sched_states.clone(),
-                        &cfg,
-                    )
-                    .await
-                    {
-                        eprintln!(
-                            "Telegram Bot: failed to push scheduled reflection to {}: {:?}",
-                            cid, e
-                        );
-                    } else {
-                        any_ok = true;
-                    }
-                }
-                if any_ok {
-                    last_sent_date = date_str;
-                }
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        }
-    });
+            let targets = telegram_delivery_targets(&cfg);
+            let tz_name = cfg.resolved_timezone_name();
 
-    // Spawn proactive evening portfolio (/networth) overview scheduler.
-    let networth_bot = bot.clone();
-    let networth_pool = pool.clone();
-    let networth_config = shared_config.clone();
-    tokio::spawn(async move {
-        use chrono::Timelike;
-        println!(
-            "Telegram Bot: Portfolio overview scheduler running at 18:00 (sends when linked chats or TELEGRAM_CHAT_ID exist)."
-        );
-        let mut last_run_date = String::new();
-        loop {
-            let now = chrono::Local::now();
-            let date_str = now.format("%Y-%m-%d").to_string();
-            if now.hour() == 18 && now.minute() == 0 && date_str != last_run_date {
-                let cfg = networth_config.read().await.clone();
-                let targets = telegram_delivery_targets(&cfg);
-                if targets.is_empty() {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                    continue;
-                }
-                println!(
-                    "Telegram Bot: Scheduled time (6:00 PM) reached. Pushing portfolio overview..."
-                );
-                // Build once (one DB + quote/FX fetch), then fan out the same message.
-                match build_networth_summary(&networth_pool, &cfg).await {
-                    Ok(msg) => {
-                        if send_household(&networth_bot, &cfg, msg).await {
-                            last_run_date = date_str;
+            if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::morning_brief) {
+                if clock.matches(now) && date_str != last_brief && !targets.is_empty() {
+                    println!(
+                        "Telegram Bot: scheduled morning brief ({:02}:{:02} {}).",
+                        clock.hour, clock.minute, tz_name
+                    );
+                    let mut any_ok = false;
+                    for cid in &targets {
+                        if let Err(e) =
+                            handle_brief(&sched_bot, ChatId(*cid), &sched_pool, &cfg).await
+                        {
+                            eprintln!(
+                                "Telegram Bot: failed to push morning brief to {}: {:?}",
+                                cid, e
+                            );
+                        } else {
+                            any_ok = true;
                         }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Telegram Bot: failed to build scheduled portfolio overview: {}",
-                            e
-                        );
-                        let _ = send_household(
-                            &networth_bot,
-                            &cfg,
-                            format!("❌ Portfolio overview failed: {}", e),
-                        )
-                        .await;
+                    if any_ok {
+                        last_brief = date_str.clone();
                     }
                 }
             }
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-        }
-    });
 
-    // Spawn proactive morning brief scheduler.
-    let brief_bot = bot.clone();
-    let brief_pool = pool.clone();
-    let brief_config = shared_config.clone();
-    tokio::spawn(async move {
-        use chrono::Timelike;
-        let brief_hour: u32 = std::env::var("MORNING_BRIEF_HOUR")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(7)
-            .min(23);
-        println!(
-            "Telegram Bot: Morning brief scheduler running at {:02}:00 (sends when delivery targets exist).",
-            brief_hour
-        );
-        let mut last_sent_date = String::new();
-        loop {
-            let now = chrono::Local::now();
-            let date_str = now.format("%Y-%m-%d").to_string();
-            if now.hour() == brief_hour && now.minute() == 0 && date_str != last_sent_date {
-                let cfg = brief_config.read().await.clone();
-                let targets = telegram_delivery_targets(&cfg);
-                if targets.is_empty() {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                    continue;
-                }
-                println!(
-                    "Telegram Bot: Scheduled time ({:02}:00) reached. Pushing morning brief...",
-                    brief_hour
-                );
-                let mut any_ok = false;
-                for cid in targets {
-                    if let Err(e) =
-                        handle_brief(&brief_bot, ChatId(cid), &brief_pool, &cfg).await
-                    {
-                        eprintln!(
-                            "Telegram Bot: failed to push morning brief to {}: {:?}",
-                            cid, e
-                        );
-                    } else {
-                        any_ok = true;
+            if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::portfolio) {
+                if clock.matches(now) && date_str != last_portfolio && !targets.is_empty() {
+                    println!(
+                        "Telegram Bot: scheduled portfolio overview ({:02}:{:02} {}).",
+                        clock.hour, clock.minute, tz_name
+                    );
+                    match build_networth_summary(&sched_pool, &cfg).await {
+                        Ok(msg) => {
+                            if send_household(&sched_bot, &cfg, msg).await {
+                                last_portfolio = date_str.clone();
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Telegram Bot: failed to build scheduled portfolio overview: {}",
+                                e
+                            );
+                            let _ = send_household(
+                                &sched_bot,
+                                &cfg,
+                                format!("❌ Portfolio overview failed: {}", e),
+                            )
+                            .await;
+                        }
                     }
                 }
-                if any_ok {
-                    last_sent_date = date_str;
+            }
+
+            if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::reflection) {
+                if clock.matches(now) && date_str != last_reflect && !targets.is_empty() {
+                    println!(
+                        "Telegram Bot: scheduled evening reflection ({:02}:{:02} {}).",
+                        clock.hour, clock.minute, tz_name
+                    );
+                    let mut any_ok = false;
+                    for cid in &targets {
+                        if let Err(e) = handle_reflect_trigger(
+                            &sched_bot,
+                            ChatId(*cid),
+                            &sched_pool,
+                            &sched_llm,
+                            sched_states.clone(),
+                            &cfg,
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "Telegram Bot: failed to push scheduled reflection to {}: {:?}",
+                                cid, e
+                            );
+                        } else {
+                            any_ok = true;
+                        }
+                    }
+                    if any_ok {
+                        last_reflect = date_str;
+                    }
                 }
             }
+
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
@@ -456,7 +425,7 @@ async fn handle_callback_query(
             }
         }
         TaskCallbackAction::Snooze => {
-            match snooze_task_by_id(&pool, task_id, 1).await {
+            match snooze_task_by_id(&pool, task_id, 1, &config).await {
                 TaskMutateOutcome::Snoozed { title, due } => {
                     let calendar_note =
                         sync_calendar_after_snooze(&pool, &config, task_id, &due).await;
@@ -697,7 +666,12 @@ async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutc
     }
 }
 
-async fn snooze_task_by_id(pool: &SqlitePool, task_id: &str, days: i64) -> TaskMutateOutcome {
+async fn snooze_task_by_id(
+    pool: &SqlitePool,
+    task_id: &str,
+    days: i64,
+    config: &AppConfig,
+) -> TaskMutateOutcome {
     let row = match load_task_title_status(pool, task_id).await {
         Ok(r) => r,
         Err(e) => {
@@ -709,11 +683,11 @@ async fn snooze_task_by_id(pool: &SqlitePool, task_id: &str, days: i64) -> TaskM
         return TaskMutateOutcome::NotFound;
     };
 
-    let due = (chrono::Local::now().date_naive() + chrono::Duration::days(days))
+    let due = (config.now_in_tz().date_naive() + chrono::Duration::days(days))
         .format("%Y-%m-%d")
         .to_string();
     let now = chrono::Utc::now().to_rfc3339();
-    let due_at = parse_due_phrase(&due).map(|p| p.due_at);
+    let due_at = parse_due_phrase_tz(&due, config.resolved_tz()).map(|p| p.due_at);
 
     if let Err(e) = sqlx::query(
         "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
@@ -2441,7 +2415,7 @@ async fn create_manual_task(
     }
 
     let parsed_due = match due_raw.as_deref() {
-        Some(raw) => match parse_due_phrase(raw) {
+        Some(raw) => match parse_due_phrase_tz(raw, config.resolved_tz()) {
             Some(p) => {
                 if let Ok(due_dt) = chrono::DateTime::parse_from_rfc3339(&p.due_at) {
                     if due_dt.with_timezone(&chrono::Utc) <= chrono::Utc::now() {
@@ -2879,7 +2853,7 @@ async fn snooze_task(
         return Ok(());
     };
 
-    match snooze_task_by_id(pool, &id, days).await {
+    match snooze_task_by_id(pool, &id, days, config).await {
         TaskMutateOutcome::Snoozed { title, due } => {
             let calendar_note = sync_calendar_after_snooze(pool, config, &id, &due).await;
             let mut msg = format!(
@@ -3018,7 +2992,7 @@ async fn sync_calendar_after_snooze(
     if link.calendar_event_id.is_none() {
         return None;
     }
-    let due_at = parse_due_phrase(due_yyyy_mm_dd)?.due_at;
+    let due_at = parse_due_phrase_tz(due_yyyy_mm_dd, config.resolved_tz())?.due_at;
     match reschedule_linked_calendar_event(config, pool, task_id, &link, &due_at).await {
         CalendarRescheduleOutcome::Updated => Some("📅 calendar updated"),
         CalendarRescheduleOutcome::NoOp => None,

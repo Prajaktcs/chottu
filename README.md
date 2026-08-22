@@ -40,7 +40,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 
 ### Family health & nutrition (Health Coach)
 - Multi-member household profiles (`config.yaml`: adults/kids, optional per-member nutrition + fitness goals).
-- Two-way **Google Health** sync: pull daily calories/macros/activity/exercises; push Telegram-logged meals back per linked member. Evening sync ~8:45 local; **late steps sync ~11:00 PM ET** (override with `HEALTH_LATE_SYNC_HOUR` / `HEALTH_LATE_SYNC_TZ`) with a private nudge toward the daily step goal (config `nutrition_goals.steps`, default 10 000).
+- Two-way **Google Health** sync: pull daily calories/macros/activity/exercises; push Telegram-logged meals back per linked member. Evening / late-steps sync times come from `config.yaml` `schedules` (in `timezone`, default `America/Toronto`). Blank slots are not scheduled. Late sync can nudge toward the daily step goal (`nutrition_goals.steps`, default 10 000).
 - Log food by text (`/food`), plain-language chat (“log 2 eggs for praj”), or **photo**:
   - Barcode → [Open Food Facts](https://world.openfoodfacts.org/)
   - Package / plated meal → Gemini vision
@@ -54,7 +54,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 - **Per-person Telegram DMs**: each adult runs `/link <member_id>` in a private chat; food/tasks without a member id default to that person. Once any member is linked, unknown chats are rejected (`/chat` and `/link` still work for setup).
 - Per-member **Google Calendar** OAuth: action items, bill due dates, and travel dates can be auto-scheduled.
 - **Calendar agenda** (`/cal [today|tomorrow|week]` or “what's today?”): family-merged timeline with timed-event conflict detection.
-- **Morning brief** (manual `/brief` or scheduled ~7:00 local): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals, and training (outcome countdown + today’s planned session) — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
+- **Morning brief** (manual `/brief` or `schedules.morning_brief` in `config.yaml`; blank = off): today’s calendar, open tasks, bills due, yesterday’s nutrition vs goals, and training (outcome countdown + today’s planned session) — fans out to all linked adult DMs (`TELEGRAM_CHAT_ID` remains an optional shared fallback).
 - **Evening reflection**: scheduled or `/reflect` — grounds in today’s health (nutrition, steps, sleep, energy) and spend logs, while training toward your `core_values` in `config.yaml` (default Growth + Contribution); replies saved under `~/chotu_brain/Journal/`.
 
 ### Queryable memory (RAG)
@@ -64,7 +64,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 
 ### Finance & investing (Finance Advisor + ledger)
 - Continuous ledger from email receipts and drop-folder imports.
-- `/monthly` spend summaries; `/networth` from cash + holdings (FX-aware when rates are available).
+- `/monthly` spend summaries; `/networth` from cash + holdings (FX-aware when rates are available). A scheduled overview uses `schedules.portfolio` (blank = off).
 - Category **spend budgets** (`spend_budgets` in `config.yaml` or `/budget set`): progress via `/budget`, appended on `/monthly`, and mid-month Telegram pushes at 80% / 100%.
 - Portfolio positions sync from dropped statements; optional target allocation buckets in `config.yaml`.
 - `/research` — OpenRouter shared-universe research: multi-propose → Finnhub market-cap filter → score (GPT-5.6 Sol + Opus 5 + Kimi K3) → Kimi K3 judge. Optional company args seed the universe and skip propose.
@@ -218,13 +218,14 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. Linked DMs: self only. |
 | `/status` | Today's status (finance + health, exercises, fitness outcome progress, short local-Ollama coach tip per member). |
 | `/plan [new]` | Show this week's training plan (generate if missing). `/plan new` regenerates from `fitness_goals` + recent activity via local Ollama. |
-| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals, training countdown/session. Auto-sends at 7:00 local to all linked DMs (`MORNING_BRIEF_HOUR` to override; `TELEGRAM_CHAT_ID` optional shared fallback). |
+| `/brief` | Morning brief: today's calendar, open tasks, bills due, yesterday's nutrition vs goals, training countdown/session. Auto-sends at `schedules.morning_brief` (example `07:00` America/Toronto; blank = off) to all linked DMs (`TELEGRAM_CHAT_ID` optional shared fallback). |
 | `/cal [today\|tomorrow\|week]` | Family calendar agenda (default today). Flags overlapping timed events across linked calendars. |
 | `/memory <question>` | Queryable memory RAG over journals, newsletter digests, personal references, and tasks. Answers via local Ollama (`OLLAMA_MODEL`); Gemini only if Ollama fails. `/memory reindex` rebuilds the embedding index (`nomic-embed-text`). |
 | `/trends [days]` | Multi-day nutrition/activity trends (default 7 days) plus a short coach tip per member with data. |
-| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Open/snoozed lists and due reminders include **✅ Done** / **😴 +1d** inline buttons (no id typing). Slash actions still work: `/tasks complete <id\|all>` (linked DM: yours + unassigned; household needs `/tasks complete all confirm`; cancels linked calendar events), `/tasks snooze <id> [days]` (moves linked calendar events), `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. || `/reflect` | Manually trigger the evening reflection loop. |
+| `/tasks [open\|all\|completed\|snoozed] [member]` | List tasks. Create: `/task <title> [by\|due <when>]` or `/tasks add [member] <title> [due\|by <when>]` (defaults assignee to linked member; dated tasks go on that member's Google Calendar when linked). Open/snoozed lists and due reminders include **✅ Done** / **😴 +1d** inline buttons (no id typing). Slash actions still work: `/tasks complete <id\|all>` (linked DM: yours + unassigned; household needs `/tasks complete all confirm`; cancels linked calendar events), `/tasks snooze <id> [days]` (moves linked calendar events), `/tasks reassign <id> <member>`, `/tasks open <id>`. Timed dues ping the assignee's DM (else household). Reply `unactionable` to an email reminder to ignore similar mail. |
+| `/reflect` | Manually trigger the evening reflection loop. |
 | `/research [companies]` | Shared-universe stock research via OpenRouter + Finnhub (propose → cap filter → score → Kimi K3 judge). With args, seeds the universe and skips propose. e.g. `/research Apple, Nvidia`. |
-| `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). |
+| `/networth` | Invested net worth from portfolio holdings (cash balance not tracked yet). Also auto-sends at `schedules.portfolio` to linked DMs (blank = off). |
 | `/monthly [YYYY-MM]` | Monthly transaction summary (includes budget progress when configured). |
 | `/budget` | Category spend budgets for this month. `/budget set Food 800`, `/budget clear Entertainment`. YAML `spend_budgets` + Telegram overrides; 80%/100% alerts fan out to linked DMs. |
 | `/chat` | View your current Telegram Chat ID. |
