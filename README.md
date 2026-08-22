@@ -212,7 +212,7 @@ Chotu uses browser redirects to secure logins locally without public ports.
 | `/help` | Displays the help text. |
 | `/login <health <member>\|gmail\|calendar <member>>` | Interactive OAuth (Health/Calendar save per-member refresh tokens). |
 | `/sync` | Triggers a manual sync of today's nutrition for every linked Google Health account. |
-| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Relative days/times in the text are resolved (e.g. `/food yesterday's dinner pasta`). Pushes to that member's Google Health when linked. Linked DMs can only log for themselves; use the household chat to log for someone else. |
+| `/food [member_id] <desc>` | Log food (defaults to the member linked to this DM). Relative days/times are parsed locally (e.g. `/food yesterday's dinner pasta`) — slash commands do not wait on Ollama. Pushes to that member's Google Health when linked. Linked DMs can only log for themselves; use the household chat to log for someone else. |
 | `/undofood [member_id]` | Remove the last `/food` entry (and its Google Health log if synced). Defaults to linked member. Linked DMs: self only. |
 | `/adjustfood [member_id] <cal> <P> <C> <F>` | Override today's nutrition totals (clears Telegram meals from Google Health first). Linked DMs: self only. |
 | `/clearfood [member_id]` | Clear today's food logs and summary for a member. Defaults to linked member. Linked DMs: self only. |

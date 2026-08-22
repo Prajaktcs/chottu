@@ -699,6 +699,32 @@ impl ChotuLlm {
             .map_err(|e| LlmError::Client(e.to_string()))
     }
 
+    /// Telegram free-text only: disable Qwen thinking and skip extra retries.
+    async fn extract_structured_fast<T>(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<T, LlmError>
+    where
+        T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
+    {
+        let extractor = self
+            .client
+            .extractor::<T>(&self.model)
+            .preamble(system_prompt)
+            .retries(0)
+            .additional_params(serde_json::json!({
+                "think": false,
+                "num_predict": 256,
+            }))
+            .build();
+
+        extractor
+            .extract(user_prompt)
+            .await
+            .map_err(|e| LlmError::Client(e.to_string()))
+    }
+
     fn format_email_user_prompt(email: &EmailMetadata) -> String {
         format!(
             "Sender: {}\nSubject: {}\nBody Preview: {}\n",
@@ -823,12 +849,12 @@ in YYYY-MM-DD form from the email metadata and body.";
         };
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let user_prompt = format!(
-            "Today's local date: {}\nFamily member ids: {}\nUser message: {}\n",
+            "/no_think\nToday's local date: {}\nFamily member ids: {}\nUser message: {}\n",
             today,
             members,
             text.trim()
         );
-        self.extract_structured(INTENT_CLASSIFIER_SYSTEM_PROMPT, &user_prompt)
+        self.extract_structured_fast(INTENT_CLASSIFIER_SYSTEM_PROMPT, &user_prompt)
             .await
     }
 

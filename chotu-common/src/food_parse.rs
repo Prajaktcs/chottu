@@ -1,11 +1,11 @@
-//! Resolve LLM-provided food log date/time into a local civil day + UTC instant.
+//! Resolve food-log date/time into a local civil day + UTC instant.
 //!
-//! Relative phrases ("yesterday", "last Friday") are understood by the intent/LLM
-//! layer, which emits YYYY-MM-DD and optional HH:MM. This module validates and
-//! converts those structured fields, and maps meal-of-day words (lunch / snacks /
-//! dinner) onto household time windows when no explicit clock time was spoken.
+//! Slash `/food` and photo captions use [`parse_food_log_utterance`] (no LLM).
+//! Relative phrases ("yesterday", "last Friday") become YYYY-MM-DD; meal-of-day
+//! words map onto household time windows. Natural-language chat still uses the
+//! intent classifier, which may emit the same structured fields.
 
-use chrono::{Local, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 
 /// Midpoints of household meal windows (local 24h clock).
 ///
@@ -66,6 +66,245 @@ pub fn resolve_food_log_timing(
         timestamp,
         date_was_explicit,
     }
+}
+
+/// Parsed meal text plus optional civil date/time (no LLM).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedFoodUtterance {
+    /// Food/meal text with date/meal/clock framing words removed when possible.
+    pub food_description: String,
+    /// YYYY-MM-DD when the user named a day; `None` means today / unspecified.
+    pub food_date: Option<String>,
+    /// HH:MM 24h local when a meal-of-day or clock time was named.
+    pub food_time: Option<String>,
+}
+
+/// Local parse of `/food` args or a photo caption (after member id is stripped).
+pub fn parse_food_log_utterance(text: &str) -> ParsedFoodUtterance {
+    let trimmed = text.trim();
+    let today = Local::now().date_naive();
+    let food_date = detect_food_date(trimmed, today).map(|d| d.format("%Y-%m-%d").to_string());
+    let clock = extract_clock_hhmm(trimmed);
+    let mut food_time = effective_food_time(trimmed, clock.as_deref());
+    if food_time.is_none() && utterance_has_last_night(trimmed) {
+        food_time = Some(MEAL_TIME_DINNER.to_string());
+    }
+    let food_description = strip_food_framing(trimmed);
+    ParsedFoodUtterance {
+        food_description: if food_description.is_empty() {
+            trimmed.to_string()
+        } else {
+            food_description
+        },
+        food_date,
+        food_time,
+    }
+}
+
+fn utterance_has_last_night(utterance: &str) -> bool {
+    let lower = utterance.to_lowercase();
+    lower.contains("last night")
+}
+
+fn detect_food_date(utterance: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let lower = utterance.to_lowercase();
+    if lower.contains("last night") || token_eq(&lower, "yesterday") {
+        return Some(today - Duration::days(1));
+    }
+    if token_eq(&lower, "today") || token_eq(&lower, "tonight") {
+        return None;
+    }
+
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if let Ok(d) = NaiveDate::parse_from_str(token, "%Y-%m-%d") {
+            return Some(d);
+        }
+        let last = i > 0 && tokens[i - 1] == "last";
+        if let Some(wd) = parse_weekday_token(token) {
+            return Some(if last {
+                previous_weekday_exclusive(today, wd)
+            } else {
+                previous_or_today_weekday(today, wd)
+            });
+        }
+    }
+    None
+}
+
+fn token_eq(lower_utterance: &str, word: &str) -> bool {
+    lower_utterance
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .any(|t| t == word)
+}
+
+fn parse_weekday_token(token: &str) -> Option<Weekday> {
+    match token {
+        "monday" | "mon" => Some(Weekday::Mon),
+        "tuesday" | "tue" | "tues" => Some(Weekday::Tue),
+        "wednesday" | "wed" => Some(Weekday::Wed),
+        "thursday" | "thu" | "thur" | "thurs" => Some(Weekday::Thu),
+        "friday" | "fri" => Some(Weekday::Fri),
+        "saturday" | "sat" => Some(Weekday::Sat),
+        "sunday" | "sun" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
+fn previous_or_today_weekday(today: NaiveDate, target: Weekday) -> NaiveDate {
+    let mut d = today;
+    for _ in 0..7 {
+        if d.weekday() == target {
+            return d;
+        }
+        d -= Duration::days(1);
+    }
+    today
+}
+
+fn previous_weekday_exclusive(today: NaiveDate, target: Weekday) -> NaiveDate {
+    let mut d = today - Duration::days(1);
+    for _ in 0..7 {
+        if d.weekday() == target {
+            return d;
+        }
+        d -= Duration::days(1);
+    }
+    today - Duration::days(7)
+}
+
+fn extract_clock_hhmm(utterance: &str) -> Option<String> {
+    let lower = utterance.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split_whitespace()
+        .map(|raw| raw.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':'))
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    for (i, token) in tokens.iter().enumerate() {
+        if let Some(t) = parse_clock_to_naive(token) {
+            return Some(t.format("%H:%M").to_string());
+        }
+        if i + 1 < tokens.len() && is_ampm_token(tokens[i + 1]) {
+            let joined = format!("{}{}", token, tokens[i + 1]);
+            if let Some(t) = parse_clock_to_naive(&joined) {
+                return Some(t.format("%H:%M").to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_clock_to_naive(token: &str) -> Option<NaiveTime> {
+    let s = token.trim().to_lowercase().replace(' ', "");
+    if NaiveTime::parse_from_str(&s, "%H:%M").is_ok()
+        || NaiveTime::parse_from_str(&s, "%H:%M:%S").is_ok()
+    {
+        return NaiveTime::parse_from_str(&s, "%H:%M")
+            .or_else(|_| NaiveTime::parse_from_str(&s, "%H:%M:%S"))
+            .ok();
+    }
+    let (body, pm) = if let Some(rest) = s.strip_suffix("am") {
+        (rest, false)
+    } else if let Some(rest) = s.strip_suffix("pm") {
+        (rest, true)
+    } else {
+        return None;
+    };
+    let body = body.trim_end_matches(':');
+    let (hour_s, min_s) = match body.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => (body, "0"),
+    };
+    let hour = hour_s.parse::<u32>().ok()?;
+    let min = min_s.parse::<u32>().ok()?;
+    if min >= 60 {
+        return None;
+    }
+    let hour24 = match (hour, pm) {
+        (12, false) => 0,
+        (12, true) => 12,
+        (h, true) if (1..=11).contains(&h) => h + 12,
+        (h, false) if (1..=11).contains(&h) => h,
+        _ => return None,
+    };
+    NaiveTime::from_hms_opt(hour24, min, 0)
+}
+
+fn strip_food_framing(utterance: &str) -> String {
+    let tokens: Vec<&str> = utterance.split_whitespace().collect();
+    let mut out: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let raw = tokens[i];
+        let cleaned = raw
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':' && c != '/' && c != '.')
+            .to_lowercase();
+        if cleaned.is_empty() {
+            i += 1;
+            continue;
+        }
+        if cleaned == "last" && i + 1 < tokens.len() {
+            let next = tokens[i + 1]
+                .trim_matches(|c: char| !c.is_ascii_alphabetic())
+                .to_lowercase();
+            if next == "night" || parse_weekday_token(&next).is_some() {
+                i += 2;
+                continue;
+            }
+        }
+        let key = alpha_key(&cleaned);
+        if is_framing_word(&key) || parse_clock_to_naive(&cleaned).is_some() {
+            i += 1;
+            continue;
+        }
+        if i + 1 < tokens.len() && is_ampm_token(&tokens[i + 1].to_lowercase()) {
+            let joined = format!("{}{}", cleaned, tokens[i + 1].to_lowercase());
+            if parse_clock_to_naive(&joined).is_some() {
+                i += 2;
+                continue;
+            }
+        }
+        if NaiveDate::parse_from_str(&cleaned, "%Y-%m-%d").is_ok() {
+            i += 1;
+            continue;
+        }
+        out.push(raw);
+        i += 1;
+    }
+    out.join(" ")
+}
+
+fn alpha_key(token: &str) -> String {
+    token
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn is_framing_word(token: &str) -> bool {
+    matches!(
+        token,
+        "yesterday"
+            | "today"
+            | "tonight"
+            | "tomorrow"
+            | "night"
+            | "breakfast"
+            | "lunch"
+            | "dinner"
+            | "supper"
+            | "snack"
+            | "snacks"
+            | "was"
+            | "for"
+            | "at"
+    ) || parse_weekday_token(token).is_some()
 }
 
 /// Prefer household meal windows when the utterance names a meal-of-day and does
@@ -336,5 +575,51 @@ mod tests {
             Some("14:00")
         );
         assert_eq!(effective_food_time("just pasta", None), None);
+    }
+
+    #[test]
+    fn plain_food_has_no_date_or_time() {
+        let p = parse_food_log_utterance(
+            "1 1/2 cups of milk with coffee and 1/2 tsp. of sugar",
+        );
+        assert_eq!(
+            p.food_description,
+            "1 1/2 cups of milk with coffee and 1/2 tsp. of sugar"
+        );
+        assert_eq!(p.food_date, None);
+        assert_eq!(p.food_time, None);
+    }
+
+    #[test]
+    fn yesterdays_dinner_maps_date_and_window() {
+        let p = parse_food_log_utterance("yesterday's dinner pasta");
+        let yesterday = (Local::now().date_naive() - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(p.food_date.as_deref(), Some(yesterday.as_str()));
+        assert_eq!(p.food_time.as_deref(), Some(MEAL_TIME_DINNER));
+        assert_eq!(p.food_description, "pasta");
+    }
+
+    #[test]
+    fn last_night_is_yesterday_dinner() {
+        let p = parse_food_log_utterance("last night pizza");
+        let yesterday = (Local::now().date_naive() - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(p.food_date.as_deref(), Some(yesterday.as_str()));
+        assert_eq!(p.food_time.as_deref(), Some(MEAL_TIME_DINNER));
+        assert_eq!(p.food_description, "pizza");
+    }
+
+    #[test]
+    fn lunch_and_explicit_clock() {
+        let lunch = parse_food_log_utterance("lunch salad");
+        assert_eq!(lunch.food_time.as_deref(), Some(MEAL_TIME_LUNCH));
+        assert_eq!(lunch.food_description, "salad");
+
+        let clocked = parse_food_log_utterance("pasta at 7pm");
+        assert_eq!(clocked.food_time.as_deref(), Some("19:00"));
+        assert_eq!(clocked.food_description, "pasta");
     }
 }

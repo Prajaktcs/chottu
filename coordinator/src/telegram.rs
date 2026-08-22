@@ -17,7 +17,8 @@ use chotu_common::{
     fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
     has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
-    effective_food_time, parse_due_phrase, pending_budget_alerts, resolve_food_log_timing,
+    effective_food_time, parse_due_phrase, parse_food_log_utterance, pending_budget_alerts,
+    resolve_food_log_timing,
     reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
     save_health_refresh_token, schedule_at, set_budget_override, set_member_telegram_chat_id,
     spawn_background_reindex, split_task_add_args, start_redirect_listener,
@@ -837,7 +838,7 @@ async fn handle_command(
                 .await?;
         }
         Command::Food(args) => {
-            handle_food_log(&bot, chat_id, args, &pool, &llm, &gemini_client, &config).await?;
+            handle_food_log(&bot, chat_id, args, &pool, &gemini_client, &config).await?;
         }
         Command::Status => {
             handle_status(&bot, chat_id, &pool, &config, &llm).await?;
@@ -1102,7 +1103,6 @@ async fn handle_food_log(
     chat_id: ChatId,
     args: String,
     pool: &SqlitePool,
-    llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
@@ -1145,27 +1145,12 @@ async fn handle_food_log(
     )
     .await?;
 
-    // Let the LLM resolve relative days/times ("yesterday's dinner…") into YYYY-MM-DD / HH:MM.
-    let (description, food_date, food_time) = with_typing_indicator(bot, chat_id, async {
-        match llm.extract_food_log_context(&food_description).await {
-            Ok(ctx) => {
-                let desc = if ctx.food_description.trim().is_empty() {
-                    food_description.clone()
-                } else {
-                    ctx.food_description.trim().to_string()
-                };
-                (desc, ctx.food_date, ctx.food_time)
-            }
-            Err(e) => {
-                eprintln!(
-                    "Food log context extract failed (falling back to raw text/today): {:?}",
-                    e
-                );
-                (food_description.clone(), None, None)
-            }
-        }
-    })
-    .await;
+    let parsed = parse_food_log_utterance(&food_description);
+    let description = if parsed.food_description.trim().is_empty() {
+        food_description.clone()
+    } else {
+        parsed.food_description
+    };
 
     log_food_for_member(
         bot,
@@ -1175,8 +1160,8 @@ async fn handle_food_log(
         config,
         &family_member_id,
         &description,
-        food_date.as_deref(),
-        food_time.as_deref(),
+        parsed.food_date.as_deref(),
+        parsed.food_time.as_deref(),
         &food_description,
     )
     .await
@@ -4683,7 +4668,7 @@ async fn handle_message(
         // empty journal reply — that's the food-photo path, including captions
         // like `/food pray`. Slash commands still cancel via `handle_command`.
         if msg.photo().is_some() {
-            handle_food_photo(&bot, chat_id, &msg, &pool, &llm, &gemini_client, &config)
+            handle_food_photo(&bot, chat_id, &msg, &pool, &gemini_client, &config)
                 .await?;
             bot.send_message(
                 chat_id,
@@ -4749,7 +4734,7 @@ async fn handle_message(
             }
         }
     } else if msg.photo().is_some() {
-        handle_food_photo(&bot, chat_id, &msg, &pool, &llm, &gemini_client, &config).await?;
+        handle_food_photo(&bot, chat_id, &msg, &pool, &gemini_client, &config).await?;
     } else {
         dispatch_free_text_intent(
             &bot,
@@ -4772,7 +4757,6 @@ async fn handle_food_photo(
     chat_id: ChatId,
     msg: &Message,
     pool: &SqlitePool,
-    llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), teloxide::RequestError> {
@@ -4929,23 +4913,11 @@ async fn handle_food_photo(
     .parse_mode(teloxide::types::ParseMode::Markdown)
     .await?;
 
-    // Caption may backdate the meal ("yesterday's dinner"); resolve via LLM when present.
     let timing = if caption_rest.trim().is_empty() {
         resolve_food_log_timing(None, None)
     } else {
-        match llm.extract_food_log_context(&caption_rest).await {
-            Ok(ctx) => {
-                let food_time = effective_food_time(&caption_rest, ctx.food_time.as_deref());
-                resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
-            }
-            Err(e) => {
-                eprintln!(
-                    "Food photo caption timing extract failed (using now): {:?}",
-                    e
-                );
-                resolve_food_log_timing(None, None)
-            }
-        }
+        let parsed = parse_food_log_utterance(&caption_rest);
+        resolve_food_log_timing(parsed.food_date.as_deref(), parsed.food_time.as_deref())
     };
 
     persist_food_estimation(
@@ -5080,6 +5052,14 @@ async fn dispatch_free_text_intent(
             if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
                 return Ok(());
             }
+            let parsed = parse_food_log_utterance(&description);
+            let description = if parsed.food_description.trim().is_empty() {
+                description
+            } else {
+                parsed.food_description
+            };
+            let date = date.or(parsed.food_date);
+            let time = time.or(parsed.food_time);
             log_food_for_member(
                 bot,
                 chat_id,
