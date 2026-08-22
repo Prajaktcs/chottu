@@ -29,7 +29,7 @@ Results: `evals/research/results/<run_id>/summary.md`.
 [`fixtures.json`](fixtures.json) labels each name:
 
 | Role | Meaning | Scored? |
-|------|---------|---------|
+| ------ | --------- | --------- |
 | `clear_pass` | Mega-cap / wrong sleeve — expect Pass/Low | yes |
 | `clear_interest` | Mandate-aligned speculative small/micro | yes |
 | `contested` | Ambiguous — qualitative only | no (excluded from gold pairwise) |

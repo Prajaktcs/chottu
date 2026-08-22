@@ -1,6 +1,4 @@
 use anyhow::Result;
-use chrono::{Local, Timelike};
-use chrono_tz::Tz;
 use sqlx::SqlitePool;
 
 mod coach_enrich;
@@ -41,9 +39,9 @@ pub use trends::build_nutrition_trend_reports;
 const DEFAULT_STEPS_GOAL: i32 = 10_000;
 
 /// Main entry point for the Health Coach Agent.
-/// Owns scheduled Google Health sync:
-/// - 8:45 PM local — evening nutrition pass (before reflection)
-/// - 11:00 PM America/New_York (override via `HEALTH_LATE_SYNC_*`) — catch late steps + nudge
+/// Owns scheduled Google Health sync from `config.yaml` `schedules`
+/// (`health_evening_sync`, `health_late_steps`) in the agent IANA `timezone`.
+/// Blank slots are not scheduled.
 pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()> {
     println!("Health Coach Agent starting (Google Health sync owner)...");
 
@@ -78,9 +76,9 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
         .map(|m| m.id.clone())
         .collect();
 
-    let late_tz = late_sync_timezone();
-    let late_hour = env_u32("HEALTH_LATE_SYNC_HOUR", 23).min(23);
-    let late_minute = env_u32("HEALTH_LATE_SYNC_MINUTE", 0).min(59);
+    let tz_name = config.resolved_timezone_name();
+    let evening = config.schedule_clock(chotu_common::AgentSchedules::health_evening_sync);
+    let late = config.schedule_clock(chotu_common::AgentSchedules::health_late_steps);
 
     println!(
         "Health Coach: Proactive Google Health sync enabled for: {}",
@@ -90,99 +88,83 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
             linked.join(", ")
         }
     );
+    let fmt_slot = |clock: Option<chotu_common::ClockTime>| match clock {
+        Some(t) => format!("{:02}:{:02} {}", t.hour, t.minute, tz_name),
+        None => "off".to_string(),
+    };
     println!(
-        "Health Coach: Evening sync 20:45 local; late steps sync {:02}:{:02} {} + 10k-step nudge.",
-        late_hour, late_minute, late_tz
+        "Health Coach: Evening sync {}; late steps sync {} + step-goal nudge.",
+        fmt_slot(evening),
+        fmt_slot(late)
     );
 
     let mut last_evening_sync_date = String::new();
     let mut last_late_sync_date = String::new();
     loop {
-        let now_local = Local::now();
-        let local_date = now_local.format("%Y-%m-%d").to_string();
+        let now = config.now_in_tz();
+        let date_str = now.format("%Y-%m-%d").to_string();
 
-        // 8:45 PM local — nutrition pass before evening reflection.
-        if now_local.hour() == 20
-            && now_local.minute() == 45
-            && local_date != last_evening_sync_date
-        {
-            println!(
-                "Health Coach: Evening sync (8:45 PM local). Pulling Google Health..."
-            );
-            match sync_configured_members_today(&pool, gemini.as_ref(), &config).await {
-                Ok(reports) => {
-                    for report in &reports {
-                        println!(
-                            "Health Coach: Evening sync complete for {} — {} kcal, {} steps",
-                            report.member_id, report.calories, report.steps
-                        );
-                        notify_member_telegram(
-                            &report.telegram_markdown(),
-                            &config,
-                            &report.member_id,
-                        )
-                        .await;
+        if let Some(clock) = evening {
+            if clock.matches(now) && date_str != last_evening_sync_date {
+                println!(
+                    "Health Coach: Evening sync ({:02}:{:02} {}). Pulling Google Health...",
+                    clock.hour, clock.minute, tz_name
+                );
+                match sync_configured_members_today(&pool, gemini.as_ref(), &config).await {
+                    Ok(reports) => {
+                        for report in &reports {
+                            println!(
+                                "Health Coach: Evening sync complete for {} — {} kcal, {} steps",
+                                report.member_id, report.calories, report.steps
+                            );
+                            notify_member_telegram(
+                                &report.telegram_markdown(),
+                                &config,
+                                &report.member_id,
+                            )
+                            .await;
+                        }
+                        last_evening_sync_date = date_str.clone();
                     }
-                    last_evening_sync_date = local_date.clone();
-                }
-                Err(e) => {
-                    eprintln!("Health Coach: evening Google Health sync failed: {:?}", e);
+                    Err(e) => {
+                        eprintln!("Health Coach: evening Google Health sync failed: {:?}", e);
+                    }
                 }
             }
         }
 
-        // 11:00 PM ET (default) — catch late-day steps and nudge toward the daily goal.
-        let now_tz = now_local.with_timezone(&late_tz);
-        let late_date = now_tz.format("%Y-%m-%d").to_string();
-        if now_tz.hour() == late_hour
-            && now_tz.minute() == late_minute
-            && late_date != last_late_sync_date
-        {
-            println!(
-                "Health Coach: Late steps sync ({:02}:{:02} {}). Pulling Google Health...",
-                late_hour, late_minute, late_tz
-            );
-            match sync_configured_members_today(&pool, gemini.as_ref(), &config).await {
-                Ok(reports) => {
-                    for report in &reports {
-                        let goal = steps_goal_for_member(&config, &report.member_id);
-                        println!(
-                            "Health Coach: Late sync complete for {} — {}/{} steps",
-                            report.member_id, report.steps, goal
-                        );
-                        notify_member_telegram(
-                            &steps_nudge_markdown(report, goal),
-                            &config,
-                            &report.member_id,
-                        )
-                        .await;
+        if let Some(clock) = late {
+            if clock.matches(now) && date_str != last_late_sync_date {
+                println!(
+                    "Health Coach: Late steps sync ({:02}:{:02} {}). Pulling Google Health...",
+                    clock.hour, clock.minute, tz_name
+                );
+                match sync_configured_members_today(&pool, gemini.as_ref(), &config).await {
+                    Ok(reports) => {
+                        for report in &reports {
+                            let goal = steps_goal_for_member(&config, &report.member_id);
+                            println!(
+                                "Health Coach: Late sync complete for {} — {}/{} steps",
+                                report.member_id, report.steps, goal
+                            );
+                            notify_member_telegram(
+                                &steps_nudge_markdown(report, goal),
+                                &config,
+                                &report.member_id,
+                            )
+                            .await;
+                        }
+                        last_late_sync_date = date_str;
                     }
-                    last_late_sync_date = late_date;
-                }
-                Err(e) => {
-                    eprintln!("Health Coach: late Google Health sync failed: {:?}", e);
+                    Err(e) => {
+                        eprintln!("Health Coach: late Google Health sync failed: {:?}", e);
+                    }
                 }
             }
         }
 
         tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
     }
-}
-
-fn env_u32(key: &str, default: u32) -> u32 {
-    std::env::var(key)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-/// Timezone for the late steps sync. Defaults to America/New_York (ET).
-/// Override with `HEALTH_LATE_SYNC_TZ` (IANA), else `CHOTU_TIMEZONE`.
-fn late_sync_timezone() -> Tz {
-    let raw = std::env::var("HEALTH_LATE_SYNC_TZ")
-        .or_else(|_| std::env::var("CHOTU_TIMEZONE"))
-        .unwrap_or_else(|_| "America/New_York".to_string());
-    raw.parse::<Tz>().unwrap_or(chrono_tz::America::New_York)
 }
 
 fn steps_goal_for_member(config: &chotu_common::AppConfig, member_id: &str) -> i32 {
@@ -302,14 +284,5 @@ mod steps_nudge_tests {
         let md = steps_nudge_markdown(&report(10_200), 10_000);
         assert!(md.contains("goal hit"));
         assert!(md.contains("10200 / 10000"));
-    }
-
-    #[test]
-    fn late_tz_defaults_to_new_york() {
-        let _guard = (); // env may vary in CI; just ensure parse path is valid.
-        assert_eq!(
-            "America/New_York".parse::<Tz>().unwrap(),
-            chrono_tz::America::New_York
-        );
     }
 }

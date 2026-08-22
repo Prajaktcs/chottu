@@ -16,13 +16,14 @@ pub mod finnhub;
 pub mod quotes;
 pub mod yahoo_profile;
 pub mod spend_budget;
+pub mod schedule;
 
 pub use database::{
     complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
 };
 pub use due_parse::{
     is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
-    split_task_add_args, ParsedDue,
+    parse_due_phrase_tz, split_task_add_args, ParsedDue,
 };
 pub use food_parse::{
     effective_food_time, meal_of_day_clock_time, parse_food_log_utterance, resolve_food_log_timing,
@@ -38,6 +39,10 @@ pub use family::{
     SpendBudgets,
     fetch_exchange_rates, CalendarConfig, FitnessEquipment, FitnessFocus, FitnessGoals,
     FitnessWeeklyTargets, NutritionGoals,
+};
+pub use schedule::{
+    now_in_tz, parse_hhmm, parse_iana_timezone, resolve_timezone_name, resolve_tz, AgentSchedules,
+    ClockTime, DEFAULT_TIMEZONE,
 };
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,

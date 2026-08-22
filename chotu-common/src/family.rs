@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use crate::schedule::{resolve_timezone_name, resolve_tz, AgentSchedules, DEFAULT_TIMEZONE};
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalendarConfig {
     /// Calendar provider — currently only "google" is supported.
@@ -519,6 +521,12 @@ pub struct AppConfig {
     pub spend_budgets: Option<SpendBudgets>,
     pub currency: Option<String>,
     pub email_classifier_prompt_path: Option<String>,
+    /// IANA tz database name (e.g. `America/Toronto`). Agent wall clock; DB stores UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    /// Proactive send/sync times (`HH:MM` in `timezone`). Blank/omitted jobs are not scheduled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<AgentSchedules>,
 }
 
 impl Default for AppConfig {
@@ -541,6 +549,8 @@ impl Default for AppConfig {
             spend_budgets: None,
             currency: None,
             email_classifier_prompt_path: None,
+            timezone: Some(DEFAULT_TIMEZONE.to_string()),
+            schedules: None,
         }
     }
 }
@@ -732,6 +742,27 @@ impl AppConfig {
         self.currency.as_deref().unwrap_or("USD")
     }
 
+    /// IANA tz database name the agent uses for civil clocks (default `America/Toronto`).
+    pub fn resolved_timezone_name(&self) -> String {
+        resolve_timezone_name(self.timezone.as_deref())
+    }
+
+    pub fn resolved_tz(&self) -> chrono_tz::Tz {
+        resolve_tz(self.timezone.as_deref())
+    }
+
+    pub fn now_in_tz(&self) -> chrono::DateTime<chrono_tz::Tz> {
+        crate::schedule::now_in_tz(self.resolved_tz())
+    }
+
+    /// Configured clock for a named job, if that job is enabled.
+    pub fn schedule_clock(
+        &self,
+        slot: fn(&AgentSchedules) -> Option<crate::schedule::ClockTime>,
+    ) -> Option<crate::schedule::ClockTime> {
+        self.schedules.as_ref().and_then(slot)
+    }
+
     pub fn convert_to_base(
         &self,
         amount: f64,
@@ -801,7 +832,20 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
                             eprintln!("Config warning: {}", w);
                         }
                     }
-                    println!("Successfully loaded configuration from {:?}", path_ref);
+                    for w in crate::schedule::timezone_validation_warnings(config.timezone.as_deref())
+                    {
+                        eprintln!("Config warning: {}", w);
+                    }
+                    if let Some(sched) = config.schedules.as_ref() {
+                        for w in sched.validation_warnings() {
+                            eprintln!("Config warning: {}", w);
+                        }
+                    }
+                    let tz_name = config.resolved_timezone_name();
+                    println!(
+                        "Successfully loaded configuration from {:?} (timezone {})",
+                        path_ref, tz_name
+                    );
                     config
                 }
             }
@@ -982,6 +1026,33 @@ target_allocation:
         assert_eq!(target.buckets[0].holdings.len(), 2);
         assert_eq!(target.buckets[0].holdings[0].ticker, "VFV");
         assert_eq!(target.buckets[0].holdings[0].amount, 600.0);
+    }
+
+    #[test]
+    fn test_load_timezone_and_schedules() {
+        let yaml = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+timezone: America/Toronto
+schedules:
+  morning_brief: "07:00"
+  portfolio: ""
+  reflection:
+  health_evening_sync: "20:45"
+  health_late_steps: "23:00"
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", yaml).unwrap();
+        let loaded = load_config(tmp.path());
+        assert_eq!(loaded.resolved_timezone_name(), "America/Toronto");
+        let s = loaded.schedules.as_ref().unwrap();
+        assert_eq!(s.morning_brief().unwrap().hour, 7);
+        assert!(s.portfolio().is_none());
+        assert!(s.reflection().is_none());
+        assert_eq!(s.health_evening_sync().unwrap().minute, 45);
     }
 
     #[test]

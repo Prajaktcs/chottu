@@ -31,6 +31,11 @@ async fn main() -> Result<()> {
         std::env::var("CHOTU_CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
     println!("Loading configuration from: {}", config_path);
     let config = chotu_common::load_config(&config_path);
+    std::env::set_var("CHOTU_TIMEZONE", config.resolved_timezone_name());
+    println!(
+        "Agent timezone: {} (IANA tz database; instants in SQLite stay UTC)",
+        config.resolved_timezone_name()
+    );
 
     // 2. Setup LLM client
     let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string());

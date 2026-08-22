@@ -111,6 +111,9 @@ fn detect_food_date(utterance: &str, today: NaiveDate) -> Option<NaiveDate> {
     if lower.contains("last night") || token_eq(&lower, "yesterday") {
         return Some(today - Duration::days(1));
     }
+    if token_eq(&lower, "tomorrow") || token_eq(&lower, "tmr") || token_eq(&lower, "tmrw") {
+        return Some(today + Duration::days(1));
+    }
     if token_eq(&lower, "today") || token_eq(&lower, "tonight") {
         return None;
     }
@@ -610,6 +613,17 @@ mod tests {
         assert_eq!(p.food_date.as_deref(), Some(yesterday.as_str()));
         assert_eq!(p.food_time.as_deref(), Some(MEAL_TIME_DINNER));
         assert_eq!(p.food_description, "pizza");
+    }
+
+    #[test]
+    fn tomorrow_lunch_maps_next_day() {
+        let p = parse_food_log_utterance("tomorrow lunch sandwich");
+        let tomorrow = (Local::now().date_naive() + Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(p.food_date.as_deref(), Some(tomorrow.as_str()));
+        assert_eq!(p.food_time.as_deref(), Some(MEAL_TIME_LUNCH));
+        assert_eq!(p.food_description, "sandwich");
     }
 
     #[test]
