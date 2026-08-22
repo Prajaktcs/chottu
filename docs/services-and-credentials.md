@@ -16,7 +16,7 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 | Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
 | Family roster | `config.yaml` → `family.members` | At least one adult `id` for `/link` |
 
-Without Telegram + Gemini, you can’t use the normal `just run` UX. Other agents (e.g. Health Coach scheduled sync) can still run in-process once the supervisor is up, but the bot path requires both keys.
+`just run` exits immediately if `TELEGRAM_BOT_TOKEN` or `GEMINI_API_KEY` is missing, so the supervisor (Telegram, Health Coach, Streamer, Janitor) never starts. Both keys are required for the normal process.
 
 ---
 
@@ -32,7 +32,11 @@ Without Telegram + Gemini, you can’t use the normal `just run` UX. Other agent
 
 ```bash
 # What just prereqs pulls today:
+ollama pull llama3.2:3b
+ollama pull deepseek-r1:8b
 ollama pull qwen3.5:4b
+
+# Memory RAG embeddings (not in just prereqs — pull before /memory):
 ollama pull nomic-embed-text
 
 # Recommended upgrade for better triage (set OLLAMA_MODEL accordingly):
@@ -102,9 +106,10 @@ Enable Google Health API; add each family Google account as a consent-screen tes
 | `DATABASE_PATH` | `chotu.db` | SQLite |
 | `CHOTU_CONFIG_PATH` | `config.yaml` | Family / budgets / philosophy |
 | `CHOTU_BRAIN_DIR` | `~/chotu_brain` | Journals, digests, RAG corpus |
-| `CHOTU_TIMEZONE` | `America/Toronto` | Scheduling / calendar context |
-| `MORNING_BRIEF_HOUR` | `7` | Local hour for proactive `/brief` |
-| `HEALTH_LATE_SYNC_HOUR` / `HEALTH_LATE_SYNC_TZ` | ~23:00 ET | Late steps sync + nudge |
+| `timezone` in `config.yaml` | `America/Toronto` | IANA tz for `schedules` (fallback: `CHOTU_TIMEZONE` env) |
+| `schedules.morning_brief` | `"07:00"` | Proactive `/brief` (blank = off) |
+| `schedules.portfolio` | `"18:00"` | Evening `/networth` overview (blank = off) |
+| `schedules.reflection` / health slots | see `config.yaml.example` | Evening reflect + Google Health sync |
 
 Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 

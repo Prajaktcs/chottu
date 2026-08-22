@@ -35,7 +35,7 @@ Plain text: `how's food budget`.
 
 ## `/networth`
 
-Invested net worth from `portfolio_holdings` (live quotes via Yahoo when holdings exist). **Cash balances are not tracked yet** — the email ledger is spend history, not account balances.
+Invested net worth from `portfolio_holdings` (live quotes via Yahoo when holdings exist). **Cash balances are not tracked yet** — the email ledger is spend history, not account balances. A scheduled overview uses `schedules.portfolio` (blank = off).
 
 **Looks like**
 
