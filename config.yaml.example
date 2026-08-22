@@ -63,7 +63,18 @@ family:
 # `TELEGRAM_CHAT_ID` remains an optional shared fallback. Once any member is
 # linked, unknown chats are rejected.
 #
-# Optional: CHOTU_TIMEZONE=America/Toronto (used when auto-scheduling tasks/bills)
+# IANA tz database name (https://www.iana.org/time-zones), e.g. America/Toronto.
+# The agent uses this for civil clocks (schedules, "3pm", calendar 09:00 blocks).
+# Instants written to SQLite are UTC. `CHOTU_TIMEZONE` is a fallback if this is omitted.
+timezone: America/Toronto
+
+# 24-hour HH:MM in `timezone`. Omit a key or leave it blank to disable that job.
+schedules:
+  morning_brief: "07:00"
+  portfolio: "18:00"
+  reflection: "21:00"
+  health_evening_sync: "20:45"
+  health_late_steps: "23:00"
 
 currency: "CAD"
 email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"

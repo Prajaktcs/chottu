@@ -1,19 +1,29 @@
-//! Parse relative/absolute due phrases into local civil date + optional time → UTC.
+//! Parse relative/absolute due phrases into configured civil date + optional time → UTC.
 
 use chrono::{Datelike, Duration, Local, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
+use chrono_tz::Tz;
 
 /// Resolved due: civil day for lists/brief, and UTC instant for timed reminders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedDue {
     /// YYYY-MM-DD (local civil day).
     pub due_date: String,
-    /// RFC3339 UTC. Date-only inputs use local 09:00 that day.
+    /// RFC3339 UTC. Date-only inputs use 09:00 in the agent timezone that day.
     pub due_at: String,
 }
 
 /// Parse a due phrase such as `tomorrow 15:00`, `friday 3pm`, `2026-08-10`.
-/// Returns `None` if empty or unparseable.
+/// Uses the host local timezone (tests / callers without config).
 pub fn parse_due_phrase(raw: &str) -> Option<ParsedDue> {
+    parse_due_phrase_in_tz(raw, Local::now().timezone())
+}
+
+/// Same as [`parse_due_phrase`], interpreting civil times in `tz` and storing UTC.
+pub fn parse_due_phrase_in_tz<Z>(raw: &str, tz: Z) -> Option<ParsedDue>
+where
+    Z: TimeZone,
+    Z::Offset: std::fmt::Display,
+{
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -24,7 +34,7 @@ pub fn parse_due_phrase(raw: &str) -> Option<ParsedDue> {
         return None;
     }
 
-    let today = Local::now().date_naive();
+    let today = Utc::now().with_timezone(&tz).date_naive();
     let (date, time_tokens) = parse_date_prefix(&tokens, today)?;
     let time = if time_tokens.is_empty() {
         NaiveTime::from_hms_opt(9, 0, 0)?
@@ -33,7 +43,7 @@ pub fn parse_due_phrase(raw: &str) -> Option<ParsedDue> {
     };
 
     let local_naive = date.and_time(time);
-    let local_dt = match Local.from_local_datetime(&local_naive) {
+    let local_dt = match tz.from_local_datetime(&local_naive) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => dt,
         chrono::LocalResult::None => return None,
     };
@@ -42,6 +52,11 @@ pub fn parse_due_phrase(raw: &str) -> Option<ParsedDue> {
         due_date: date.format("%Y-%m-%d").to_string(),
         due_at: local_dt.with_timezone(&Utc).to_rfc3339(),
     })
+}
+
+/// Convenience for IANA zones from config.
+pub fn parse_due_phrase_tz(raw: &str, tz: Tz) -> Option<ParsedDue> {
+    parse_due_phrase_in_tz(raw, tz)
 }
 
 /// Split `/tasks add …` args into (optional member, title, optional due phrase).
@@ -376,6 +391,17 @@ mod tests {
         let parsed = parse_due_phrase("today 3pm").unwrap();
         let due = chrono::DateTime::parse_from_rfc3339(&parsed.due_at).unwrap();
         assert_eq!(due.with_timezone(&Local).hour(), 15);
+    }
+
+    #[test]
+    fn test_parse_due_stores_utc_from_iana_zone() {
+        use chrono::Timelike;
+        let parsed = parse_due_phrase_tz("2026-01-15 15:00", chrono_tz::America::Toronto).unwrap();
+        let due = chrono::DateTime::parse_from_rfc3339(&parsed.due_at).unwrap();
+        let toronto = due.with_timezone(&chrono_tz::America::Toronto);
+        assert_eq!(toronto.hour(), 15);
+        // EST (UTC-5) in January — stored instant is UTC.
+        assert_eq!(due.with_timezone(&Utc).hour(), 20);
     }
 
     #[test]
