@@ -253,9 +253,8 @@ fn strip_food_framing(utterance: &str) -> String {
             continue;
         }
         if cleaned == "last" && i + 1 < tokens.len() {
-            let next = tokens[i + 1]
-                .trim_matches(|c: char| !c.is_ascii_alphabetic())
-                .to_lowercase();
+            // Possessives: "night's", "friday's" — take the alphabetic prefix.
+            let next = alpha_key(tokens[i + 1]);
             if next == "night" || parse_weekday_token(&next).is_some() {
                 i += 2;
                 continue;
@@ -617,6 +616,17 @@ mod tests {
     }
 
     #[test]
+    fn last_nights_possessive_does_not_leave_last() {
+        let p = parse_food_log_utterance("last night's pizza");
+        let yesterday = (Local::now().date_naive() - Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        assert_eq!(p.food_date.as_deref(), Some(yesterday.as_str()));
+        assert_eq!(p.food_time.as_deref(), Some(MEAL_TIME_DINNER));
+        assert_eq!(p.food_description, "pizza");
+    }
+
+    #[test]
     fn tomorrow_lunch_maps_next_day() {
         let p = parse_food_log_utterance("tomorrow lunch sandwich");
         let tomorrow = (Local::now().date_naive() + Duration::days(1))
@@ -658,5 +668,9 @@ mod tests {
         };
         assert_eq!(p.food_date.as_deref(), Some(expected.as_str()));
         assert_eq!(p.food_description, "pasta");
+
+        let possessive = parse_food_log_utterance("last friday's pasta");
+        assert_eq!(possessive.food_date.as_deref(), Some(expected.as_str()));
+        assert_eq!(possessive.food_description, "pasta");
     }
 }
