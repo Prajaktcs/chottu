@@ -261,7 +261,12 @@ fn strip_food_framing(utterance: &str) -> String {
             }
         }
         let key = alpha_key(&cleaned);
-        if is_framing_word(&key) || parse_clock_to_naive(&cleaned).is_some() {
+        if key == "at" || key == "for" {
+            if next_is_timing(&tokens, i + 1) {
+                i += 1;
+                continue;
+            }
+        } else if is_framing_word(&key) || parse_clock_to_naive(&cleaned).is_some() {
             i += 1;
             continue;
         }
@@ -305,9 +310,40 @@ fn is_framing_word(token: &str) -> bool {
             | "snack"
             | "snacks"
             | "was"
-            | "for"
-            | "at"
     ) || parse_weekday_token(token).is_some()
+}
+
+fn next_is_timing(tokens: &[&str], j: usize) -> bool {
+    if j >= tokens.len() {
+        return false;
+    }
+    let cleaned = tokens[j]
+        .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != ':')
+        .to_lowercase();
+    if parse_clock_to_naive(&cleaned).is_some() {
+        return true;
+    }
+    if j + 1 < tokens.len() && is_ampm_token(&tokens[j + 1].to_lowercase()) {
+        let joined = format!("{}{}", cleaned, tokens[j + 1].to_lowercase());
+        if parse_clock_to_naive(&joined).is_some() {
+            return true;
+        }
+    }
+    let key = alpha_key(&cleaned);
+    matches!(
+        key.as_str(),
+        "breakfast"
+            | "lunch"
+            | "dinner"
+            | "supper"
+            | "snack"
+            | "snacks"
+            | "night"
+            | "yesterday"
+            | "today"
+            | "tonight"
+            | "tomorrow"
+    ) || parse_weekday_token(&key).is_some()
 }
 
 /// Prefer household meal windows when the utterance names a meal-of-day and does
@@ -646,6 +682,24 @@ mod tests {
         let clocked = parse_food_log_utterance("pasta at 7pm");
         assert_eq!(clocked.food_time.as_deref(), Some("19:00"));
         assert_eq!(clocked.food_description, "pasta");
+    }
+
+    #[test]
+    fn at_for_kept_unless_timing() {
+        let place = parse_food_log_utterance("milk at Starbucks");
+        assert_eq!(place.food_description, "milk at Starbucks");
+        assert_eq!(place.food_time, None);
+
+        let meal = parse_food_log_utterance("eggs for breakfast");
+        assert_eq!(meal.food_description, "eggs");
+        assert_eq!(meal.food_time.as_deref(), Some(MEAL_TIME_BREAKFAST));
+
+        let for_someone = parse_food_log_utterance("coffee for praj");
+        assert_eq!(for_someone.food_description, "coffee for praj");
+
+        let spaced = parse_food_log_utterance("pasta at 7 pm");
+        assert_eq!(spaced.food_description, "pasta");
+        assert_eq!(spaced.food_time.as_deref(), Some("19:00"));
     }
 
     #[test]
