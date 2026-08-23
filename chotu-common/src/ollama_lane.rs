@@ -1,7 +1,9 @@
-//! Process-wide Ollama slot: Telegram (interactive) jumps the queue; email waits.
+//! Shared Ollama slot for one [`crate::ChotuLlm`] instance (cloned via `Arc`).
 //!
-//! An in-flight email call still finishes — Ollama cannot preempt a running
-//! generation — then the next slot goes to any waiting Telegram work.
+//! Telegram (interactive) jumps the queue; email waits. An in-flight email call
+//! still finishes — Ollama cannot preempt a running generation — then the next
+//! slot goes to any waiting Telegram work. Coordinator constructs one `ChotuLlm`
+//! and clones it; a second `ChotuLlm::new` would have its own lane.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -46,13 +48,9 @@ impl OllamaLane {
     where
         F: std::future::Future<Output = T>,
     {
-        self.interactive.fetch_add(1, Ordering::SeqCst);
-        self.notify.notify_waiters();
+        let _hold = InteractiveHold::acquire(self);
         let _guard = self.lock.lock().await;
-        let out = fut.await;
-        self.interactive.fetch_sub(1, Ordering::SeqCst);
-        self.notify.notify_waiters();
-        out
+        fut.await
     }
 
     async fn run_background<T, F>(&self, fut: F) -> T
@@ -80,6 +78,25 @@ impl OllamaLane {
             }
             notified.await;
         }
+    }
+}
+
+struct InteractiveHold<'a> {
+    lane: &'a OllamaLane,
+}
+
+impl<'a> InteractiveHold<'a> {
+    fn acquire(lane: &'a OllamaLane) -> Self {
+        lane.interactive.fetch_add(1, Ordering::SeqCst);
+        lane.notify.notify_waiters();
+        Self { lane }
+    }
+}
+
+impl Drop for InteractiveHold<'_> {
+    fn drop(&mut self) {
+        self.lane.interactive.fetch_sub(1, Ordering::SeqCst);
+        self.lane.notify.notify_waiters();
     }
 }
 
@@ -129,5 +146,27 @@ mod tests {
             !bg_ran_during_fg.load(Ordering::SeqCst),
             "email-priority work must not run while Telegram holds the Ollama slot"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelled_interactive_unblocks_background() {
+        let lane = OllamaLane::new();
+        let lane_fg = lane.clone();
+        let fg = tokio::spawn(async move {
+            lane_fg
+                .run(OllamaPriority::Interactive, std::future::pending::<()>())
+                .await;
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        fg.abort();
+        let _ = fg.await;
+
+        let lane_bg = lane.clone();
+        tokio::time::timeout(
+            Duration::from_millis(200),
+            lane_bg.run(OllamaPriority::Background, async {}),
+        )
+        .await
+        .expect("background must not hang after cancelled interactive work");
     }
 }
