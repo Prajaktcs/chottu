@@ -1120,11 +1120,6 @@ async fn handle_food_log(
     .await?;
 
     let parsed = parse_food_log_utterance(&food_description);
-    let description = if parsed.food_description.trim().is_empty() {
-        food_description.clone()
-    } else {
-        parsed.food_description
-    };
 
     log_food_for_member(
         bot,
@@ -1133,7 +1128,7 @@ async fn handle_food_log(
         gemini_client,
         config,
         &family_member_id,
-        &description,
+        &parsed.food_description,
         parsed.food_date.as_deref(),
         parsed.food_time.as_deref(),
         &food_description,
@@ -5026,12 +5021,9 @@ async fn dispatch_free_text_intent(
             if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
                 return Ok(());
             }
+            // Local parse fills missing date/time only; keep the LLM description
+            // (the stripper also drops "at"/"for", which can be real meal text).
             let parsed = parse_food_log_utterance(&description);
-            let description = if parsed.food_description.trim().is_empty() {
-                description
-            } else {
-                parsed.food_description
-            };
             let date = date.or(parsed.food_date);
             let time = time.or(parsed.food_time);
             log_food_for_member(

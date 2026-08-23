@@ -876,7 +876,7 @@ in YYYY-MM-DD form from the email metadata and body.";
         };
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let user_prompt = format!(
-            "/no_think\nToday's local date: {}\nFamily member ids: {}\nUser message: {}\n",
+            "Today's local date: {}\nFamily member ids: {}\nUser message: {}\n",
             today,
             members,
             text.trim()
