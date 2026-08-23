@@ -29,7 +29,7 @@ Nothing here runs or deploys without human review. Treat the codebase as **human
 
 ## What stays here, what leaves
 
-The important line: **historical data stays local.** Mail is parsed by a local LLM. Notes are parsed by a local LLM. RAG is local. The corpus — ledger, journals, embeddings, goals — lives on this machine (a Mac mini), not in someone else’s product.
+The important line: **historical data stays local.** Mail is parsed by a local LLM. Notes are parsed by a local LLM. Memory indexing and retrieval are local; `/memory` answers prefer local Ollama, with an optional Gemini fallback if Ollama fails. The corpus — ledger, journals, embeddings, goals — lives on this machine (a Mac mini), not in someone else’s product.
 
 What leaves is temporary: processing and extraction the mini cannot do yet. A food photo or a scanned PDF, a barcode lookup, a research panel, a live quote. That is an API call for a job, not a standing copy of the household. When the call is done, the record that remains is here.
 
