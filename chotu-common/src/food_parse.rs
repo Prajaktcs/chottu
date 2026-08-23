@@ -204,7 +204,11 @@ fn extract_clock_hhmm(utterance: &str) -> Option<String> {
 }
 
 fn parse_clock_to_naive(token: &str) -> Option<NaiveTime> {
-    let s = token.trim().to_lowercase().replace(' ', "");
+    let s = token
+        .trim()
+        .to_lowercase()
+        .replace(' ', "")
+        .replace('.', "");
     if NaiveTime::parse_from_str(&s, "%H:%M").is_ok()
         || NaiveTime::parse_from_str(&s, "%H:%M:%S").is_ok()
     {
@@ -433,7 +437,11 @@ fn looks_like_hour_minute(token: &str) -> bool {
 }
 
 fn looks_like_clock_token(token: &str) -> bool {
-    let s = token.trim().to_lowercase().replace(' ', "");
+    let s = token
+        .trim()
+        .to_lowercase()
+        .replace(' ', "")
+        .replace('.', "");
     if NaiveTime::parse_from_str(&s, "%H:%M").is_ok()
         || NaiveTime::parse_from_str(&s, "%H:%M:%S").is_ok()
     {
@@ -682,6 +690,14 @@ mod tests {
         let clocked = parse_food_log_utterance("pasta at 7pm");
         assert_eq!(clocked.food_time.as_deref(), Some("19:00"));
         assert_eq!(clocked.food_description, "pasta");
+
+        let dotted = parse_food_log_utterance("pasta at 7 a.m.");
+        assert_eq!(dotted.food_time.as_deref(), Some("07:00"));
+        assert_eq!(dotted.food_description, "pasta");
+
+        let dotted_pm = parse_food_log_utterance("pasta at 7 p.m.");
+        assert_eq!(dotted_pm.food_time.as_deref(), Some("19:00"));
+        assert_eq!(dotted_pm.food_description, "pasta");
     }
 
     #[test]

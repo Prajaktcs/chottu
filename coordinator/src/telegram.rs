@@ -5021,9 +5021,9 @@ async fn dispatch_free_text_intent(
             if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
                 return Ok(());
             }
-            // Local parse fills missing date/time only; keep the LLM description
-            // (the stripper also drops "at"/"for", which can be real meal text).
-            let parsed = parse_food_log_utterance(&description);
+            // Fill missing date/time from the *original* message; the LLM
+            // description may already have dropped "yesterday" / "last Friday".
+            let parsed = parse_food_log_utterance(trimmed);
             let date = date.or(parsed.food_date);
             let time = time.or(parsed.food_time);
             log_food_for_member(
