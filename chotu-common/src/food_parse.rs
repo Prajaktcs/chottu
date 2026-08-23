@@ -145,15 +145,16 @@ fn token_eq(lower_utterance: &str, word: &str) -> bool {
         .any(|t| t == word)
 }
 
+/// Full weekday names only — 3-letter tokens collide with food ("sun chips").
 fn parse_weekday_token(token: &str) -> Option<Weekday> {
     match token {
-        "monday" | "mon" => Some(Weekday::Mon),
-        "tuesday" | "tue" | "tues" => Some(Weekday::Tue),
-        "wednesday" | "wed" => Some(Weekday::Wed),
-        "thursday" | "thu" | "thur" | "thurs" => Some(Weekday::Thu),
-        "friday" | "fri" => Some(Weekday::Fri),
-        "saturday" | "sat" => Some(Weekday::Sat),
-        "sunday" | "sun" => Some(Weekday::Sun),
+        "monday" => Some(Weekday::Mon),
+        "tuesday" => Some(Weekday::Tue),
+        "wednesday" => Some(Weekday::Wed),
+        "thursday" => Some(Weekday::Thu),
+        "friday" => Some(Weekday::Fri),
+        "saturday" => Some(Weekday::Sat),
+        "sunday" => Some(Weekday::Sun),
         _ => None,
     }
 }
@@ -635,5 +636,27 @@ mod tests {
         let clocked = parse_food_log_utterance("pasta at 7pm");
         assert_eq!(clocked.food_time.as_deref(), Some("19:00"));
         assert_eq!(clocked.food_description, "pasta");
+    }
+
+    #[test]
+    fn sun_chips_is_food_not_sunday() {
+        let p = parse_food_log_utterance("sun chips");
+        assert_eq!(p.food_date, None);
+        assert_eq!(p.food_description, "sun chips");
+    }
+
+    #[test]
+    fn last_friday_maps_previous_weekday() {
+        let today = Local::now().date_naive();
+        let p = parse_food_log_utterance("last friday pasta");
+        let expected = {
+            let mut d = today - Duration::days(1);
+            while d.weekday() != Weekday::Fri {
+                d -= Duration::days(1);
+            }
+            d.format("%Y-%m-%d").to_string()
+        };
+        assert_eq!(p.food_date.as_deref(), Some(expected.as_str()));
+        assert_eq!(p.food_description, "pasta");
     }
 }

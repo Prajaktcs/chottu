@@ -124,8 +124,13 @@ mod tests {
                 .await;
         });
 
-        // Let interactive grab the lock first.
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fg_holding.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("interactive never acquired the lock");
 
         let lane_bg = lane.clone();
         let flag = bg_ran_during_fg.clone();
