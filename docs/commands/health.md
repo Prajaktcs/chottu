@@ -13,7 +13,7 @@ Linked personal DMs only see **that member’s** health/fitness. Household / unl
 /food praj yesterday's dinner pasta
 ```
 
-Defaults member to the linked DM. Relative day/time phrases are resolved via local Ollama before logging; nutrients often go through Gemini when configured. Pushes to Google Health when that member is linked.
+Defaults member to the linked DM. Relative day/time phrases are parsed locally (e.g. `/food yesterday's dinner pasta`) — slash commands do not wait on Ollama. Nutrients often go through Gemini when configured. Pushes to Google Health when that member is linked.
 
 **Looks like**
 
