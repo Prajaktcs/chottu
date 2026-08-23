@@ -13,4 +13,4 @@ Living notes for running the household agent: credentials, services, and how Tel
 
 **Secrets:** never put real API keys, tokens, or refresh tokens in these files. Values live only in local `.env` (gitignored). Document names and “where to get them,” not the secrets themselves.
 
-Quick start for the app itself remains in the root [`README.md`](../README.md).
+The story of the project (why it exists, how it is built, what it is) lives in the root [`README.md`](../README.md). This folder is the operator manual.
