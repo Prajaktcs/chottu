@@ -59,11 +59,23 @@ impl OllamaLane {
     {
         loop {
             self.wait_while_interactive().await;
-            let _guard = self.lock.lock().await;
+            // Subscribe before locking so a Telegram arrival can abort a FIFO
+            // wait that would otherwise run ahead of the new interactive task.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
             if self.interactive.load(Ordering::SeqCst) > 0 {
                 continue;
             }
-            return fut.await;
+            tokio::select! {
+                guard = self.lock.lock() => {
+                    if self.interactive.load(Ordering::SeqCst) > 0 {
+                        drop(guard);
+                        continue;
+                    }
+                    return fut.await;
+                }
+                _ = &mut notified => continue,
+            }
         }
     }
 
@@ -150,6 +162,65 @@ mod tests {
         assert!(
             !bg_ran_during_fg.load(Ordering::SeqCst),
             "email-priority work must not run while Telegram holds the Ollama slot"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_interactive_runs_before_background() {
+        let lane = OllamaLane::new();
+        let order = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let fg1_holding = Arc::new(AtomicBool::new(false));
+
+        let lane_fg1 = lane.clone();
+        let order_fg1 = order.clone();
+        let holding = fg1_holding.clone();
+        let fg1 = tokio::spawn(async move {
+            lane_fg1
+                .run(OllamaPriority::Interactive, async {
+                    order_fg1.lock().await.push("fg1");
+                    holding.store(true, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                })
+                .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fg1_holding.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first interactive never acquired the lock");
+
+        let lane_bg = lane.clone();
+        let order_bg = order.clone();
+        let bg = tokio::spawn(async move {
+            lane_bg
+                .run(OllamaPriority::Background, async {
+                    order_bg.lock().await.push("bg");
+                })
+                .await;
+        });
+        // Let background reach the lock wait while fg1 still holds it.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let lane_fg2 = lane.clone();
+        let order_fg2 = order.clone();
+        let fg2 = tokio::spawn(async move {
+            lane_fg2
+                .run(OllamaPriority::Interactive, async {
+                    order_fg2.lock().await.push("fg2");
+                })
+                .await;
+        });
+
+        fg1.await.unwrap();
+        fg2.await.unwrap();
+        bg.await.unwrap();
+        assert_eq!(
+            *order.lock().await,
+            vec!["fg1", "fg2", "bg"],
+            "Telegram that arrives while email is queued must take the next slot"
         );
     }
 
