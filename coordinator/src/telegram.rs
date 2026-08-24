@@ -184,15 +184,40 @@ async fn send_markdown_retry(
     attempts: u32,
     label: &str,
 ) -> Result<(), teloxide::RequestError> {
+    send_text_retry(bot, chat_id, text, attempts, label, true).await
+}
+
+async fn send_plain_retry(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: impl Into<String>,
+    attempts: u32,
+    label: &str,
+) -> Result<(), teloxide::RequestError> {
+    send_text_retry(bot, chat_id, text, attempts, label, false).await
+}
+
+async fn send_text_retry(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: impl Into<String>,
+    attempts: u32,
+    label: &str,
+    markdown: bool,
+) -> Result<(), teloxide::RequestError> {
     let text = text.into();
     retry_scheduled_push(attempts, label, chat_id.0, || {
         let bot = bot.clone();
         let text = text.clone();
         async move {
-            bot.send_message(chat_id, text)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await
-                .map(|_| ())
+            let req = bot.send_message(chat_id, text);
+            if markdown {
+                req.parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await
+                    .map(|_| ())
+            } else {
+                req.await.map(|_| ())
+            }
         }
     })
     .await
@@ -4609,7 +4634,7 @@ async fn handle_reflect_trigger(
         Ok(data) => data,
         Err(e) => {
             eprintln!("Reflect prompt query error: {:?}", e);
-            send_markdown_retry(
+            send_plain_retry(
                 bot,
                 chat_id,
                 "Failed to retrieve today's logs from database.",
@@ -4658,7 +4683,7 @@ async fn handle_reflect_trigger(
         }
         Err(e) => {
             eprintln!("Failed to generate reflection prompt: {:?}", e);
-            send_markdown_retry(
+            send_plain_retry(
                 bot,
                 chat_id,
                 format!("❌ Failed to generate reflection prompt: {}", e),
