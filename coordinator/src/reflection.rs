@@ -256,11 +256,14 @@ pub async fn save_reflection(
     content.push_str("---\n");
     content.push_str(&format!("date: {}\n", date));
     if let Some(mid) = member_id.filter(|s| !s.trim().is_empty()) {
-        content.push_str(&format!("member: {}\n", mid.trim()));
+        content.push_str(&format!(
+            "member: \"{}\"\n",
+            escape_yaml_double_quoted(mid.trim())
+        ));
     }
 
     // Escape prompt text for YAML double quotes
-    let escaped_prompt = prompt.replace('\n', " ").replace('"', "\\\"");
+    let escaped_prompt = escape_yaml_double_quoted(&prompt.replace('\n', " "));
     content.push_str(&format!("prompt: \"{}\"\n", escaped_prompt));
 
     content.push_str("financials:\n");
@@ -321,6 +324,15 @@ pub async fn save_reflection(
     Ok(file_path)
 }
 
+fn escape_yaml_double_quoted(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,5 +358,11 @@ mod tests {
         assert!(formatted.contains("Contribution"));
         assert!(formatted.contains("Practice lenses"));
         assert!(formatted.contains("Ego autopsy") || formatted.contains("ego"));
+    }
+
+    #[test]
+    fn yaml_double_quote_escapes_member_id_metacharacters() {
+        let escaped = escape_yaml_double_quoted("alex: #1\\home\"");
+        assert_eq!(escaped, "alex: #1\\\\home\\\"");
     }
 }

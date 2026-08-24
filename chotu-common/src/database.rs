@@ -538,8 +538,7 @@ async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
         "SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name='owner_member_id'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
     if has_owner.0 == 0 {
         return Ok(());
     }
@@ -547,8 +546,7 @@ async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='assigned_to'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
     if has_assigned.0 == 0 {
         return Ok(());
     }
