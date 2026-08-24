@@ -96,6 +96,15 @@ type SharedConfig = Arc<RwLock<AppConfig>>;
 /// Send a household message to every linked member DM (+ optional TELEGRAM_CHAT_ID fallback).
 /// Returns `true` if at least one send succeeded.
 async fn send_household(bot: &Bot, config: &AppConfig, text: impl Into<String>) -> bool {
+    send_household_attempts(bot, config, text, 1).await
+}
+
+async fn send_household_attempts(
+    bot: &Bot,
+    config: &AppConfig,
+    text: impl Into<String>,
+    attempts: u32,
+) -> bool {
     let text = text.into();
     let targets = telegram_delivery_targets(config);
     if targets.is_empty() {
@@ -104,20 +113,62 @@ async fn send_household(bot: &Bot, config: &AppConfig, text: impl Into<String>) 
     }
     let mut any_ok = false;
     for cid in targets {
-        if let Err(e) = bot
-            .send_message(ChatId(cid), text.clone())
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await
+        if retry_scheduled_push(attempts, "household send", cid, || {
+            let bot = bot.clone();
+            let text = text.clone();
+            async move {
+                bot.send_message(ChatId(cid), text)
+                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    .await
+                    .map(|_| ())
+            }
+        })
+        .await
         {
-            eprintln!(
-                "Telegram Bot: household send failed for chat {}: {:?}",
-                cid, e
-            );
-        } else {
             any_ok = true;
         }
     }
     any_ok
+}
+
+const SCHEDULED_TELEGRAM_ATTEMPTS: u32 = 3;
+
+fn telegram_error_is_retryable(err: &teloxide::RequestError) -> bool {
+    matches!(err, teloxide::RequestError::Network(_))
+}
+
+/// Retry transient Telegram network errors (truncated TLS, dropped keep-alive).
+/// Non-network failures (bad parse mode, blocked bot, 4xx) fail immediately.
+async fn retry_scheduled_push<F, Fut>(
+    attempts: u32,
+    label: &str,
+    chat_id: i64,
+    mut op: F,
+) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), teloxide::RequestError>>,
+{
+    let attempts = attempts.max(1);
+    for attempt in 1..=attempts {
+        match op().await {
+            Ok(()) => return true,
+            Err(e) => {
+                let retry = attempt < attempts && telegram_error_is_retryable(&e);
+                eprintln!(
+                    "Telegram Bot: {} failed for {} (attempt {}/{}): {:?}",
+                    label, chat_id, attempt, attempts, e
+                );
+                if !retry {
+                    return false;
+                }
+                let delay = std::time::Duration::from_secs(2 * u64::from(attempt));
+                eprintln!("Telegram Bot: retrying {} in {:?}.", label, delay);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+    false
 }
 
 async fn reject_unlinked_chat(bot: &Bot, chat_id: ChatId) -> Result<(), teloxide::RequestError> {
@@ -202,14 +253,14 @@ pub async fn start_telegram_bot(
                     );
                     let mut any_ok = false;
                     for cid in &targets {
-                        if let Err(e) =
-                            handle_brief(&sched_bot, ChatId(*cid), &sched_pool, &cfg).await
+                        if retry_scheduled_push(
+                            SCHEDULED_TELEGRAM_ATTEMPTS,
+                            "scheduled morning brief",
+                            *cid,
+                            || handle_brief(&sched_bot, ChatId(*cid), &sched_pool, &cfg),
+                        )
+                        .await
                         {
-                            eprintln!(
-                                "Telegram Bot: failed to push morning brief to {}: {:?}",
-                                cid, e
-                            );
-                        } else {
                             any_ok = true;
                         }
                     }
@@ -227,7 +278,14 @@ pub async fn start_telegram_bot(
                     );
                     match build_networth_summary(&sched_pool, &cfg).await {
                         Ok(msg) => {
-                            if send_household(&sched_bot, &cfg, msg).await {
+                            if send_household_attempts(
+                                &sched_bot,
+                                &cfg,
+                                msg,
+                                SCHEDULED_TELEGRAM_ATTEMPTS,
+                            )
+                            .await
+                            {
                                 last_portfolio = date_str.clone();
                             }
                         }
@@ -255,21 +313,23 @@ pub async fn start_telegram_bot(
                     );
                     let mut any_ok = false;
                     for cid in &targets {
-                        if let Err(e) = handle_reflect_trigger(
-                            &sched_bot,
-                            ChatId(*cid),
-                            &sched_pool,
-                            &sched_llm,
-                            sched_states.clone(),
-                            &cfg,
+                        if retry_scheduled_push(
+                            SCHEDULED_TELEGRAM_ATTEMPTS,
+                            "scheduled evening reflection",
+                            *cid,
+                            || {
+                                handle_reflect_trigger(
+                                    &sched_bot,
+                                    ChatId(*cid),
+                                    &sched_pool,
+                                    &sched_llm,
+                                    sched_states.clone(),
+                                    &cfg,
+                                )
+                            },
                         )
                         .await
                         {
-                            eprintln!(
-                                "Telegram Bot: failed to push scheduled reflection to {}: {:?}",
-                                cid, e
-                            );
-                        } else {
                             any_ok = true;
                         }
                     }
