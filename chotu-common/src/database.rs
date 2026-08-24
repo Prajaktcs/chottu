@@ -530,6 +530,9 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
 
 /// Copy `tasks.assigned_to` onto existing `memory_chunks` so linked-DM search
 /// does not treat assigned tasks as unassigned (NULL owner) before a reindex.
+///
+/// Only fills NULL owners when a matching task has a non-NULL assignee, so
+/// boot does not rewrite already-owned rows or NULL out orphans.
 async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
     let has_owner: (i32,) = sqlx::query_as(
         "SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name='owner_member_id'",
@@ -555,7 +558,13 @@ async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
          SET owner_member_id = ( \
              SELECT assigned_to FROM tasks WHERE tasks.id = memory_chunks.source_id \
          ) \
-         WHERE source_type = 'task'",
+         WHERE source_type = 'task' \
+           AND owner_member_id IS NULL \
+           AND EXISTS ( \
+               SELECT 1 FROM tasks \
+               WHERE tasks.id = memory_chunks.source_id \
+                 AND tasks.assigned_to IS NOT NULL \
+           )",
     )
     .execute(pool)
     .await?;
@@ -839,10 +848,14 @@ mod tests {
         let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
 
         insert_task_assigned(&pool, "t-alex", "alex task", "open", Some("alex")).await;
+        insert_task_assigned(&pool, "t-open", "unassigned", "open", None).await;
         sqlx::query(
             "INSERT INTO memory_chunks \
-             (id, source_type, source_id, title, body, content_hash, embedding, updated_at) \
-             VALUES ('c1', 'task', 't-alex', 'alex task', 'body', 'h', x'00', 'now')",
+             (id, source_type, source_id, title, body, owner_member_id, content_hash, embedding, updated_at) \
+             VALUES \
+             ('c1', 'task', 't-alex', 'alex task', 'body', NULL, 'h', x'00', 'now'), \
+             ('c2', 'task', 't-open', 'unassigned', 'body', NULL, 'h', x'00', 'now'), \
+             ('c3', 'task', 't-gone', 'orphan', 'body', 'jordan', 'h', x'00', 'now')",
         )
         .execute(&pool)
         .await
@@ -850,12 +863,19 @@ mod tests {
 
         backfill_memory_chunk_task_owners(&pool).await.unwrap();
 
-        let owner: Option<String> = sqlx::query_scalar(
-            "SELECT owner_member_id FROM memory_chunks WHERE source_id = 't-alex'",
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT source_id, owner_member_id FROM memory_chunks ORDER BY source_id",
         )
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await
         .unwrap();
-        assert_eq!(owner.as_deref(), Some("alex"));
+        assert_eq!(
+            rows,
+            vec![
+                ("t-alex".to_string(), Some("alex".to_string())),
+                ("t-gone".to_string(), Some("jordan".to_string())),
+                ("t-open".to_string(), None),
+            ]
+        );
     }
 }
