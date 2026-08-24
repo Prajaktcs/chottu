@@ -223,6 +223,7 @@ pub async fn save_reflection(
     response: &str,
     txs: &[SimpleTx],
     healths: &[HealthFamilySummary],
+    member_id: Option<&str>,
 ) -> Result<PathBuf> {
     // Retrieve journal directory from env or default to ~/chotu_brain
     let brain_dir_str =
@@ -254,6 +255,9 @@ pub async fn save_reflection(
     let mut content = String::new();
     content.push_str("---\n");
     content.push_str(&format!("date: {}\n", date));
+    if let Some(mid) = member_id.filter(|s| !s.trim().is_empty()) {
+        content.push_str(&format!("member: {}\n", mid.trim()));
+    }
 
     // Escape prompt text for YAML double quotes
     let escaped_prompt = prompt.replace('\n', " ").replace('"', "\\\"");

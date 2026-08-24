@@ -832,7 +832,7 @@ async fn handle_command(
             handle_tasks(&bot, chat_id, args, &pool, &config).await?;
         }
         Command::Memory(args) => {
-            handle_memory(&bot, chat_id, args, &pool, &llm, &gemini_client).await?;
+            handle_memory(&bot, chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
             handle_reflect_trigger(&bot, chat_id, &pool, &llm, states, &config).await?;
@@ -3428,6 +3428,7 @@ async fn handle_memory(
     chat_id: ChatId,
     args: String,
     pool: &SqlitePool,
+    config: &AppConfig,
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
 ) -> Result<(), teloxide::RequestError> {
@@ -3436,6 +3437,7 @@ async fn handle_memory(
         bot.send_message(
             chat_id,
             "Usage: `/memory <question>` — search journals, digests, personal references, and tasks.\n\
+             Linked DMs only search your memories plus unassigned tasks.\n\
              Or `/memory reindex` to rebuild the embedding index.",
         )
         .parse_mode(teloxide::types::ParseMode::Markdown)
@@ -3471,7 +3473,8 @@ async fn handle_memory(
     bot.send_message(chat_id, "🧠 Searching memory...")
         .await?;
 
-    let hits = match index.search(pool, args, None).await {
+    let for_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    let hits = match index.search(pool, args, None, for_member_id).await {
         Ok(h) => h,
         Err(e) => {
             eprintln!("Memory search failed: {:?}", e);
@@ -4690,8 +4693,15 @@ async fn handle_message(
             }
         };
 
-        match crate::reflection::save_reflection(&date, &prompt, response_text, &txs, &healths)
-            .await
+        match crate::reflection::save_reflection(
+            &date,
+            &prompt,
+            response_text,
+            &txs,
+            &healths,
+            member_for_telegram_chat(&config, chat_id.0).map(|m| m.id.as_str()),
+        )
+        .await
         {
             Ok(filepath) => {
                 // Clear state
@@ -5031,7 +5041,7 @@ async fn dispatch_free_text_intent(
             create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
         }
         UserIntent::Memory { query } => {
-            handle_memory(bot, chat_id, query, pool, llm, gemini_client).await?;
+            handle_memory(bot, chat_id, query, pool, config, llm, gemini_client).await?;
         }
         UserIntent::Sync => {
             if let Err(e) =

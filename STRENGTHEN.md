@@ -105,7 +105,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 ### 7. Memory RAG owner boundary
 
-- [ ] Scope search/index by owner / `member_id` so a linked DM cannot RAG the whole household brain
+- [x] Scope search/index by owner / `member_id` so a linked DM cannot RAG the whole household brain
 - [ ] Follow-on: avoid loading every `memory_chunks` row for in-process cosine scan (ANN / pruning)
 
 **Why:** Index mixes journals/digests/refs/tasks with no owner boundary; any allowed chat can search the full store.
@@ -113,6 +113,8 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 **Effort:** M (scoping S–M; ANN larger)
 
 **Files:** `chotu-common/src/memory.rs`, `coordinator/src/telegram.rs` (`handle_memory`)
+
+**Done:** `memory_chunks.owner_member_id` (tasks from `assigned_to`; journals from YAML `member` / `member_id`). Linked DM search is owner = me OR unassigned tasks; household chat still sees all. ANN/pruning still open.
 
 ---
 
@@ -138,10 +140,10 @@ Not prioritized, but known thin spots:
 | ------ | ----- |
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
-| Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 (memory RAG); household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
+| Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 ANN/pruning (full-table scan in household chat); household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
 
 ## Suggested order
 
-Max quality per week: **7 → 8** (items 1–6 done).
+Max quality per week: **8** (items 1–7 scoping done; ANN follow-on still open).
 
-Take 7 next (memory RAG owner boundary).
+Take 8 next (research bench finish).
