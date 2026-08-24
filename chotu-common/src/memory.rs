@@ -687,9 +687,9 @@ async fn fetch_scoped_memory_rows(
          FROM memory_chunks",
     );
     if let Some(mid) = for_member_id {
-        qb.push(" WHERE (owner_member_id = ");
+        qb.push(" WHERE (owner_member_id COLLATE NOCASE = ");
         qb.push_bind(mid);
-        qb.push(" COLLATE NOCASE OR (owner_member_id IS NULL AND source_type = 'task'))");
+        qb.push(" OR (owner_member_id IS NULL AND source_type = 'task'))");
     }
     Ok(qb.build_query_as::<MemoryRow>().fetch_all(pool).await?)
 }
@@ -1289,6 +1289,13 @@ mod tests {
         assert!(ids.contains(&"unassigned-task"));
         assert!(!ids.contains(&"jordan-task"));
         assert!(!ids.contains(&"hh-journal"));
+
+        let alex_upper = fetch_scoped_memory_rows(&pool, Some("ALEX"))
+            .await
+            .unwrap();
+        let upper_ids: Vec<&str> = alex_upper.iter().map(|r| r.1.as_str()).collect();
+        assert!(upper_ids.contains(&"alex-task"));
+        assert!(!upper_ids.contains(&"jordan-task"));
 
         let all = fetch_scoped_memory_rows(&pool, None).await.unwrap();
         assert_eq!(all.len(), 4);
