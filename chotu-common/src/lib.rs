@@ -78,8 +78,8 @@ pub use yahoo_profile::{
     prefers_yahoo_profile, yahoo_market_cap_usd_millions, YahooProfileClient,
 };
 pub use memory::{
-    answer_memory_query, brain_dir, format_hit_list, spawn_background_reindex, MemoryHit,
-    MemoryIndex, ReindexStats, SourceType, DEFAULT_EMBED_MODEL,
+    answer_memory_query, brain_dir, format_hit_list, memory_chunk_in_scope, spawn_background_reindex,
+    MemoryHit, MemoryIndex, ReindexStats, SourceType, DEFAULT_EMBED_MODEL,
 };
 pub use models::{
     EmailClassification, EmailMetadata, EvaluationLog, FinancialLedgerEntry, FoodLog,

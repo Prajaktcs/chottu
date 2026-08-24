@@ -223,6 +223,7 @@ pub async fn save_reflection(
     response: &str,
     txs: &[SimpleTx],
     healths: &[HealthFamilySummary],
+    member_id: Option<&str>,
 ) -> Result<PathBuf> {
     // Retrieve journal directory from env or default to ~/chotu_brain
     let brain_dir_str =
@@ -254,9 +255,15 @@ pub async fn save_reflection(
     let mut content = String::new();
     content.push_str("---\n");
     content.push_str(&format!("date: {}\n", date));
+    if let Some(mid) = member_id.filter(|s| !s.trim().is_empty()) {
+        content.push_str(&format!(
+            "member: \"{}\"\n",
+            escape_yaml_double_quoted(mid.trim())
+        ));
+    }
 
     // Escape prompt text for YAML double quotes
-    let escaped_prompt = prompt.replace('\n', " ").replace('"', "\\\"");
+    let escaped_prompt = escape_yaml_double_quoted(&prompt.replace('\n', " "));
     content.push_str(&format!("prompt: \"{}\"\n", escaped_prompt));
 
     content.push_str("financials:\n");
@@ -266,19 +273,25 @@ pub async fn save_reflection(
     for tx in txs {
         content.push_str(&format!(
             "    - merchant: \"{}\"\n",
-            tx.merchant.replace('"', "\\\"")
+            escape_yaml_double_quoted(&tx.merchant)
         ));
         content.push_str(&format!("      amount: {:.2}\n", tx.amount));
         content.push_str(&format!(
             "      category: \"{}\"\n",
-            tx.category.replace('"', "\\\"")
+            escape_yaml_double_quoted(&tx.category)
         ));
-        content.push_str(&format!("      currency: \"{}\"\n", tx.currency));
+        content.push_str(&format!(
+            "      currency: \"{}\"\n",
+            escape_yaml_double_quoted(&tx.currency)
+        ));
     }
 
     content.push_str("health:\n");
     for h in healths {
-        content.push_str(&format!("  {}:\n", h.family_member_id));
+        content.push_str(&format!(
+            "  \"{}\":\n",
+            escape_yaml_double_quoted(&h.family_member_id)
+        ));
         content.push_str(&format!(
             "    calories_ingested: {}\n",
             h.total_calories_ingested
@@ -317,6 +330,15 @@ pub async fn save_reflection(
     Ok(file_path)
 }
 
+fn escape_yaml_double_quoted(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+        .replace('\t', "\\t")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +364,11 @@ mod tests {
         assert!(formatted.contains("Contribution"));
         assert!(formatted.contains("Practice lenses"));
         assert!(formatted.contains("Ego autopsy") || formatted.contains("ego"));
+    }
+
+    #[test]
+    fn yaml_double_quote_escapes_member_id_metacharacters() {
+        let escaped = escape_yaml_double_quoted("alex: #1\\home\"");
+        assert_eq!(escaped, "alex: #1\\\\home\\\"");
     }
 }

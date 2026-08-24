@@ -5,8 +5,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use sqlx::SqlitePool;
+use sqlx::{QueryBuilder, SqlitePool};
 use thiserror::Error;
 
 use crate::llm::{ChotuLlm, GeminiClient, LlmError};
@@ -90,6 +91,7 @@ struct PendingChunk {
     body: String,
     url: Option<String>,
     occurred_at: Option<String>,
+    owner_member_id: Option<String>,
 }
 
 /// Resolve `$CHOTU_BRAIN_DIR` (default `~/chotu_brain`).
@@ -274,6 +276,7 @@ impl MemoryIndex {
                 body,
                 url,
                 occurred_at: timestamp,
+                owner_member_id: None,
             };
             seen.insert((
                 chunk.source_type.as_str().to_string(),
@@ -320,6 +323,7 @@ impl MemoryIndex {
                 body,
                 url: None,
                 occurred_at: due_date.or(created_at),
+                owner_member_id: assigned_to,
             };
             seen.insert((
                 chunk.source_type.as_str().to_string(),
@@ -431,6 +435,16 @@ impl MemoryIndex {
             .await?;
             if let Some((h,)) = existing {
                 if h == hash {
+                    // Backfill owner without re-embedding when the body is unchanged.
+                    sqlx::query(
+                        "UPDATE memory_chunks SET owner_member_id = ? \
+                         WHERE source_type = ? AND source_id = ?",
+                    )
+                    .bind(chunk.owner_member_id.as_deref())
+                    .bind(chunk.source_type.as_str())
+                    .bind(&chunk.source_id)
+                    .execute(pool)
+                    .await?;
                     stats.skipped += 1;
                     return Ok(());
                 }
@@ -463,6 +477,7 @@ impl MemoryIndex {
             &chunk.body,
             chunk.url.as_deref(),
             chunk.occurred_at.as_deref(),
+            chunk.owner_member_id.as_deref(),
             &hash,
             &embedding,
         )
@@ -481,6 +496,7 @@ impl MemoryIndex {
         body: &str,
         url: Option<&str>,
         occurred_at: Option<&str>,
+        owner_member_id: Option<&str>,
         content_hash: &str,
         embedding: &[f32],
     ) -> Result<(), MemoryError> {
@@ -489,13 +505,14 @@ impl MemoryIndex {
         let blob = pack_f32(embedding);
         sqlx::query(
             "INSERT INTO memory_chunks \
-             (id, source_type, source_id, title, body, url, occurred_at, content_hash, embedding, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             (id, source_type, source_id, title, body, url, occurred_at, owner_member_id, content_hash, embedding, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(source_type, source_id) DO UPDATE SET \
                title = excluded.title, \
                body = excluded.body, \
                url = excluded.url, \
                occurred_at = excluded.occurred_at, \
+               owner_member_id = excluded.owner_member_id, \
                content_hash = excluded.content_hash, \
                embedding = excluded.embedding, \
                updated_at = excluded.updated_at",
@@ -507,6 +524,7 @@ impl MemoryIndex {
         .bind(body)
         .bind(url)
         .bind(occurred_at)
+        .bind(owner_member_id)
         .bind(content_hash)
         .bind(&blob)
         .bind(&now)
@@ -536,6 +554,7 @@ impl MemoryIndex {
             &body,
             url,
             timestamp,
+            None,
             &hash,
             &emb,
         )
@@ -565,6 +584,7 @@ impl MemoryIndex {
             &body,
             None,
             due_date.or(created_at),
+            assigned_to,
             &hash,
             &emb,
         )
@@ -597,27 +617,19 @@ impl MemoryIndex {
     }
 
     /// Embed query and return top-k cosine hits.
+    ///
+    /// `for_member_id` scopes a linked personal DM: that member's owned chunks
+    /// plus unassigned tasks. Household / unlinked chats pass `None` (all rows).
     pub async fn search(
         &self,
         pool: &SqlitePool,
         query: &str,
         top_k: Option<usize>,
+        for_member_id: Option<&str>,
     ) -> Result<Vec<MemoryHit>, MemoryError> {
         let k = top_k.unwrap_or(DEFAULT_TOP_K);
         let q = self.embed_one(query.trim()).await?;
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Vec<u8>,
-        )> = sqlx::query_as(
-            "SELECT source_type, source_id, title, body, url, occurred_at, embedding FROM memory_chunks",
-        )
-        .fetch_all(pool)
-        .await?;
+        let rows = fetch_scoped_memory_rows(pool, for_member_id).await?;
 
         let mut scored: Vec<MemoryHit> = Vec::with_capacity(rows.len());
         for (st, sid, title, body, url, occurred_at, blob) in rows {
@@ -654,6 +666,54 @@ impl MemoryIndex {
         });
         scored.truncate(k);
         Ok(scored)
+    }
+}
+
+type MemoryRow = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Vec<u8>,
+);
+
+async fn fetch_scoped_memory_rows(
+    pool: &SqlitePool,
+    for_member_id: Option<&str>,
+) -> Result<Vec<MemoryRow>, MemoryError> {
+    let mut qb = QueryBuilder::new(
+        "SELECT source_type, source_id, title, body, url, occurred_at, embedding \
+         FROM memory_chunks",
+    );
+    if let Some(mid) = for_member_id {
+        qb.push(
+            " WHERE ((source_type IN ('journal', 'task') \
+             AND owner_member_id COLLATE NOCASE = ",
+        );
+        qb.push_bind(mid);
+        qb.push(") OR (source_type = 'task' AND owner_member_id IS NULL))");
+    }
+    Ok(qb.build_query_as::<MemoryRow>().fetch_all(pool).await?)
+}
+
+/// Linked DM (`Some`): own chunks or unassigned tasks. Household (`None`): all.
+pub fn memory_chunk_in_scope(
+    owner_member_id: Option<&str>,
+    source_type: SourceType,
+    for_member_id: Option<&str>,
+) -> bool {
+    match for_member_id {
+        None => true,
+        Some(mid) => match source_type {
+            SourceType::Journal => owner_member_id
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(mid)),
+            SourceType::Task => owner_member_id
+                .map(|owner| owner.eq_ignore_ascii_case(mid))
+                .unwrap_or(true),
+            SourceType::Digest | SourceType::PersonalReference => false,
+        },
     }
 }
 
@@ -914,11 +974,30 @@ fn extract_journal_response(content: &str) -> String {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct JournalFrontmatter {
+    member: Option<String>,
+    member_id: Option<String>,
+}
+
+fn parse_journal_owner(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    let rest = trimmed.strip_prefix("---")?;
+    let end = rest.find("\n---")?;
+    let fm = &rest[..end];
+    let parsed: JournalFrontmatter = serde_yaml::from_str(fm).ok()?;
+    parsed
+        .member_id
+        .or(parsed.member)
+        .filter(|value| !value.trim().is_empty())
+}
+
 fn chunk_journal(rel_path: &str, content: &str, date: Option<&str>) -> Vec<PendingChunk> {
     let text = extract_journal_response(content);
     if text.is_empty() {
         return Vec::new();
     }
+    let owner = parse_journal_owner(content);
     let title = format!("Journal {}", date.unwrap_or(rel_path));
     split_text(&text, CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS)
         .into_iter()
@@ -934,6 +1013,7 @@ fn chunk_journal(rel_path: &str, content: &str, date: Option<&str>) -> Vec<Pendi
             body: format!("{title}\n{part}"),
             url: None,
             occurred_at: date.map(|d| d.to_string()),
+            owner_member_id: owner.clone(),
         })
         .collect()
 }
@@ -974,6 +1054,7 @@ fn chunk_digest(rel_path: &str, content: &str, date: &str) -> Vec<PendingChunk> 
             body: format!("Newsletter digest ({date}): {title}\n{}", body.trim()),
             url: None,
             occurred_at: Some(date.to_string()),
+            owner_member_id: None,
         })
         .collect()
 }
@@ -1059,5 +1140,190 @@ mod tests {
     fn test_content_hash_stable() {
         assert_eq!(content_hash("abc"), content_hash("abc"));
         assert_ne!(content_hash("abc"), content_hash("abd"));
+    }
+
+    #[test]
+    fn memory_chunk_in_scope_household_sees_all() {
+        assert!(memory_chunk_in_scope(
+            Some("jordan"),
+            SourceType::Task,
+            None
+        ));
+        assert!(memory_chunk_in_scope(None, SourceType::Journal, None));
+        assert!(memory_chunk_in_scope(
+            None,
+            SourceType::PersonalReference,
+            None
+        ));
+    }
+
+    #[test]
+    fn memory_chunk_in_scope_linked_dm() {
+        assert!(memory_chunk_in_scope(
+            Some("alex"),
+            SourceType::Task,
+            Some("alex")
+        ));
+        assert!(memory_chunk_in_scope(
+            Some("ALEX"),
+            SourceType::Journal,
+            Some("alex")
+        ));
+        assert!(!memory_chunk_in_scope(
+            Some("jordan"),
+            SourceType::Task,
+            Some("alex")
+        ));
+        assert!(memory_chunk_in_scope(None, SourceType::Task, Some("alex")));
+        assert!(!memory_chunk_in_scope(
+            None,
+            SourceType::Journal,
+            Some("alex")
+        ));
+        assert!(!memory_chunk_in_scope(
+            None,
+            SourceType::Digest,
+            Some("alex")
+        ));
+        assert!(!memory_chunk_in_scope(
+            None,
+            SourceType::PersonalReference,
+            Some("alex")
+        ));
+        assert!(!memory_chunk_in_scope(
+            Some("alex"),
+            SourceType::Digest,
+            Some("alex")
+        ));
+        assert!(!memory_chunk_in_scope(
+            Some("alex"),
+            SourceType::PersonalReference,
+            Some("alex")
+        ));
+    }
+
+    #[test]
+    fn parse_journal_owner_from_frontmatter() {
+        let md = "---\ndate: 2026-06-07\nmember: alex\n---\n\n# Evening Reflection\n## Prompt\nHow was today?\n## Response\nFelt good about the interview.\n";
+        assert_eq!(parse_journal_owner(md).as_deref(), Some("alex"));
+        let chunks = chunk_journal("Journal/x.md", md, Some("2026-06-07"));
+        assert_eq!(chunks[0].owner_member_id.as_deref(), Some("alex"));
+    }
+
+    #[test]
+    fn parse_journal_owner_prefers_member_id() {
+        let md = "---\nmember: alex\nmember_id: jordan\n---\n## Response\nhi\n";
+        assert_eq!(parse_journal_owner(md).as_deref(), Some("jordan"));
+    }
+
+    #[test]
+    fn parse_journal_owner_unescapes_yaml_value() {
+        let md =
+            "---\nmember: \"alex: #1\\\\home\\\"\"\n---\n## Response\nhi\n";
+        assert_eq!(
+            parse_journal_owner(md).as_deref(),
+            Some("alex: #1\\home\"")
+        );
+    }
+
+    #[test]
+    fn parse_journal_owner_absent_is_household() {
+        let md = "---\ndate: 2026-06-07\n---\n## Response\nhi\n";
+        assert_eq!(parse_journal_owner(md), None);
+        let chunks = chunk_journal("Journal/x.md", md, Some("2026-06-07"));
+        assert_eq!(chunks[0].owner_member_id, None);
+    }
+
+    #[test]
+    fn chunk_digest_has_no_owner() {
+        let md = "# Daily Newsletter Digest - 2026-06-28\n\n## Rust Weekly\n- **Sender**: a@b.com\n- **Preview**: lots of cool rust crates and compiler news this week\n";
+        let chunks = chunk_digest("Readings/digest-2026-06-28.md", md, "2026-06-28");
+        assert!(chunks.iter().all(|c| c.owner_member_id.is_none()));
+    }
+
+    async fn insert_chunk(
+        pool: &SqlitePool,
+        source_type: &str,
+        source_id: &str,
+        owner: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT INTO memory_chunks \
+             (id, source_type, source_id, title, body, url, occurred_at, owner_member_id, content_hash, embedding, updated_at) \
+             VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, 'h', ?, 'now')",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(source_type)
+        .bind(source_id)
+        .bind(source_id)
+        .bind("body")
+        .bind(owner)
+        .bind(pack_f32(&[1.0]))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_scoped_hides_other_member_and_household_journal() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE memory_chunks (
+                id TEXT PRIMARY KEY NOT NULL,
+                source_type TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                body TEXT NOT NULL,
+                url TEXT,
+                occurred_at TEXT,
+                owner_member_id TEXT,
+                content_hash TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_chunk(&pool, "task", "alex-task", Some("alex")).await;
+        insert_chunk(&pool, "task", "jordan-task", Some("jordan")).await;
+        insert_chunk(&pool, "task", "unassigned-task", None).await;
+        insert_chunk(&pool, "journal", "hh-journal", None).await;
+        insert_chunk(&pool, "digest", "owned-digest", Some("alex")).await;
+        insert_chunk(
+            &pool,
+            "personal_reference",
+            "owned-reference",
+            Some("alex"),
+        )
+        .await;
+
+        let alex = fetch_scoped_memory_rows(&pool, Some("alex"))
+            .await
+            .unwrap();
+        let ids: Vec<&str> = alex.iter().map(|r| r.1.as_str()).collect();
+        assert!(ids.contains(&"alex-task"));
+        assert!(ids.contains(&"unassigned-task"));
+        assert!(!ids.contains(&"jordan-task"));
+        assert!(!ids.contains(&"hh-journal"));
+        assert!(!ids.contains(&"owned-digest"));
+        assert!(!ids.contains(&"owned-reference"));
+
+        let alex_upper = fetch_scoped_memory_rows(&pool, Some("ALEX"))
+            .await
+            .unwrap();
+        let upper_ids: Vec<&str> = alex_upper.iter().map(|r| r.1.as_str()).collect();
+        assert!(upper_ids.contains(&"alex-task"));
+        assert!(!upper_ids.contains(&"jordan-task"));
+        assert!(!upper_ids.contains(&"owned-digest"));
+        assert!(!upper_ids.contains(&"owned-reference"));
+
+        let all = fetch_scoped_memory_rows(&pool, None).await.unwrap();
+        assert_eq!(all.len(), 6);
     }
 }

@@ -24,7 +24,13 @@ Local RAG over journals, newsletter digests, personal references, and tasks.
 <short answer with grounding from retrieved snippets>
 ```
 
-Plain text often routes here too: `what was that recipe I saved`.
+## Privacy
+
+- **Household / unlinked chat:** searches the full local index (journals, digests, personal references, and tasks).
+- **Linked personal DM:** that member's owned journals (YAML `member:` / `member_id:`) plus their assigned tasks and unassigned tasks (same unassigned rule as `/tasks complete all`). Digests and personal references are always household-only.
+- Reflections saved from a linked DM stamp `member: <id>` in the journal YAML so they stay searchable in that DM after index.
+
+`/memory reindex` rebuilds the whole index from any allowed chat; it does not return other people’s snippets.
 
 ---
 

@@ -200,6 +200,10 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
         .await
         .context("Failed to ensure modern tasks schema")?;
 
+    backfill_memory_chunk_task_owners(&pool)
+        .await
+        .context("Failed to backfill memory chunk task owners")?;
+
     Ok(pool)
 }
 
@@ -524,6 +528,47 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     Ok(())
 }
 
+/// Copy `tasks.assigned_to` onto existing `memory_chunks` so linked-DM search
+/// does not treat assigned tasks as unassigned (NULL owner) before a reindex.
+///
+/// Only fills NULL owners when a matching task has a non-NULL assignee, so
+/// boot does not rewrite already-owned rows or NULL out orphans.
+async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
+    let has_owner: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('memory_chunks') WHERE name='owner_member_id'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_owner.0 == 0 {
+        return Ok(());
+    }
+    let has_assigned: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='assigned_to'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_assigned.0 == 0 {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "UPDATE memory_chunks \
+         SET owner_member_id = ( \
+             SELECT assigned_to FROM tasks WHERE tasks.id = memory_chunks.source_id \
+         ) \
+         WHERE source_type = 'task' \
+           AND owner_member_id IS NULL \
+           AND EXISTS ( \
+               SELECT 1 FROM tasks \
+               WHERE tasks.id = memory_chunks.source_id \
+                 AND tasks.assigned_to IS NOT NULL \
+           )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// A task row returned after marking it done via [`complete_all_open_tasks`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedTaskRow {
@@ -792,5 +837,43 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stored.as_deref(), Some("evt-123"));
+    }
+
+    #[tokio::test]
+    async fn backfill_copies_task_assignee_onto_memory_chunks() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("memory_owner_backfill.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        insert_task_assigned(&pool, "t-alex", "alex task", "open", Some("alex")).await;
+        insert_task_assigned(&pool, "t-open", "unassigned", "open", None).await;
+        sqlx::query(
+            "INSERT INTO memory_chunks \
+             (id, source_type, source_id, title, body, owner_member_id, content_hash, embedding, updated_at) \
+             VALUES \
+             ('c1', 'task', 't-alex', 'alex task', 'body', NULL, 'h', x'00', 'now'), \
+             ('c2', 'task', 't-open', 'unassigned', 'body', NULL, 'h', x'00', 'now'), \
+             ('c3', 'task', 't-gone', 'orphan', 'body', 'jordan', 'h', x'00', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        backfill_memory_chunk_task_owners(&pool).await.unwrap();
+
+        let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT source_id, owner_member_id FROM memory_chunks ORDER BY source_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("t-alex".to_string(), Some("alex".to_string())),
+                ("t-gone".to_string(), Some("jordan".to_string())),
+                ("t-open".to_string(), None),
+            ]
+        );
     }
 }
