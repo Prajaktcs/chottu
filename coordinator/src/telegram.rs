@@ -151,7 +151,6 @@ where
     Fut: std::future::Future<Output = Result<(), teloxide::RequestError>>,
 {
     let attempts = attempts.max(1);
-    let mut last_err: Option<teloxide::RequestError> = None;
     for attempt in 1..=attempts {
         match op().await {
             Ok(()) => return Ok(()),
@@ -164,7 +163,6 @@ where
                 if !retry {
                     return Err(e);
                 }
-                last_err = Some(e);
                 let delay = std::time::Duration::from_secs(2 * u64::from(attempt));
                 eprintln!(
                     "Telegram Bot: retrying {} for {} in {:?}.",
@@ -174,7 +172,7 @@ where
             }
         }
     }
-    Err(last_err.expect("retry loop ran with attempts >= 1"))
+    unreachable!("retry loop always returns Ok or Err");
 }
 
 async fn send_markdown_retry(
@@ -4622,13 +4620,17 @@ async fn handle_reflect_trigger(
 ) -> Result<(), teloxide::RequestError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    // Status ping is best-effort; retries apply only to the prompt (or error) send.
-    let _ = bot
+    let ping = bot
         .send_message(
             chat_id,
             "Querying daily metrics and generating evening reflection prompt via local Ollama...",
         )
         .await;
+    // Scheduled runs ignore a failed status ping so we can still deliver the prompt.
+    // Interactive `/reflect` still surfaces the send error.
+    if prompt_attempts <= 1 {
+        ping?;
+    }
 
     let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
         Ok(data) => data,
