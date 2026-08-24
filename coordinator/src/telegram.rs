@@ -163,7 +163,10 @@ where
                     return false;
                 }
                 let delay = std::time::Duration::from_secs(2 * u64::from(attempt));
-                eprintln!("Telegram Bot: retrying {} in {:?}.", label, delay);
+                eprintln!(
+                    "Telegram Bot: retrying {} for {} in {:?}.",
+                    label, chat_id, delay
+                );
                 tokio::time::sleep(delay).await;
             }
         }
