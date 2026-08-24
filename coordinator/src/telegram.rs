@@ -124,6 +124,7 @@ async fn send_household_attempts(
             }
         })
         .await
+        .is_ok()
         {
             any_ok = true;
         }
@@ -144,15 +145,16 @@ async fn retry_scheduled_push<F, Fut>(
     label: &str,
     chat_id: i64,
     mut op: F,
-) -> bool
+) -> Result<(), teloxide::RequestError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<(), teloxide::RequestError>>,
 {
     let attempts = attempts.max(1);
+    let mut last_err: Option<teloxide::RequestError> = None;
     for attempt in 1..=attempts {
         match op().await {
-            Ok(()) => return true,
+            Ok(()) => return Ok(()),
             Err(e) => {
                 let retry = attempt < attempts && telegram_error_is_retryable(&e);
                 eprintln!(
@@ -160,8 +162,9 @@ where
                     label, chat_id, attempt, attempts, e
                 );
                 if !retry {
-                    return false;
+                    return Err(e);
                 }
+                last_err = Some(e);
                 let delay = std::time::Duration::from_secs(2 * u64::from(attempt));
                 eprintln!(
                     "Telegram Bot: retrying {} for {} in {:?}.",
@@ -171,7 +174,49 @@ where
             }
         }
     }
-    false
+    Err(last_err.expect("retry loop ran with attempts >= 1"))
+}
+
+async fn send_markdown_retry(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: impl Into<String>,
+    attempts: u32,
+    label: &str,
+) -> Result<(), teloxide::RequestError> {
+    let text = text.into();
+    retry_scheduled_push(attempts, label, chat_id.0, || {
+        let bot = bot.clone();
+        let text = text.clone();
+        async move {
+            bot.send_message(chat_id, text)
+                .parse_mode(teloxide::types::ParseMode::Markdown)
+                .await
+                .map(|_| ())
+        }
+    })
+    .await
+}
+
+async fn push_scheduled_brief(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    config: &AppConfig,
+) -> Result<(), teloxide::RequestError> {
+    let _ = bot
+        .send_message(chat_id, "☀️ Building morning brief...")
+        .await;
+    let for_member = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
+    send_markdown_retry(
+        bot,
+        chat_id,
+        report,
+        SCHEDULED_TELEGRAM_ATTEMPTS,
+        "scheduled morning brief",
+    )
+    .await
 }
 
 async fn reject_unlinked_chat(bot: &Bot, chat_id: ChatId) -> Result<(), teloxide::RequestError> {
@@ -256,13 +301,9 @@ pub async fn start_telegram_bot(
                     );
                     let mut any_ok = false;
                     for cid in &targets {
-                        if retry_scheduled_push(
-                            SCHEDULED_TELEGRAM_ATTEMPTS,
-                            "scheduled morning brief",
-                            *cid,
-                            || handle_brief(&sched_bot, ChatId(*cid), &sched_pool, &cfg),
-                        )
-                        .await
+                        if push_scheduled_brief(&sched_bot, ChatId(*cid), &sched_pool, &cfg)
+                            .await
+                            .is_ok()
                         {
                             any_ok = true;
                         }
@@ -297,10 +338,11 @@ pub async fn start_telegram_bot(
                                 "Telegram Bot: failed to build scheduled portfolio overview: {}",
                                 e
                             );
-                            let _ = send_household(
+                            let _ = send_household_attempts(
                                 &sched_bot,
                                 &cfg,
                                 format!("❌ Portfolio overview failed: {}", e),
+                                SCHEDULED_TELEGRAM_ATTEMPTS,
                             )
                             .await;
                         }
@@ -316,22 +358,17 @@ pub async fn start_telegram_bot(
                     );
                     let mut any_ok = false;
                     for cid in &targets {
-                        if retry_scheduled_push(
+                        if handle_reflect_trigger(
+                            &sched_bot,
+                            ChatId(*cid),
+                            &sched_pool,
+                            &sched_llm,
+                            sched_states.clone(),
+                            &cfg,
                             SCHEDULED_TELEGRAM_ATTEMPTS,
-                            "scheduled evening reflection",
-                            *cid,
-                            || {
-                                handle_reflect_trigger(
-                                    &sched_bot,
-                                    ChatId(*cid),
-                                    &sched_pool,
-                                    &sched_llm,
-                                    sched_states.clone(),
-                                    &cfg,
-                                )
-                            },
                         )
                         .await
+                        .is_ok()
                         {
                             any_ok = true;
                         }
@@ -898,7 +935,7 @@ async fn handle_command(
             handle_memory(&bot, chat_id, args, &pool, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            handle_reflect_trigger(&bot, chat_id, &pool, &llm, states, &config).await?;
+            handle_reflect_trigger(&bot, chat_id, &pool, &llm, states, &config, 1).await?;
         }
         Command::Chat => {
             bot.send_message(chat_id, format!("Current Chat ID: {}", chat_id))
@@ -4556,27 +4593,34 @@ async fn handle_reflect_trigger(
     llm: &ChotuLlm,
     states: StateMap,
     config: &AppConfig,
+    prompt_attempts: u32,
 ) -> Result<(), teloxide::RequestError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    bot.send_message(
-        chat_id,
-        "Querying daily metrics and generating evening reflection prompt via local Ollama...",
-    )
-    .await?;
+    // Status ping is best-effort; retries apply only to the prompt (or error) send.
+    let _ = bot
+        .send_message(
+            chat_id,
+            "Querying daily metrics and generating evening reflection prompt via local Ollama...",
+        )
+        .await;
 
-    // 1. Get data
     let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
         Ok(data) => data,
         Err(e) => {
             eprintln!("Reflect prompt query error: {:?}", e);
-            bot.send_message(chat_id, "Failed to retrieve today's logs from database.")
-                .await?;
+            send_markdown_retry(
+                bot,
+                chat_id,
+                "Failed to retrieve today's logs from database.",
+                prompt_attempts,
+                "evening reflection db error",
+            )
+            .await?;
             return Ok(());
         }
     };
 
-    // 2. Generate prompt
     match crate::reflection::generate_reflection_prompt(
         llm,
         &txs,
@@ -4587,18 +4631,6 @@ async fn handle_reflect_trigger(
     .await
     {
         Ok(prompt) => {
-            // Update state to wait for reflection response
-            {
-                let mut s = states.write().await;
-                s.insert(
-                    chat_id,
-                    ConversationState::WaitingForReflection {
-                        date: date_str,
-                        prompt: prompt.clone(),
-                    },
-                );
-            }
-
             let msg_text = format!(
                 "📝 *Evening Journaling Reflection Prompt*:\n\n\
                  _{}_\n\n\
@@ -4606,15 +4638,32 @@ async fn handle_reflect_trigger(
                 prompt
             );
 
-            bot.send_message(chat_id, msg_text)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await?;
+            send_markdown_retry(
+                bot,
+                chat_id,
+                msg_text,
+                prompt_attempts,
+                "evening reflection prompt",
+            )
+            .await?;
+
+            let mut s = states.write().await;
+            s.insert(
+                chat_id,
+                ConversationState::WaitingForReflection {
+                    date: date_str,
+                    prompt,
+                },
+            );
         }
         Err(e) => {
             eprintln!("Failed to generate reflection prompt: {:?}", e);
-            bot.send_message(
+            send_markdown_retry(
+                bot,
                 chat_id,
                 format!("❌ Failed to generate reflection prompt: {}", e),
+                prompt_attempts,
+                "evening reflection llm error",
             )
             .await?;
         }
