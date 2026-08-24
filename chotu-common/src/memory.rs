@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use chrono::Utc;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use sqlx::{QueryBuilder, SqlitePool};
 use thiserror::Error;
@@ -687,9 +688,12 @@ async fn fetch_scoped_memory_rows(
          FROM memory_chunks",
     );
     if let Some(mid) = for_member_id {
-        qb.push(" WHERE (owner_member_id COLLATE NOCASE = ");
+        qb.push(
+            " WHERE ((source_type IN ('journal', 'task') \
+             AND owner_member_id COLLATE NOCASE = ",
+        );
         qb.push_bind(mid);
-        qb.push(" OR (owner_member_id IS NULL AND source_type = 'task'))");
+        qb.push(") OR (source_type = 'task' AND owner_member_id IS NULL))");
     }
     Ok(qb.build_query_as::<MemoryRow>().fetch_all(pool).await?)
 }
@@ -702,9 +706,13 @@ pub fn memory_chunk_in_scope(
 ) -> bool {
     match for_member_id {
         None => true,
-        Some(mid) => match owner_member_id {
-            Some(owner) => owner.eq_ignore_ascii_case(mid),
-            None => source_type == SourceType::Task,
+        Some(mid) => match source_type {
+            SourceType::Journal => owner_member_id
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(mid)),
+            SourceType::Task => owner_member_id
+                .map(|owner| owner.eq_ignore_ascii_case(mid))
+                .unwrap_or(true),
+            SourceType::Digest | SourceType::PersonalReference => false,
         },
     }
 }
@@ -966,36 +974,22 @@ fn extract_journal_response(content: &str) -> String {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct JournalFrontmatter {
+    member: Option<String>,
+    member_id: Option<String>,
+}
+
 fn parse_journal_owner(content: &str) -> Option<String> {
     let trimmed = content.trim_start();
     let rest = trimmed.strip_prefix("---")?;
     let end = rest.find("\n---")?;
     let fm = &rest[..end];
-    let mut member = None;
-    let mut member_id = None;
-    for line in fm.lines() {
-        let line = line.trim();
-        if let Some(val) = yaml_map_value(line, "member_id") {
-            if !val.is_empty() {
-                member_id = Some(val);
-            }
-        } else if let Some(val) = yaml_map_value(line, "member") {
-            if !val.is_empty() {
-                member = Some(val);
-            }
-        }
-    }
-    member_id.or(member)
-}
-
-fn yaml_map_value(line: &str, key: &str) -> Option<String> {
-    let rest = line.strip_prefix(key)?.strip_prefix(':')?;
-    let v = rest
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .trim();
-    Some(v.to_string())
+    let parsed: JournalFrontmatter = serde_yaml::from_str(fm).ok()?;
+    parsed
+        .member_id
+        .or(parsed.member)
+        .filter(|value| !value.trim().is_empty())
 }
 
 fn chunk_journal(rel_path: &str, content: &str, date: Option<&str>) -> Vec<PendingChunk> {
@@ -1196,6 +1190,16 @@ mod tests {
             SourceType::PersonalReference,
             Some("alex")
         ));
+        assert!(!memory_chunk_in_scope(
+            Some("alex"),
+            SourceType::Digest,
+            Some("alex")
+        ));
+        assert!(!memory_chunk_in_scope(
+            Some("alex"),
+            SourceType::PersonalReference,
+            Some("alex")
+        ));
     }
 
     #[test]
@@ -1210,6 +1214,16 @@ mod tests {
     fn parse_journal_owner_prefers_member_id() {
         let md = "---\nmember: alex\nmember_id: jordan\n---\n## Response\nhi\n";
         assert_eq!(parse_journal_owner(md).as_deref(), Some("jordan"));
+    }
+
+    #[test]
+    fn parse_journal_owner_unescapes_yaml_value() {
+        let md =
+            "---\nmember: \"alex: #1\\\\home\\\"\"\n---\n## Response\nhi\n";
+        assert_eq!(
+            parse_journal_owner(md).as_deref(),
+            Some("alex: #1\\home\"")
+        );
     }
 
     #[test]
@@ -1280,6 +1294,14 @@ mod tests {
         insert_chunk(&pool, "task", "jordan-task", Some("jordan")).await;
         insert_chunk(&pool, "task", "unassigned-task", None).await;
         insert_chunk(&pool, "journal", "hh-journal", None).await;
+        insert_chunk(&pool, "digest", "owned-digest", Some("alex")).await;
+        insert_chunk(
+            &pool,
+            "personal_reference",
+            "owned-reference",
+            Some("alex"),
+        )
+        .await;
 
         let alex = fetch_scoped_memory_rows(&pool, Some("alex"))
             .await
@@ -1289,6 +1311,8 @@ mod tests {
         assert!(ids.contains(&"unassigned-task"));
         assert!(!ids.contains(&"jordan-task"));
         assert!(!ids.contains(&"hh-journal"));
+        assert!(!ids.contains(&"owned-digest"));
+        assert!(!ids.contains(&"owned-reference"));
 
         let alex_upper = fetch_scoped_memory_rows(&pool, Some("ALEX"))
             .await
@@ -1296,8 +1320,10 @@ mod tests {
         let upper_ids: Vec<&str> = alex_upper.iter().map(|r| r.1.as_str()).collect();
         assert!(upper_ids.contains(&"alex-task"));
         assert!(!upper_ids.contains(&"jordan-task"));
+        assert!(!upper_ids.contains(&"owned-digest"));
+        assert!(!upper_ids.contains(&"owned-reference"));
 
         let all = fetch_scoped_memory_rows(&pool, None).await.unwrap();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 6);
     }
 }

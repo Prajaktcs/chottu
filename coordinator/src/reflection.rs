@@ -273,19 +273,25 @@ pub async fn save_reflection(
     for tx in txs {
         content.push_str(&format!(
             "    - merchant: \"{}\"\n",
-            tx.merchant.replace('"', "\\\"")
+            escape_yaml_double_quoted(&tx.merchant)
         ));
         content.push_str(&format!("      amount: {:.2}\n", tx.amount));
         content.push_str(&format!(
             "      category: \"{}\"\n",
-            tx.category.replace('"', "\\\"")
+            escape_yaml_double_quoted(&tx.category)
         ));
-        content.push_str(&format!("      currency: \"{}\"\n", tx.currency));
+        content.push_str(&format!(
+            "      currency: \"{}\"\n",
+            escape_yaml_double_quoted(&tx.currency)
+        ));
     }
 
     content.push_str("health:\n");
     for h in healths {
-        content.push_str(&format!("  {}:\n", h.family_member_id));
+        content.push_str(&format!(
+            "  \"{}\":\n",
+            escape_yaml_double_quoted(&h.family_member_id)
+        ));
         content.push_str(&format!(
             "    calories_ingested: {}\n",
             h.total_calories_ingested
