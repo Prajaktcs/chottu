@@ -1,8 +1,5 @@
--- Backfill task chunk owners from live task rows so linked-DM search does
--- not treat preexisting assigned tasks as unassigned (NULL owner).
--- Journals/digests/refs stay NULL (household-only) until reindex/frontmatter.
-UPDATE memory_chunks
-SET owner_member_id = (
-    SELECT assigned_to FROM tasks WHERE tasks.id = memory_chunks.source_id
-)
-WHERE source_type = 'task';
+-- Task-owner backfill cannot run here: on a fresh database, `tasks` is still
+-- the legacy email-classification schema (no `assigned_to`) until
+-- `ensure_modern_tasks_schema` runs after migrations. The UPDATE lives in
+-- `database.rs` (`backfill_memory_chunk_task_owners`).
+SELECT 1;

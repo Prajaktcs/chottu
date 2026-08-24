@@ -114,7 +114,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Files:** `chotu-common/src/memory.rs`, `coordinator/src/telegram.rs` (`handle_memory`)
 
-**Done:** `memory_chunks.owner_member_id` (tasks from `assigned_to`; journals from YAML `member` / `member_id`). Linked DM search is owner = me OR unassigned tasks; household chat still sees all. Migration backfills existing task chunks from `tasks.assigned_to`. ANN/pruning still open.
+**Done:** `memory_chunks.owner_member_id` (tasks from `assigned_to`; journals from YAML `member` / `member_id`). Linked DM search is owner = me OR unassigned tasks; household chat still sees all. Startup backfills existing task chunks from `tasks.assigned_to` after the modern tasks schema is in place. ANN/pruning still open.
 
 ---
 

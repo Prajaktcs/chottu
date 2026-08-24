@@ -236,11 +236,10 @@ pub async fn start_telegram_bot(
                                 "Telegram Bot: failed to build scheduled portfolio overview: {}",
                                 e
                             );
-                            let _ = send_household_attempts(
+                            let _ = send_household(
                                 &sched_bot,
                                 &cfg,
                                 format!("❌ Portfolio overview failed: {}", e),
-                                SCHEDULED_TELEGRAM_ATTEMPTS,
                             )
                             .await;
                         }
