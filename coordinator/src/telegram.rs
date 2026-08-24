@@ -236,10 +236,11 @@ pub async fn start_telegram_bot(
                                 "Telegram Bot: failed to build scheduled portfolio overview: {}",
                                 e
                             );
-                            let _ = send_household(
+                            let _ = send_household_attempts(
                                 &sched_bot,
                                 &cfg,
                                 format!("❌ Portfolio overview failed: {}", e),
+                                SCHEDULED_TELEGRAM_ATTEMPTS,
                             )
                             .await;
                         }
@@ -3436,9 +3437,11 @@ async fn handle_memory(
     if args.is_empty() {
         bot.send_message(
             chat_id,
-            "Usage: `/memory <question>` — search journals, digests, personal references, and tasks.\n\
-             Linked DMs only search your memories plus unassigned tasks.\n\
-             Or `/memory reindex` to rebuild the embedding index.",
+            concat!(
+                "Usage: `/memory <question>` — search journals, digests, personal references, and tasks.\n",
+                "Linked DMs only search your memories plus unassigned tasks.\n",
+                "Or `/memory reindex` to rebuild the embedding index.",
+            ),
         )
         .parse_mode(teloxide::types::ParseMode::Markdown)
         .await?;
