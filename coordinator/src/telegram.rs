@@ -3437,8 +3437,9 @@ async fn handle_memory(
         bot.send_message(
             chat_id,
             concat!(
-                "Usage: `/memory <question>` — search journals, digests, personal references, and tasks.\n",
-                "Linked DMs only search your memories plus unassigned tasks.\n",
+                "Usage: `/memory <question>`\n",
+                "Household chat searches journals, digests, personal references, and tasks.\n",
+                "Linked DMs search your journals and tasks (including unassigned), not digests or personal references.\n",
                 "Or `/memory reindex` to rebuild the embedding index.",
             ),
         )
