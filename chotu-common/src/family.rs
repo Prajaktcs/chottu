@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::Path;
 
 use crate::schedule::{resolve_timezone_name, resolve_tz, AgentSchedules, DEFAULT_TIMEZONE};
@@ -381,7 +382,7 @@ impl FamilyMember {
     /// Soft checks for `health_conditions` (does not mutate).
     pub fn health_condition_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
-        let mut seen: Vec<String> = Vec::new();
+        let mut seen = HashSet::new();
         for (i, cond) in self.health_conditions.iter().enumerate() {
             if cond.id.trim().is_empty() {
                 warnings.push(format!(
@@ -396,21 +397,17 @@ impl FamilyMember {
                 ));
             }
             let key = cond.id.trim().to_ascii_lowercase();
-            if !key.is_empty() {
-                if seen.iter().any(|s| s == &key) {
-                    warnings.push(format!(
-                        "member '{}': duplicate health_conditions.id '{}'",
-                        self.id, cond.id
-                    ));
-                } else {
-                    seen.push(key);
-                }
+            if !key.is_empty() && !seen.insert(key) {
+                warnings.push(format!(
+                    "member '{}': duplicate health_conditions.id '{}'",
+                    self.id, cond.id
+                ));
             }
             let min = cond.lag_min();
             let max = cond.lag_max();
             if min < 0 || max > 14 || min > max {
                 warnings.push(format!(
-                    "member '{}': health_conditions[{}].lag_window [{}, {}] must be [min, max] with 0 <= min <= max <= 14",
+                    "member '{}': health_conditions[{i}] (id '{}') lag_window [{}, {}] must be [min, max] with 0 <= min <= max <= 14",
                     self.id, cond.id, min, max
                 ));
             }

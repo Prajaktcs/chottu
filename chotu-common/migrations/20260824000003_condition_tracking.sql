@@ -11,9 +11,10 @@ CREATE TABLE IF NOT EXISTS food_tags (
 );
 
 -- Tags attached to a food log row at write time (same tx as the food insert).
+-- Column comments are logical refs only; this repo does not declare SQLite FOREIGN KEYs.
 CREATE TABLE IF NOT EXISTS food_log_tags (
-    food_log_id TEXT NOT NULL,         -- FK -> food_log.id
-    tag TEXT NOT NULL,                 -- FK -> food_tags.tag
+    food_log_id TEXT NOT NULL,         -- food_log.id
+    tag TEXT NOT NULL,                 -- food_tags.tag
     source TEXT NOT NULL DEFAULT 'llm', -- 'llm' | 'keyword' | 'manual'
     PRIMARY KEY (food_log_id, tag)
 );
@@ -23,7 +24,7 @@ CREATE INDEX IF NOT EXISTS idx_food_log_tags_tag ON food_log_tags (tag);
 CREATE TABLE IF NOT EXISTS condition_watchlist (
     family_member_id TEXT NOT NULL,
     condition_id TEXT NOT NULL,        -- matches config health_conditions.id
-    tag TEXT NOT NULL,                 -- FK -> food_tags.tag
+    tag TEXT NOT NULL,                 -- food_tags.tag
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (family_member_id, condition_id, tag)
 );
