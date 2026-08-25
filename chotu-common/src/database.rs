@@ -735,6 +735,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn condition_tracking_tables_and_tag_seed() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("conditions.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        for table in [
+            "food_tags",
+            "food_log_tags",
+            "condition_watchlist",
+            "condition_checkin",
+        ] {
+            let exists: (i32,) = sqlx::query_as(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exists.0, 1, "missing table {table}");
+        }
+
+        let tags: Vec<(String,)> = sqlx::query_as("SELECT tag FROM food_tags ORDER BY tag")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(tags.len(), 14);
+        assert!(tags.iter().any(|(t,)| t == "alcohol"));
+        assert!(tags.iter().any(|(t,)| t == "nightshades"));
+    }
+
+    #[tokio::test]
     async fn complete_all_open_tasks_marks_open_and_snoozed_only() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("complete_all.db");

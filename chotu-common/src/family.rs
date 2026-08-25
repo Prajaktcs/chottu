@@ -304,6 +304,43 @@ impl FitnessGoals {
     }
 }
 
+fn default_lag_window() -> [i32; 2] {
+    [1, 3]
+}
+
+fn default_condition_check_in() -> bool {
+    true
+}
+
+/// Chronic condition the member is tracking (definitions in gitignored config).
+/// Watchlists and scores live in SQLite; see `docs/condition-tracking-spec.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HealthCondition {
+    /// Slug, unique per member (e.g. `psoriasis`).
+    pub id: String,
+    /// Display name (e.g. `plaque psoriasis`).
+    pub label: String,
+    /// When true, evening `/reflect` asks for a 0–5 score.
+    #[serde(default = "default_condition_check_in")]
+    pub check_in: bool,
+    /// Correlate food tags from these many days prior `[min, max]`, inclusive.
+    #[serde(default = "default_lag_window")]
+    pub lag_window: [i32; 2],
+    /// Optional member-authored notes (not diagnoses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+impl HealthCondition {
+    pub fn lag_min(&self) -> i32 {
+        self.lag_window[0]
+    }
+
+    pub fn lag_max(&self) -> i32 {
+        self.lag_window[1]
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FamilyMember {
     pub id: String,
@@ -317,6 +354,9 @@ pub struct FamilyMember {
     /// Optional long-horizon fitness outcome + training policy.
     #[serde(default)]
     pub fitness_goals: Option<FitnessGoals>,
+    /// Optional chronic conditions (empty = none). Watchlists live in the DB.
+    #[serde(default)]
+    pub health_conditions: Vec<HealthCondition>,
     /// Telegram private-chat id for this member (per-person DMs).
     /// Set via `/link <member_id>` or manually in config.yaml.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -336,6 +376,46 @@ impl FamilyMember {
     /// e.g. member id "alex" → "HEALTH_REFRESH_TOKEN_ALEX"
     pub fn health_refresh_token_env_key(&self) -> String {
         format!("HEALTH_REFRESH_TOKEN_{}", self.id.to_uppercase())
+    }
+
+    /// Soft checks for `health_conditions` (does not mutate).
+    pub fn health_condition_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for (i, cond) in self.health_conditions.iter().enumerate() {
+            if cond.id.trim().is_empty() {
+                warnings.push(format!(
+                    "member '{}': health_conditions[{i}].id is empty",
+                    self.id
+                ));
+            }
+            if cond.label.trim().is_empty() {
+                warnings.push(format!(
+                    "member '{}': health_conditions[{i}].label is empty",
+                    self.id
+                ));
+            }
+            let key = cond.id.trim().to_ascii_lowercase();
+            if !key.is_empty() {
+                if seen.iter().any(|s| s == &key) {
+                    warnings.push(format!(
+                        "member '{}': duplicate health_conditions.id '{}'",
+                        self.id, cond.id
+                    ));
+                } else {
+                    seen.push(key);
+                }
+            }
+            let min = cond.lag_min();
+            let max = cond.lag_max();
+            if min < 0 || max > 14 || min > max {
+                warnings.push(format!(
+                    "member '{}': health_conditions[{}].lag_window [{}, {}] must be [min, max] with 0 <= min <= max <= 14",
+                    self.id, cond.id, min, max
+                ));
+            }
+        }
+        warnings
     }
 }
 
@@ -540,6 +620,7 @@ impl Default for AppConfig {
                     calendar: None,
                     nutrition_goals: None,
                     fitness_goals: None,
+                    health_conditions: vec![],
                     telegram_chat_id: None,
                 }],
             },
@@ -826,6 +907,9 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
                                 eprintln!("Config warning: {}", w);
                             }
                         }
+                        for w in member.health_condition_warnings() {
+                            eprintln!("Config warning: {}", w);
+                        }
                     }
                     if let Some(cv) = config.core_values.as_ref() {
                         for w in cv.validation_warnings() {
@@ -908,6 +992,7 @@ mod tests {
             }),
             nutrition_goals: None,
             fitness_goals: None,
+            health_conditions: vec![],
             telegram_chat_id: None,
         };
         assert_eq!(member.calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
@@ -945,6 +1030,12 @@ family:
           strength_sessions: 3
           cardio_minutes: 90
           active_calories: 400
+      health_conditions:
+        - id: psoriasis
+          label: "plaque psoriasis"
+          check_in: true
+          lag_window: [1, 3]
+          notes: "example notes"
     - id: jordan
       name: Jordan
       role: adult
@@ -1008,7 +1099,16 @@ target_allocation:
             Some(3)
         );
         assert!(fitness.validation_warnings("alex").is_empty());
+        let conditions = &loaded.family.members[0].health_conditions;
+        assert_eq!(conditions.len(), 1);
+        assert_eq!(conditions[0].id, "psoriasis");
+        assert_eq!(conditions[0].label, "plaque psoriasis");
+        assert!(conditions[0].check_in);
+        assert_eq!(conditions[0].lag_window, [1, 3]);
+        assert_eq!(conditions[0].notes.as_deref(), Some("example notes"));
+        assert!(loaded.family.members[0].health_condition_warnings().is_empty());
         assert!(loaded.family.members[2].fitness_goals.is_none());
+        assert!(loaded.family.members[2].health_conditions.is_empty());
         // Sam has no calendar
         assert!(loaded.family.members[2].calendar.is_none());
 
@@ -1161,6 +1261,68 @@ family:
     }
 
     #[test]
+    fn test_health_condition_warnings() {
+        let member = FamilyMember {
+            id: "alex".to_string(),
+            name: "Alex".to_string(),
+            role: "adult".to_string(),
+            calendar: None,
+            nutrition_goals: None,
+            fitness_goals: None,
+            health_conditions: vec![
+                HealthCondition {
+                    id: "psoriasis".into(),
+                    label: "plaque psoriasis".into(),
+                    check_in: true,
+                    lag_window: [1, 3],
+                    notes: None,
+                },
+                HealthCondition {
+                    id: "PSORIASIS".into(),
+                    label: "   ".into(),
+                    check_in: false,
+                    lag_window: [5, 2],
+                    notes: None,
+                },
+                HealthCondition {
+                    id: "  ".into(),
+                    label: "unnamed".into(),
+                    check_in: true,
+                    lag_window: [0, 14],
+                    notes: None,
+                },
+            ],
+            telegram_chat_id: None,
+        };
+        let warnings = member.health_condition_warnings();
+        assert!(warnings.iter().any(|w| w.contains("duplicate")));
+        assert!(warnings.iter().any(|w| w.contains("label is empty")));
+        assert!(warnings.iter().any(|w| w.contains("lag_window")));
+        assert!(warnings.iter().any(|w| w.contains("id is empty")));
+    }
+
+    #[test]
+    fn test_health_condition_defaults_from_yaml() {
+        let yaml = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+      health_conditions:
+        - id: psoriasis
+          label: "plaque psoriasis"
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", yaml).unwrap();
+        let loaded = load_config(tmp.path());
+        let cond = &loaded.family.members[0].health_conditions[0];
+        assert!(cond.check_in);
+        assert_eq!(cond.lag_window, [1, 3]);
+        assert!(loaded.family.members[0].health_condition_warnings().is_empty());
+    }
+
+    #[test]
     fn test_load_missing_config_fallback() {
         let loaded = load_config("non_existent_file.yaml");
         assert_eq!(loaded.family.members.len(), 1);
@@ -1179,6 +1341,7 @@ family:
             calendar: None,
             nutrition_goals: None,
             fitness_goals: None,
+            health_conditions: vec![],
             telegram_chat_id: None,
         });
         assert_eq!(
@@ -1223,6 +1386,7 @@ family:
             calendar: None,
             nutrition_goals: None,
             fitness_goals: None,
+            health_conditions: vec![],
             telegram_chat_id: Some(222),
         });
         config
