@@ -35,6 +35,14 @@ family:
           # Daily minimum Google Health "active energy burned" (movement/workout kcal),
           # NOT food-intake calories. Omit if you don't care about this floor.
           active_calories: 400
+      # Optional chronic conditions (definitions only). Watchlists and scores
+      # live in local SQLite — never commit real diagnoses. Empty list is fine.
+      # health_conditions:
+      #   - id: psoriasis
+      #     label: "plaque psoriasis"
+      #     check_in: true            # evening /reflect asks 0–5
+      #     lag_window: [1, 3]        # food tags from 1–3 days prior
+      #     notes: "example notes (replace locally)"
     - id: jordan
       name: Jordan
       role: adult

@@ -36,7 +36,7 @@ pub use family::{
     InvestmentPhilosophy, CoreValue, CoreValues, TargetAllocation, AllocationBucket, BucketHolding,
     SpendBudgets,
     fetch_exchange_rates, CalendarConfig, FitnessEquipment, FitnessFocus, FitnessGoals,
-    FitnessWeeklyTargets, NutritionGoals,
+    FitnessWeeklyTargets, HealthCondition, NutritionGoals,
 };
 pub use schedule::{
     now_in_tz, parse_hhmm, parse_iana_timezone, resolve_timezone_name, resolve_tz, AgentSchedules,

@@ -5,7 +5,7 @@ psoriasis) per family member, tag food logs against a fixed vocabulary, collect
 a daily symptom score during evening reflection, and surface lag-aware trends —
 without Chotu ever inventing medical advice.
 
-**Status:** proposed · **Owner agents:** Coordinator (Telegram, reflection),
+**Status:** M1 shipped (schema + config) · remaining M2–M6 · **Owner agents:** Coordinator (Telegram, reflection),
 Health Coach (tips, trends)
 
 ---
