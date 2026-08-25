@@ -325,6 +325,7 @@ fn map_nutriments(n: &OffNutriments, serving_quantity: Option<f64>, product_name
             caffeine
         },
         trans_fat_g: trans,
+        tags: Vec::new(),
     }
 }
 

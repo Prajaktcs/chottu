@@ -2,6 +2,7 @@ pub mod agenda;
 pub mod database;
 pub mod due_parse;
 pub mod food_parse;
+pub mod food_tags;
 pub mod family;
 pub mod google_health;
 pub mod ledger;
@@ -27,6 +28,11 @@ pub use due_parse::{
 pub use food_parse::{
     effective_food_time, meal_of_day_clock_time, resolve_food_log_timing, FoodLogTiming,
     MEAL_TIME_BREAKFAST, MEAL_TIME_DINNER, MEAL_TIME_LUNCH, MEAL_TIME_SNACK,
+};
+pub use food_tags::{
+    assign_food_tags, backfill_food_log_keyword_tags, delete_food_log_tags,
+    delete_food_log_tags_for_member_day, food_tag_classifier_instruction, insert_food_log_tags,
+    keyword_tags_for, sanitize_food_tags, AssignedFoodTags, FOOD_TAG_VOCABULARY,
 };
 pub use family::{
     config_path, default_member_id, ensure_food_mutation_allowed, has_any_telegram_link,

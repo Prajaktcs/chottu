@@ -18,6 +18,8 @@ use chotu_common::{
     has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
     effective_food_time, parse_due_phrase_tz, pending_budget_alerts, resolve_food_log_timing,
+    assign_food_tags, delete_food_log_tags, delete_food_log_tags_for_member_day,
+    insert_food_log_tags,
     reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
     save_health_refresh_token, schedule_at, set_budget_override, set_member_telegram_chat_id,
     spawn_background_reindex, split_task_add_args, start_redirect_listener,
@@ -1541,6 +1543,14 @@ async fn persist_food_estimation(
         return Ok(());
     }
 
+    let assigned = assign_food_tags(&est.tags, food_description);
+    if let Err(e) = insert_food_log_tags(pool, &log_id, &assigned).await {
+        eprintln!("Failed to insert food_log_tags: {:?}", e);
+        bot.send_message(chat_id, "Database error saving food tags.")
+            .await?;
+        return Ok(());
+    }
+
     let mut google_sync_note = String::new();
     if health_coach::member_health_credentials_configured(family_member_id, config) {
         match health_coach::google_health_client_for_member(family_member_id, config) {
@@ -1804,6 +1814,14 @@ async fn handle_clear_food(
         Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
     }
 
+    if let Err(e) = delete_food_log_tags_for_member_day(pool, &target_member_id, &date_str).await
+    {
+        eprintln!("Failed to clear food_log_tags: {:?}", e);
+        bot.send_message(chat_id, "❌ Database error clearing food logs.")
+            .await?;
+        return Ok(());
+    }
+
     if let Err(e) = sqlx::query(
         "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
     )
@@ -1957,6 +1975,13 @@ async fn handle_adjust_food(
         Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
     }
 
+    if let Err(e) = delete_food_log_tags_for_member_day(pool, &member_id, &date_str).await {
+        eprintln!("Failed to clear food_log_tags before adjust: {:?}", e);
+        bot.send_message(chat_id, "❌ Database error adjusting food log.")
+            .await?;
+        return Ok(());
+    }
+
     if let Err(e) = sqlx::query(
         "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
     )
@@ -2006,6 +2031,11 @@ async fn handle_adjust_food(
         bot.send_message(chat_id, "❌ Database error saving adjustment.")
             .await?;
         return Ok(());
+    }
+
+    let assigned = assign_food_tags(Vec::<String>::new(), &desc);
+    if let Err(e) = insert_food_log_tags(pool, &log_id, &assigned).await {
+        eprintln!("Failed to insert food_log_tags for adjust: {:?}", e);
     }
 
     if let Err(e) =
@@ -2108,6 +2138,13 @@ async fn handle_undo_food(
                 e
             );
         }
+    }
+
+    if let Err(e) = delete_food_log_tags(pool, &log_entry.id).await {
+        eprintln!("Failed to delete food_log_tags on undo: {:?}", e);
+        bot.send_message(chat_id, "❌ Database error deleting food log entry.")
+            .await?;
+        return Ok(());
     }
 
     if let Err(e) = sqlx::query("DELETE FROM food_log WHERE id = ?")
