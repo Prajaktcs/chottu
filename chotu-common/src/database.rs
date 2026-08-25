@@ -800,9 +800,11 @@ mod tests {
         assert!(tags.iter().any(|(t, s)| t == "alcohol" && s == "keyword"));
         assert!(tags.iter().any(|(t, _)| t == "fried"));
 
-        crate::food_tags::delete_food_log_tags(&pool, "log-beer")
+        let mut tx = pool.begin().await.unwrap();
+        crate::food_tags::delete_food_log_tags(&mut tx, "log-beer")
             .await
             .unwrap();
+        tx.commit().await.unwrap();
         let left: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM food_log_tags WHERE food_log_id = 'log-beer'")
                 .fetch_one(&pool)

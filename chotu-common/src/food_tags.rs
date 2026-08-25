@@ -2,7 +2,7 @@
 //! See `docs/condition-tracking-spec.md` (M2).
 
 use anyhow::{Context, Result};
-use sqlx::SqlitePool;
+use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::collections::HashSet;
 
 /// Seeded vocabulary (`food_tags.tag`). Unknown LLM labels are dropped.
@@ -254,7 +254,7 @@ fn collapse_spaces(s: &str) -> String {
 }
 
 pub async fn insert_food_log_tags(
-    pool: &SqlitePool,
+    tx: &mut Transaction<'_, Sqlite>,
     food_log_id: &str,
     assigned: &AssignedFoodTags,
 ) -> Result<()> {
@@ -265,24 +265,27 @@ pub async fn insert_food_log_tags(
         .bind(food_log_id)
         .bind(tag)
         .bind(assigned.source)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .with_context(|| format!("insert food_log_tags {food_log_id}/{tag}"))?;
     }
     Ok(())
 }
 
-pub async fn delete_food_log_tags(pool: &SqlitePool, food_log_id: &str) -> Result<()> {
+pub async fn delete_food_log_tags(
+    tx: &mut Transaction<'_, Sqlite>,
+    food_log_id: &str,
+) -> Result<()> {
     sqlx::query("DELETE FROM food_log_tags WHERE food_log_id = ?")
         .bind(food_log_id)
-        .execute(pool)
+        .execute(&mut **tx)
         .await
         .context("delete food_log_tags by id")?;
     Ok(())
 }
 
 pub async fn delete_food_log_tags_for_member_day(
-    pool: &SqlitePool,
+    tx: &mut Transaction<'_, Sqlite>,
     member_id: &str,
     date: &str,
 ) -> Result<()> {
@@ -294,7 +297,7 @@ pub async fn delete_food_log_tags_for_member_day(
     )
     .bind(member_id)
     .bind(date)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .context("delete food_log_tags for member/day")?;
     Ok(())
@@ -319,7 +322,9 @@ pub async fn backfill_food_log_keyword_tags(pool: &SqlitePool) -> Result<u64> {
         if assigned.tags.is_empty() {
             continue;
         }
-        insert_food_log_tags(pool, &id, &assigned).await?;
+        let mut tx = pool.begin().await.context("begin food_log_tags backfill")?;
+        insert_food_log_tags(&mut tx, &id, &assigned).await?;
+        tx.commit().await.context("commit food_log_tags backfill")?;
         tagged += 1;
     }
     Ok(tagged)
