@@ -10,7 +10,7 @@ Living notes for running the household agent: credentials, services, and how Tel
 | [Day loop](./commands/day-loop.md) | Brief, calendar, tasks, reflection |
 | [Memory](./commands/memory.md) | `/memory` RAG |
 | [Finance](./commands/finance.md) | Monthly, budget, net worth, research |
-| [Condition tracking spec](./condition-tracking-spec.md) | M1 shipped (schema + config); M2–M6 still open |
+| [Condition tracking spec](./condition-tracking-spec.md) | M1–M2 shipped (schema, config, food tags); M3–M6 still open |
 
 **Secrets:** never put real API keys, tokens, or refresh tokens in these files. Values live only in local `.env` (gitignored). Document names and “where to get them,” not the secrets themselves.
 

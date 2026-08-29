@@ -204,6 +204,13 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
         .await
         .context("Failed to backfill memory chunk task owners")?;
 
+    let tagged = crate::food_tags::backfill_food_log_keyword_tags(&pool)
+        .await
+        .context("Failed to backfill food_log keyword tags")?;
+    if tagged > 0 {
+        println!("Database: Keyword-tagged {tagged} historical food_log row(s).");
+    }
+
     Ok(pool)
 }
 
@@ -763,6 +770,47 @@ mod tests {
         assert_eq!(tags.len(), 14);
         assert!(tags.iter().any(|(t,)| t == "alcohol"));
         assert!(tags.iter().any(|(t,)| t == "nightshades"));
+    }
+
+    #[tokio::test]
+    async fn food_log_keyword_backfill_and_tag_delete() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("food_tags.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories) \
+             VALUES ('log-beer', datetime('now'), 'alex', '2 beers and nachos', 500)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let n = crate::food_tags::backfill_food_log_keyword_tags(&pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1);
+
+        let tags: Vec<(String, String)> = sqlx::query_as(
+            "SELECT tag, source FROM food_log_tags WHERE food_log_id = 'log-beer' ORDER BY tag",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(tags.iter().any(|(t, s)| t == "alcohol" && s == "keyword"));
+        assert!(tags.iter().any(|(t, _)| t == "fried"));
+
+        let mut tx = pool.begin().await.unwrap();
+        crate::food_tags::delete_food_log_tags(&mut tx, "log-beer")
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let left: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM food_log_tags WHERE food_log_id = 'log-beer'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(left.0, 0);
     }
 
     #[tokio::test]

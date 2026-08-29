@@ -18,10 +18,13 @@ use chotu_common::{
     has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
     effective_food_time, parse_due_phrase_tz, pending_budget_alerts, resolve_food_log_timing,
+    assign_food_tags, delete_food_log_tags, delete_food_log_tags_for_member_day,
+    insert_food_log_tags,
     reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
     save_health_refresh_token, schedule_at, set_budget_override, set_member_telegram_chat_id,
     spawn_background_reindex, split_task_add_args, start_redirect_listener,
-    telegram_chat_for_member, telegram_delivery_targets, AppConfig, CalendarWindow, ChotuLlm,
+    telegram_chat_for_member, telegram_delivery_targets, AppConfig, AssignedFoodTags,
+    CalendarWindow, ChotuLlm,
     CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient, InvestmentPhilosophy,
     MemoryIndex, UserIntent, TASK_CALENDAR_DURATION_MINUTES,
 };
@@ -1474,26 +1477,20 @@ async fn reject_foreign_food_mutation(
     Ok(false)
 }
 
-/// Insert food_log, update day totals, optionally push to Google Health, reply macros-first.
-async fn persist_food_estimation(
-    bot: &Bot,
-    chat_id: ChatId,
+/// Insert food_log + tags + day summary in one transaction so a tag failure
+/// cannot leave an orphaned meal or a skipped summary bump.
+async fn persist_food_log_and_tags(
     pool: &SqlitePool,
-    config: &AppConfig,
+    log_id: &str,
+    log_ts: chrono::DateTime<chrono::Utc>,
     family_member_id: &str,
     food_description: &str,
     est: &chotu_common::NutritionEstimation,
-    timing: &chotu_common::FoodLogTiming,
-) -> Result<(), teloxide::RequestError> {
-    let log_id = uuid::Uuid::new_v4().to_string();
-    let log_ts = timing.timestamp;
-    let date_str = timing.date.clone();
-    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let yesterday_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-
-    if let Err(e) = sqlx::query(
+    date_str: &str,
+    assigned: &AssignedFoodTags,
+) -> anyhow::Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query(
         "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
          estimated_calories, estimated_protein, estimated_carbs, estimated_fats, \
          estimated_omega_3_dha_mg, estimated_cholesterol_mg, estimated_saturated_fat_g, estimated_unsaturated_fat_g, estimated_triglycerides_mg, \
@@ -1503,7 +1500,7 @@ async fn persist_food_estimation(
          estimated_vitamin_k_mcg, estimated_caffeine_mg, estimated_trans_fat_g) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(&log_id)
+    .bind(log_id)
     .bind(log_ts)
     .bind(family_member_id)
     .bind(food_description)
@@ -1532,70 +1529,12 @@ async fn persist_food_estimation(
     .bind(est.vitamin_k_mcg)
     .bind(est.caffeine_mg)
     .bind(est.trans_fat_g)
-    .execute(pool)
-    .await
-    {
-        eprintln!("Failed to insert into food_log: {:?}", e);
-        bot.send_message(chat_id, "Database error saving food log.")
-            .await?;
-        return Ok(());
-    }
+    .execute(&mut *tx)
+    .await?;
 
-    let mut google_sync_note = String::new();
-    if health_coach::member_health_credentials_configured(family_member_id, config) {
-        match health_coach::google_health_client_for_member(family_member_id, config) {
-            Ok(client) => {
-                let pending = chotu_common::FoodLog {
-                    id: log_id.clone(),
-                    timestamp: log_ts,
-                    family_member_id: family_member_id.to_string(),
-                    raw_text_description: food_description.to_string(),
-                    estimated_calories: est.total_calories,
-                    estimated_protein: est.protein_grams,
-                    estimated_carbs: est.carbs_grams,
-                    estimated_fats: est.fats_grams,
-                    estimated_omega_3_dha_mg: est.omega_3_dha_mg,
-                    estimated_cholesterol_mg: est.cholesterol_mg,
-                    estimated_saturated_fat_g: est.saturated_fat_g,
-                    estimated_unsaturated_fat_g: est.unsaturated_fat_g,
-                    estimated_triglycerides_mg: est.triglycerides_mg,
-                    estimated_iron_mg: est.iron_mg,
-                    estimated_vitamin_b_mg: est.vitamin_b_mg,
-                    estimated_vitamin_c_mg: est.vitamin_c_mg,
-                    estimated_sugar_g: est.sugar_g,
-                    estimated_fiber_g: est.fiber_g,
-                    estimated_sodium_mg: est.sodium_mg,
-                    estimated_potassium_mg: est.potassium_mg,
-                    estimated_calcium_mg: est.calcium_mg,
-                    estimated_magnesium_mg: est.magnesium_mg,
-                    estimated_zinc_mg: est.zinc_mg,
-                    estimated_vitamin_a_mcg: est.vitamin_a_mcg,
-                    estimated_vitamin_d_mcg: est.vitamin_d_mcg,
-                    estimated_vitamin_e_mg: est.vitamin_e_mg,
-                    estimated_vitamin_k_mcg: est.vitamin_k_mcg,
-                    estimated_caffeine_mg: est.caffeine_mg,
-                    estimated_trans_fat_g: est.trans_fat_g,
-                    google_data_point_id: None,
-                };
-                match health_coach::push_food_log_to_google(pool, &client, &pending).await {
-                    Ok(_) => {
-                        google_sync_note = "\n_Synced to Google Health_".to_string();
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to push /food to Google Health: {:?}", e);
-                        google_sync_note =
-                            "\n_Saved locally; Google Health sync pending (retry on /sync)_"
-                                .to_string();
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("Google Health client unavailable for /food push: {:?}", e);
-            }
-        }
-    }
+    insert_food_log_tags(&mut tx, log_id, assigned).await?;
 
-    if let Err(e) = sqlx::query(
+    sqlx::query(
         r#"
                 INSERT INTO health_family_summary (
                     date,
@@ -1656,7 +1595,7 @@ async fn persist_food_estimation(
                     trans_fat_g = health_family_summary.trans_fat_g + excluded.trans_fat_g;
                 "#,
     )
-    .bind(&date_str)
+    .bind(date_str)
     .bind(family_member_id)
     .bind(est.total_calories)
     .bind(est.protein_grams)
@@ -1683,13 +1622,103 @@ async fn persist_food_estimation(
     .bind(est.vitamin_k_mcg)
     .bind(est.caffeine_mg)
     .bind(est.trans_fat_g)
-    .execute(pool)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Insert food_log, update day totals, optionally push to Google Health, reply macros-first.
+async fn persist_food_estimation(
+    bot: &Bot,
+    chat_id: ChatId,
+    pool: &SqlitePool,
+    config: &AppConfig,
+    family_member_id: &str,
+    food_description: &str,
+    est: &chotu_common::NutritionEstimation,
+    timing: &chotu_common::FoodLogTiming,
+) -> Result<(), teloxide::RequestError> {
+    let log_id = uuid::Uuid::new_v4().to_string();
+    let log_ts = timing.timestamp;
+    let date_str = timing.date.clone();
+    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let yesterday_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+        .format("%Y-%m-%d")
+        .to_string();
+
+    let assigned = assign_food_tags(&est.tags, food_description);
+    if let Err(e) = persist_food_log_and_tags(
+        pool,
+        &log_id,
+        log_ts,
+        family_member_id,
+        food_description,
+        est,
+        &date_str,
+        &assigned,
+    )
     .await
     {
-        eprintln!("Failed to upsert health_family_summary: {:?}", e);
-        bot.send_message(chat_id, "Database error updating health summary.")
+        eprintln!("Failed to persist food_log + tags + summary: {:?}", e);
+        bot.send_message(chat_id, "Database error saving food log.")
             .await?;
         return Ok(());
+    }
+
+    let mut google_sync_note = String::new();
+    if health_coach::member_health_credentials_configured(family_member_id, config) {
+        match health_coach::google_health_client_for_member(family_member_id, config) {
+            Ok(client) => {
+                let pending = chotu_common::FoodLog {
+                    id: log_id.clone(),
+                    timestamp: log_ts,
+                    family_member_id: family_member_id.to_string(),
+                    raw_text_description: food_description.to_string(),
+                    estimated_calories: est.total_calories,
+                    estimated_protein: est.protein_grams,
+                    estimated_carbs: est.carbs_grams,
+                    estimated_fats: est.fats_grams,
+                    estimated_omega_3_dha_mg: est.omega_3_dha_mg,
+                    estimated_cholesterol_mg: est.cholesterol_mg,
+                    estimated_saturated_fat_g: est.saturated_fat_g,
+                    estimated_unsaturated_fat_g: est.unsaturated_fat_g,
+                    estimated_triglycerides_mg: est.triglycerides_mg,
+                    estimated_iron_mg: est.iron_mg,
+                    estimated_vitamin_b_mg: est.vitamin_b_mg,
+                    estimated_vitamin_c_mg: est.vitamin_c_mg,
+                    estimated_sugar_g: est.sugar_g,
+                    estimated_fiber_g: est.fiber_g,
+                    estimated_sodium_mg: est.sodium_mg,
+                    estimated_potassium_mg: est.potassium_mg,
+                    estimated_calcium_mg: est.calcium_mg,
+                    estimated_magnesium_mg: est.magnesium_mg,
+                    estimated_zinc_mg: est.zinc_mg,
+                    estimated_vitamin_a_mcg: est.vitamin_a_mcg,
+                    estimated_vitamin_d_mcg: est.vitamin_d_mcg,
+                    estimated_vitamin_e_mg: est.vitamin_e_mg,
+                    estimated_vitamin_k_mcg: est.vitamin_k_mcg,
+                    estimated_caffeine_mg: est.caffeine_mg,
+                    estimated_trans_fat_g: est.trans_fat_g,
+                    google_data_point_id: None,
+                };
+                match health_coach::push_food_log_to_google(pool, &client, &pending).await {
+                    Ok(_) => {
+                        google_sync_note = "\n_Synced to Google Health_".to_string();
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to push /food to Google Health: {:?}", e);
+                        google_sync_note =
+                            "\n_Saved locally; Google Health sync pending (retry on /sync)_"
+                                .to_string();
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Google Health client unavailable for /food push: {:?}", e);
+            }
+        }
     }
 
     let day_totals: Option<(i32, f64, f64, f64)> = sqlx::query_as(
@@ -1804,15 +1833,22 @@ async fn handle_clear_food(
         Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
     }
 
-    if let Err(e) = sqlx::query(
-        "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
-    )
-    .bind(&target_member_id)
-    .bind(&date_str)
-    .execute(pool)
+    if let Err(e) = (async {
+        let mut tx = pool.begin().await?;
+        delete_food_log_tags_for_member_day(&mut tx, &target_member_id, &date_str).await?;
+        sqlx::query(
+            "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
+        )
+        .bind(&target_member_id)
+        .bind(&date_str)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        anyhow::Ok(())
+    })
     .await
     {
-        eprintln!("Failed to clear food_log: {:?}", e);
+        eprintln!("Failed to clear food_log + tags: {:?}", e);
         bot.send_message(chat_id, "❌ Database error clearing food logs.")
             .await?;
         return Ok(());
@@ -1957,20 +1993,6 @@ async fn handle_adjust_food(
         Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
     }
 
-    if let Err(e) = sqlx::query(
-        "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
-    )
-    .bind(&member_id)
-    .bind(&date_str)
-    .execute(pool)
-    .await
-    {
-        eprintln!("Failed to clear food_log before adjust: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error adjusting food log.")
-            .await?;
-        return Ok(());
-    }
-
     // Keep micros from the external (Google) base; only macros are user-overridden.
     let mut desired = external.clone();
     desired.calories = calories as i64;
@@ -1986,24 +2008,40 @@ async fn handle_adjust_food(
         calories, protein, carbs, fats
     );
 
-    if let Err(e) = sqlx::query(
-        "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
-         estimated_calories, estimated_protein, estimated_carbs, estimated_fats) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&log_id)
-    .bind(now)
-    .bind(&member_id)
-    .bind(&desc)
-    .bind(delta.calories as i32)
-    .bind(delta.protein)
-    .bind(delta.carbs)
-    .bind(delta.fats)
-    .execute(pool)
+    let assigned = assign_food_tags(Vec::<String>::new(), &desc);
+    if let Err(e) = (async {
+        let mut tx = pool.begin().await?;
+        delete_food_log_tags_for_member_day(&mut tx, &member_id, &date_str).await?;
+        sqlx::query(
+            "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
+        )
+        .bind(&member_id)
+        .bind(&date_str)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
+             estimated_calories, estimated_protein, estimated_carbs, estimated_fats) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&log_id)
+        .bind(now)
+        .bind(&member_id)
+        .bind(&desc)
+        .bind(delta.calories as i32)
+        .bind(delta.protein)
+        .bind(delta.carbs)
+        .bind(delta.fats)
+        .execute(&mut *tx)
+        .await?;
+        insert_food_log_tags(&mut tx, &log_id, &assigned).await?;
+        tx.commit().await?;
+        anyhow::Ok(())
+    })
     .await
     {
-        eprintln!("Failed to insert manual adjustment audit: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error saving adjustment.")
+        eprintln!("Failed to replace food_log + tags on adjust: {:?}", e);
+        bot.send_message(chat_id, "❌ Database error adjusting food log.")
             .await?;
         return Ok(());
     }
@@ -2110,12 +2148,19 @@ async fn handle_undo_food(
         }
     }
 
-    if let Err(e) = sqlx::query("DELETE FROM food_log WHERE id = ?")
-        .bind(&log_entry.id)
-        .execute(pool)
-        .await
+    if let Err(e) = (async {
+        let mut tx = pool.begin().await?;
+        delete_food_log_tags(&mut tx, &log_entry.id).await?;
+        sqlx::query("DELETE FROM food_log WHERE id = ?")
+            .bind(&log_entry.id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        anyhow::Ok(())
+    })
+    .await
     {
-        eprintln!("Failed to delete food log entry: {:?}", e);
+        eprintln!("Failed to delete food_log + tags on undo: {:?}", e);
         bot.send_message(chat_id, "❌ Database error deleting food log entry.")
             .await?;
         return Ok(());

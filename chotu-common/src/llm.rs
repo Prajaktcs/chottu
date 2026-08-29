@@ -48,6 +48,14 @@ pub struct NutritionEstimation {
     pub vitamin_k_mcg: f64,
     pub caffeine_mg: f64,
     pub trans_fat_g: f64,
+    /// Closed vocabulary slugs (alcohol, dairy, …). Unknown values are sanitized/dropped during extraction and assignment.
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn sanitize_nutrition_tags(mut est: NutritionEstimation) -> NutritionEstimation {
+    est.tags = crate::food_tags::sanitize_food_tags(est.tags);
+    est
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1151,9 +1159,11 @@ Return ONLY JSON:\n\
     \"vitamin_e_mg\": number,\n\
     \"vitamin_k_mcg\": number,\n\
     \"caffeine_mg\": number,\n\
-    \"trans_fat_g\": number\n\
+    \"trans_fat_g\": number,\n\
+    \"tags\": [\"alcohol\" | \"added_sugar\" | \"dairy\" | \"gluten\" | \"red_meat\" | \"processed_meat\" | \"fried\" | \"spicy\" | \"nightshades\" | \"caffeine\" | \"shellfish\" | \"eggs\" | \"soy\" | \"citrus\"]\n\
   }}\n\
 }}\n\
+Pick zero or more tags from that closed list only. Do not invent tags.\n\
 For UNKNOWN, still return nutrition zeros and explain in reasoning."
         );
 
@@ -1217,6 +1227,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
                 Some(digits)
             };
         }
+        parsed.nutrition = sanitize_nutrition_tags(parsed.nutrition);
 
         Ok(parsed)
     }
@@ -1225,16 +1236,19 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         &self,
         food_description: &str,
     ) -> Result<NutritionEstimation, LlmError> {
-        let system_prompt = "You are a professional nutritionist. Analyze the food description provided by the user, estimate its calories, macronutrients (protein, carbs, fat in grams), and key micronutrients: \
-                             omega-3 DHA (mg), cholesterol (mg), saturated fat (g), unsaturated fat (g), triglycerides (mg), iron (mg), vitamin B's (mg), vitamin C (mg), \
-                             sugar (g), fiber (g), sodium (mg), potassium (mg), calcium (mg), magnesium (mg), zinc (mg), vitamin A (mcg), vitamin D (mcg), vitamin E (mg), vitamin K (mcg), caffeine (mg), and trans fat (g). \
-                             Identify the dominant macronutrient and provide brief reasoning.";
+        let system_prompt = format!(
+            "You are a professional nutritionist. Analyze the food description provided by the user, estimate its calories, macronutrients (protein, carbs, fat in grams), and key micronutrients: \
+             omega-3 DHA (mg), cholesterol (mg), saturated fat (g), unsaturated fat (g), triglycerides (mg), iron (mg), vitamin B's (mg), vitamin C (mg), \
+             sugar (g), fiber (g), sodium (mg), potassium (mg), calcium (mg), magnesium (mg), zinc (mg), vitamin A (mcg), vitamin D (mcg), vitamin E (mg), vitamin K (mcg), caffeine (mg), and trans fat (g). \
+             Identify the dominant macronutrient and provide brief reasoning. {}",
+            crate::food_tags::food_tag_classifier_instruction()
+        );
         let user_prompt = format!("Food description: {}", food_description);
 
         let extractor = self
             .client
             .extractor::<NutritionEstimation>("gemini-3.6-flash")
-            .preamble(system_prompt)
+            .preamble(&system_prompt)
             .build();
 
         let response = extractor
@@ -1242,7 +1256,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             .await
             .map_err(|e| LlmError::Client(e.to_string()))?;
 
-        Ok(response)
+        Ok(sanitize_nutrition_tags(response))
     }
 
     /// Estimates typical Omega-3 DHA and Triglycerides based on total daily fats/calories
