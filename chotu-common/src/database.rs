@@ -789,7 +789,7 @@ mod tests {
         let n = crate::food_tags::backfill_food_log_keyword_tags(&pool)
             .await
             .unwrap();
-        assert!(n >= 1);
+        assert_eq!(n, 1);
 
         let tags: Vec<(String, String)> = sqlx::query_as(
             "SELECT tag, source FROM food_log_tags WHERE food_log_id = 'log-beer' ORDER BY tag",

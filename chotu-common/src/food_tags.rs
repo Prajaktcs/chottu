@@ -313,6 +313,11 @@ pub async fn backfill_food_log_keyword_tags(pool: &SqlitePool) -> Result<u64> {
     .await
     .context("select untagged food_log rows")?;
 
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let mut tx = pool.begin().await.context("begin food_log_tags backfill")?;
     let mut tagged = 0u64;
     for (id, description) in rows {
         let assigned = AssignedFoodTags {
@@ -322,11 +327,10 @@ pub async fn backfill_food_log_keyword_tags(pool: &SqlitePool) -> Result<u64> {
         if assigned.tags.is_empty() {
             continue;
         }
-        let mut tx = pool.begin().await.context("begin food_log_tags backfill")?;
         insert_food_log_tags(&mut tx, &id, &assigned).await?;
-        tx.commit().await.context("commit food_log_tags backfill")?;
         tagged += 1;
     }
+    tx.commit().await.context("commit food_log_tags backfill")?;
     Ok(tagged)
 }
 

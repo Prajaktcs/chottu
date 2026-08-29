@@ -48,7 +48,7 @@ pub struct NutritionEstimation {
     pub vitamin_k_mcg: f64,
     pub caffeine_mg: f64,
     pub trans_fat_g: f64,
-    /// Closed vocabulary slugs (alcohol, dairy, …). Unknown values are dropped at persist.
+    /// Closed vocabulary slugs (alcohol, dairy, …). Unknown values are sanitized/dropped during extraction and assignment.
     #[serde(default)]
     pub tags: Vec<String>,
 }
