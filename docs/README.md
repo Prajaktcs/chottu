@@ -1,6 +1,6 @@
 # Chotu operator docs
 
-Living notes for running the household agent: credentials, services, and how Telegram commands behave.
+Living notes for running the household agent: credentials, services, and how Signal commands behave.
 
 | Page | What’s here |
 | :--- | :--- |

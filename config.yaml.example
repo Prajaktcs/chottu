@@ -3,8 +3,8 @@ family:
     - id: alex
       name: Alex
       role: adult
-      # Optional: private Telegram chat id for this member (or use /link alex in a DM)
-      # telegram_chat_id: 123456789
+      # Optional: Signal ACI for this member (or use /link alex in a direct chat)
+      # signal_aci: 00000000-0000-0000-0000-000000000001
       calendar:
         provider: google
         email: your.email@gmail.com   # Google account for this member's calendar
@@ -18,7 +18,7 @@ family:
         steps: 10000   # daily step push (late sync ~11pm ET nudges if under)
       # Optional long-horizon fitness outcome + training policy.
       # Keep real goals in your private config.yaml (gitignored) — never commit
-      # personal health details. Linked Telegram DMs only see *your* nutrition/training.
+      # personal health details. Linked Signal DMs only see *your* nutrition/training.
       fitness_goals:
         intent: "example outcome (replace locally)"
         target_date: "2027-06-01"
@@ -46,7 +46,7 @@ family:
     - id: jordan
       name: Jordan
       role: adult
-      # telegram_chat_id: 987654321
+      # signal_aci: 00000000-0000-0000-0000-000000000002
       calendar:
         provider: google
         email: other.email@gmail.com
@@ -56,20 +56,20 @@ family:
     - id: sam
       name: Sam
       role: kid
-      # no calendar / nutrition_goals / fitness_goals / telegram = no calendar / goals / personal DM
+      # no calendar / nutrition_goals / fitness_goals / signal_aci = no calendar / goals / personal DM
 
 # Note: Per-member Google Calendar refresh tokens are stored in .env, not here.
-# After running /login calendar <member_id> in Telegram, the following will be
+# After running /login calendar <member_id> in Signal, the following will be
 # automatically added to your .env:
 #   CALENDAR_REFRESH_TOKEN_ALEX=...
 #   CALENDAR_REFRESH_TOKEN_JORDAN=...
 #
-# Per-member Telegram DMs: each adult DMs the bot and runs `/link <member_id>`.
-# That writes `telegram_chat_id` here. `/link` will not overwrite a member already
-# linked to a different chat — clear `telegram_chat_id` first to move. Household
+# Per-member Signal DMs: each adult DMs Chotu and runs `/link <member_id>`.
+# That writes `signal_aci` here. `/link` will not overwrite a member already
+# linked to a different ACI — clear `signal_aci` first to move. Household
 # pushes (brief, budgets, stock, reflection) fan out to all linked chats;
-# `TELEGRAM_CHAT_ID` remains an optional shared fallback. Once any member is
-# linked, unknown chats are rejected.
+# `SIGNAL_GROUP_ID` is the optional household group. Once any member is
+# linked, unknown conversations are rejected.
 #
 # IANA tz database name (https://www.iana.org/time-zones), e.g. America/Toronto.
 # The agent uses this for civil clocks (schedules, "3pm", calendar 09:00 blocks).
@@ -100,9 +100,9 @@ email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
 #     - "Did I leave anything unspoken that sits heavy in my body?"
 #     - "Ego autopsy — what was ego protecting?"
 
-# Optional household category spend budgets (base currency). Telegram `/budget set`
-# overrides these; 80%/100% Telegram alerts fan out to linked DMs (and
-# TELEGRAM_CHAT_ID if set).
+# Optional household category spend budgets (base currency). `/budget set`
+# overrides these; 80%/100% Signal alerts fan out to linked DMs (and
+# SIGNAL_GROUP_ID if set).
 spend_budgets:
   categories:
     Food: 800

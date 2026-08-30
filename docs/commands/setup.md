@@ -6,21 +6,21 @@ Onboarding: identify the chat, bind it to a family member, and complete Google O
 
 ## `/chat`
 
-Shows the current Telegram chat id.
+Shows the current Signal conversation (direct ACI or group id).
 
 **Looks like**
 
 ```text
-Your Chat ID is: 123456789
+Current Signal conversation: direct:00000000-0000-0000-0000-000000000001
 ```
 
-Use once to fill optional `TELEGRAM_CHAT_ID` in `.env`, or just proceed with `/link` (preferred).
+Use this for diagnostics. Household group targeting uses `SIGNAL_GROUP_ID`, not this command.
 
 ---
 
 ## `/link <member_id>`
 
-Private DMs only. Writes `telegram_chat_id` on that member in `config.yaml`.
+Direct Signal conversations only. Writes `signal_aci` on that member in `config.yaml`.
 
 ```text
 /link praj
@@ -35,9 +35,9 @@ Food and tasks without a member id will default to you.
 
 **Gotchas**
 
-- Groups are rejected — open a 1:1 with the bot.
-- If the member is already linked to a different chat, clear `telegram_chat_id` in config first.
-- Once any member is linked, unknown chats are rejected (`/chat` and `/link` still work for setup).
+- Groups are rejected — open a 1:1 Signal conversation.
+- If the member is already linked to a different ACI, clear `signal_aci` in config first.
+- Once any member is linked, unknown conversations are rejected (`/chat` and `/link` still work for setup).
 
 ---
 

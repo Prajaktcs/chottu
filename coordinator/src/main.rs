@@ -3,7 +3,7 @@ use chotu_common::ChotuLlm;
 
 mod brief;
 mod reflection;
-mod telegram;
+mod signal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -101,11 +101,11 @@ async fn main() -> Result<()> {
             .await?;
         println!("Coordinator Agent verified DB connection: {}", row.0);
 
-        println!("Coordinator Agent: starting Telegram Bot update loop...");
+        println!("Coordinator Agent: starting Signal client...");
         let gemini_key = std::env::var("GEMINI_API_KEY")
             .context("GEMINI_API_KEY environment variable is required")?;
 
-        telegram::start_telegram_bot(
+        signal::start_signal_client(
             coordinator_pool,
             coordinator_llm,
             gemini_key,
@@ -190,7 +190,7 @@ async fn perform_startup_oauth_checks() -> Result<()> {
                     .await
                     {
                         Ok(tokens) => {
-                            // Startup flow is primary-only; Telegram `/login health <id>`
+                            // Startup flow is primary-only; Signal `/login health <id>`
                             // is the multi-member path.
                             save_google_health_refresh_token(&tokens.refresh_token)?;
                             println!("\n================================================================");
