@@ -117,7 +117,7 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Evening sync complete for {} — {} kcal, {} steps",
                                 report.member_id, report.calories, report.steps
                             );
-                            notify_member_telegram(
+                            notify_member_signal(
                                 &report.telegram_markdown(),
                                 &config,
                                 &report.member_id,
@@ -147,7 +147,7 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Late sync complete for {} — {}/{} steps",
                                 report.member_id, report.steps, goal
                             );
-                            notify_member_telegram(
+                            notify_member_signal(
                                 &steps_nudge_markdown(report, goal),
                                 &config,
                                 &report.member_id,
@@ -201,41 +201,36 @@ fn steps_nudge_markdown(report: &HealthSyncReport, goal: i32) -> String {
 }
 
 /// Deliver a member's health sync only to their linked DM (never other adults' chats).
-async fn notify_member_telegram(
+async fn notify_member_signal(
     message: &str,
     config: &chotu_common::AppConfig,
     member_id: &str,
 ) {
-    let Ok(token) =
-        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
-    else {
-        return;
+    let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => return,
     };
-    let targets: Vec<i64> =
-        if let Some(cid) = chotu_common::telegram_chat_for_member(config, member_id) {
-            vec![cid]
-        } else if !chotu_common::has_any_telegram_link(config) {
-            // Pre-/link single-user setups: optional TELEGRAM_CHAT_ID fallback.
-            chotu_common::telegram_delivery_targets(config)
-        } else {
-            // Other members are linked; do not broadcast this person's metrics into their DMs.
-            Vec::new()
-        };
+    let targets = if let Some(aci) = chotu_common::signal_aci_for_member(config, member_id) {
+        vec![chotu_common::SignalRecipient::Direct { aci }]
+    } else if !chotu_common::has_any_signal_link(config) {
+        chotu_common::signal_delivery_targets(config)
+    } else {
+        Vec::new()
+    };
     if targets.is_empty() {
         return;
     }
-    let bot = teloxide::Bot::new(token);
-    use teloxide::prelude::*;
-    for cid in targets {
-        #[allow(deprecated)]
-        if let Err(e) = bot
-            .send_message(teloxide::types::ChatId(cid), message)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await
-        {
+    let client = match chotu_common::SignalClient::connect(&socket).await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("Health Coach: SIGNAL_CLI_SOCKET is unreachable ({socket}): {error:?}");
+            return;
+        }
+    };
+    for recipient in targets {
+        if let Err(error) = client.send_text(&recipient, message).await {
             eprintln!(
-                "Health Coach: failed to push sync notification to {}: {:?}",
-                cid, e
+                "Health Coach: failed to push sync notification to {recipient}: {error:?}"
             );
         }
     }

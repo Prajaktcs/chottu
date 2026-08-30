@@ -27,7 +27,7 @@ Plain text: `monthly spend`.
 | `/budget set Food 800` | Override / set a category cap |
 | `/budget clear Entertainment` | Remove a Telegram override |
 
-YAML `spend_budgets` are the baseline; Telegram sets merge on top. Mid-month alerts at **80%** and **100%** fan out to linked DMs (+ optional `TELEGRAM_CHAT_ID`).
+YAML `spend_budgets` are the baseline; Telegram sets merge on top. Mid-month alerts at **80%** and **100%** fan out to linked DMs (+ optional `SIGNAL_GROUP_ID`).
 
 Plain text: `how's food budget`.
 

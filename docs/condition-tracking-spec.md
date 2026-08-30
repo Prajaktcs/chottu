@@ -81,7 +81,7 @@ empty). Load-time validation warnings (same style as
 
 Rationale for config vs DB split: config = who you are and what you are working
 toward; DB = data that accumulates and gets tuned. Watchlists change often and
-are managed from Telegram, so they are DB rows (below). Condition definitions
+are managed from Signal, so they are DB rows (below). Condition definitions
 change ~yearly.
 
 ### Database (new migration in `chotu-common/migrations/`)
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS food_log_tags (
 );
 CREATE INDEX IF NOT EXISTS idx_food_log_tags_tag ON food_log_tags (tag);
 
--- Per-member, per-condition watchlist (managed via /watch in Telegram).
+-- Per-member, per-condition watchlist (managed via /watch in Signal).
 CREATE TABLE IF NOT EXISTS condition_watchlist (
     family_member_id TEXT NOT NULL,
     condition_id TEXT NOT NULL,        -- matches config health_conditions.id
@@ -264,7 +264,7 @@ condition block:
 | **M2** | Tag emission in nutrient parse + keyword fallback; tags written/deleted with food rows | M1 |
 | **M3** | `/reflect` check-in question, reply parsing, `condition_checkin` upsert, journal inclusion | M1 |
 | **M4** | Soft flags (per-day dedupe) + coach context enrichment | M2 |
-| **M5** | `/watch` + `/tags` Telegram commands | M1 |
+| **M5** | `/watch` + `/tags` Signal commands | M1 |
 | **M6** | Trends condition block, sleep-aware lag join, gated association text, weekly line | M2 + M3 |
 
 **M1+M2 ship first** (tagged food history is the slowest asset to build), then

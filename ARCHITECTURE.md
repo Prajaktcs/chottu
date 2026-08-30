@@ -13,19 +13,19 @@ This document is the runtime map for **Project Chotu** plus the Rust standards f
 | **Streamer** | `streamer` | Gmail IMAP IDLE → nine-way local classification → ledger / tasks / bills / travel / digests / trash |
 | **Janitor** | `janitor` | Watches `~/chotu_drop/` for CSV/PDF ingest + ledger hygiene |
 | **Health Coach** | `health-coach` | Scheduled Google Health sync (~20:45 local nutrition merge; late steps ~23:00 ET), `/plan` storage, coach/trend helpers |
-| **Coordinator** | `coordinator` | Telegram (Teloxide), OAuth localhost callback, morning brief, evening reflection, evening `/networth` overview, task due pings |
+| **Coordinator** | `coordinator` | Signal (`signal-cli` JSON-RPC), OAuth localhost callback, morning brief, evening reflection, evening `/networth` overview, task due pings |
 
 **Finance Advisor** (`finance-advisor`) is a library used by the bot (`/research`, `/networth`, `/monthly`, budgets). It is not a fifth spawned daemon. **chotu-evals** is a separate crate for golden-set classifier checks. Shared code lives in **chotu-common** (DB/migrations, family config, OAuth, LLM clients, calendar, memory RAG, quotes, Finnhub/Yahoo, food timing).
 
-Agents persist through SQLite (and files under `CHOTU_BRAIN_DIR` / `~/chotu_brain`). In-process work uses cloned `SqlitePool` + `AppConfig` (Telegram holds config behind `tokio::sync::RwLock` so `/link` can rewrite YAML).
+Agents persist through SQLite (and files under `CHOTU_BRAIN_DIR` / `~/chotu_brain`). In-process work uses cloned `SqlitePool` + `AppConfig` (the Signal client holds config behind `tokio::sync::RwLock` so `/link` can rewrite YAML).
 
 ```text
-Telegram / IMAP / drop folder / Google APIs
+Signal / IMAP / drop folder / Google APIs
                  │
                  ▼
         coordinator binary (supervisor)
    ┌─────────┬──────────┬──────────────┬─────────────┐
-   │streamer │ janitor  │ health-coach │ telegram +  │
+   │streamer │ janitor  │ health-coach │ signal +    │
    │         │          │              │ schedulers  │
    └────┬────┴────┬─────┴──────┬───────┴──────┬──────┘
         │         │            │              │
@@ -42,7 +42,7 @@ Telegram / IMAP / drop folder / Google APIs
 | :--- | :--- |
 | **Local Ollama** (`OLLAMA_MODEL`, prefer `qwen3.5:9b`) | Email triage, free-text intent, memory answers, evening reflection, coach tips, weekly `/plan`, food date/time phrasing |
 | **Local embeddings** (`nomic-embed-text`) | `/memory` RAG index over journals, newsletter digests, personal references, tasks |
-| **Gemini** (`GEMINI_API_KEY` — **required to start the Telegram loop**) | Food photos (package/plate), PDF ingest, unstructured nutrition estimates |
+| **Gemini** (`GEMINI_API_KEY` — **required to start the Signal loop**) | Food photos (package/plate), PDF ingest, unstructured nutrition estimates |
 | **OpenRouter** | `/research` propose → score panel (default Sol + Qwen3.8-Max + Kimi K3) → Kimi judge |
 | **Finnhub** (optional) | Research universe market-cap filter |
 | **Yahoo Finance** | Live `/networth` quotes; research cap fallback for class shares, Canadian ETFs, and other international symbols Finnhub mishandles |
@@ -53,21 +53,21 @@ Health Coach scheduled sync still runs if Gemini is missing (omega-3 / triglycer
 
 ---
 
-## Family isolation & Telegram
+## Family isolation & Signal
 
 - Roster, `nutrition_goals`, `fitness_goals`, `core_values`, `spend_budgets`, and investment philosophy live in **gitignored** `config.yaml`.
-- Each adult DMs the bot and `/link <member_id>` (writes `telegram_chat_id`). Once any member is linked, unknown chats are rejected (`/chat` and `/link` still work for setup).
+- Each adult DMs Chotu and `/link <member_id>` (writes `signal_aci`). Once any member is linked, unknown conversations are rejected (`/chat` and `/link` still work for setup).
 - Linked personal DMs see **only that member’s** health, training plan, coach tips, trends, and (for `/brief`) calendar/tasks/nutrition slice. Food mutations from a linked DM are **self-only**.
-- Household chat (or optional `TELEGRAM_CHAT_ID`) is the family-wide surface. Proactive fan-out: morning brief, evening reflection, portfolio overview (times from `config.yaml` `schedules`; blank = off), budget 80%/100% alerts, research reports — to linked DMs plus optional shared chat.
+- The optional `SIGNAL_GROUP_ID` household group is the family-wide surface. Proactive fan-out: morning brief, evening reflection, portfolio overview (times from `config.yaml` `schedules`; blank = off), budget 80%/100% alerts, research reports — to linked DMs plus the configured group.
 
 ---
 
 ## Health & day loop (implementation notes)
 
-- Telegram `/food` (and photos) resolve relative days and **meal windows** (breakfast / lunch / snacks / dinner) in `chotu-common` before logging; Google Health meal labels use matching hour buckets.
+- Signal `/food` (and photos) resolve relative days and **meal windows** (breakfast / lunch / snacks / dinner) in `chotu-common` before logging; Google Health meal labels use matching hour buckets.
 - Slow Gemini food work sends a short progress nudge on the same chat.
 - Exercises persist as structured `exercise_log` (type, duration, active kcal, start/end) and feed `/plan` week progress + coach tips — not keyword heuristics on free text.
-- Tasks: email-derived or Telegram-created; dated tasks can write Google Calendar; complete/snooze keep the event in sync; open/snoozed lists and due reminders use inline Done / +1d buttons.
+- Tasks: email-derived or Signal-created; dated tasks can write Google Calendar; complete/snooze keep the event in sync; open/snoozed lists and due reminders include `/tasks complete <id>` and `/tasks snooze <id> [days]`.
 - `/tasks complete all` in a linked DM completes that member’s + unassigned tasks; household chat requires `confirm`.
 
 ---

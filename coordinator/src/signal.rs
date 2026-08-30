@@ -1,13 +1,8 @@
-#![allow(deprecated)]
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Context;
 use sqlx::SqlitePool;
-use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardButtonKind, InlineKeyboardMarkup};
-use teloxide::utils::command::BotCommands;
 use tokio::sync::RwLock;
 
 use chotu_common::{
@@ -15,76 +10,114 @@ use chotu_common::{
     compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
     default_member_id, display_category, ensure_food_mutation_allowed, exchange_google_code,
     fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
-    has_telegram_delivery, is_telegram_chat_allowed, list_completable_open_tasks,
-    looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_telegram_chat,
+    has_signal_delivery, is_signal_conversation_allowed, list_completable_open_tasks,
+    looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_signal_aci,
     effective_food_time, parse_due_phrase_tz, pending_budget_alerts, resolve_food_log_timing,
     assign_food_tags, delete_food_log_tags, delete_food_log_tags_for_member_day,
-    insert_food_log_tags,
-    reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
-    save_health_refresh_token, schedule_at, set_budget_override, set_member_telegram_chat_id,
+    insert_food_log_tags, reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
+    save_health_refresh_token, schedule_at, set_budget_override, set_member_signal_aci,
     spawn_background_reindex, split_task_add_args, start_redirect_listener,
-    telegram_chat_for_member, telegram_delivery_targets, AppConfig, AssignedFoodTags,
-    CalendarWindow, ChotuLlm,
-    CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient, InvestmentPhilosophy,
-    MemoryIndex, UserIntent, TASK_CALENDAR_DURATION_MINUTES,
+    signal_aci_for_member, signal_delivery_targets, AppConfig, AssignedFoodTags,
+    CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient,
+    InvestmentPhilosophy, MemoryIndex, SignalClient, SignalError, SignalInbound, SignalRecipient,
+    UserIntent, TASK_CALENDAR_DURATION_MINUTES,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
-use teloxide::net::Download;
 
-#[derive(BotCommands, Clone)]
-#[command(
-    rename_rule = "lowercase",
-    description = "These commands are supported:"
-)]
+type Bot = SignalClient;
+type ChatId = SignalRecipient;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    #[command(description = "display this text.")]
-    Help,
-    #[command(description = "log food. Usage: /food [member_id] <description>")]
-    Food(String),
-    #[command(description = "show today's status report.")]
-    Status,
-    #[command(description = "weekly training plan. Usage: /plan | /plan new")]
-    Plan(String),
-    #[command(description = "morning brief: calendar, tasks, bills, nutrition.")]
-    Brief,
-    #[command(description = "calendar agenda. Usage: /cal [today|tomorrow|week]")]
-    Cal(String),
-    #[command(description = "show multi-day nutrition trends. Usage: /trends [days]")]
-    Trends(String),
-    #[command(description = "list/manage tasks. Usage: /tasks [open|all|completed|snoozed] [|member]; /tasks add [member] <title> [due|by <when>]; /tasks complete <id|all|all confirm>; /tasks snooze|reassign|open <id> ...")]
-    Tasks(String),
-    #[command(description = "add a task (alias). Usage: /task <title> [by|due <when>]")]
-    Task(String),
-    #[command(description = "search personal memory (journals, digests, references, tasks). Usage: /memory <question> | /memory reindex")]
-    Memory(String),
-    #[command(description = "trigger evening reflection loop.")]
-    Reflect,
-    #[command(description = "show the current chat ID.")]
-    Chat,
-    #[command(description = "link this DM to a family member. Usage: /link <member_id>")]
-    Link(String),
-    #[command(description = "show which family member this chat is linked to.")]
-    Whoami,
-    #[command(
-        description = "shared-universe stock research via OpenRouter. Usage: /research [optional_companies]"
-    )]
-    Research(String),
-    #[command(description = "sync today's health metrics from Google Health.")]
-    Sync,
-    #[command(description = "login to Google Health, Gmail, or Calendar. Usage: /login <health <member_id>|gmail|calendar <member_id>> or /login code <...>")]
-    Login(String),
-    #[command(description = "clear today's food logs and summary. Usage: /clearfood [member_id]")]
-    Clearfood(String),
-    #[command(description = "manually override today's nutrition totals. Usage: /adjustfood [member_id] <calories> <protein> <carbs> <fats>")]
-    Adjustfood(String),
-    #[command(description = "delete the last food log entry and update today's summary. Usage: /undofood [member_id]")]
-    Undofood(String),
-    #[command(description = "show invested net worth (portfolio; cash not tracked yet).")]
-    Networth,
-    #[command(description = "show monthly transaction summary. Usage: /monthly [YYYY-MM]")]
-    Monthly(String),
-    #[command(description = "category spend budgets. Usage: /budget | /budget set <Category> <amount> | /budget clear <Category>")]
-    Budget(String),
+    Help, Food(String), Status, Plan(String), Brief, Cal(String), Trends(String),
+    Tasks(String), Task(String), Memory(String), Reflect, Chat, Link(String), Whoami,
+    Research(String), Sync, Login(String), Clearfood(String), Adjustfood(String),
+    Undofood(String), Networth, Monthly(String), Budget(String),
+}
+
+const HELP_TEXT: &str = "\
+These commands are supported:
+/help — display this text.
+/food [member_id] <description> — log food.
+/status — show today's status report.
+/plan [new] — weekly training plan.
+/brief — morning brief: calendar, tasks, bills, nutrition.
+/cal [today|tomorrow|week] — calendar agenda.
+/trends [days] — nutrition trends.
+/tasks [open|all|completed|snoozed] [|member]
+/tasks add [member] <title> [due|by <when>]
+/tasks complete <id|all|all confirm>
+/tasks snooze <id> [days]
+/tasks reassign <id> <member>
+/tasks open <id>
+/task <title> [by|due <when>] — add a task
+/memory <question> | /memory reindex
+/reflect — evening reflection.
+/chat — show this Signal conversation.
+/link <member_id> — link this direct conversation.
+/whoami — show the linked family member.
+/research [companies] — stock research.
+/sync — sync today's health metrics.
+/login <health <member_id>|gmail|calendar <member_id>> or /login code <...>
+/clearfood [member_id] — clear today's food logs.
+/adjustfood [member_id] <calories> <protein> <carbs> <fats>
+/undofood [member_id] — undo last food log.
+/networth — invested net worth.
+/monthly [YYYY-MM] — monthly summary.
+/budget | /budget set <Category> <amount> | /budget clear <Category>";
+
+fn parse_command(input: &str) -> Option<Command> {
+    let input = input.trim();
+    let body = input.strip_prefix('/')?;
+    let (name, args) = match body.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim().to_string()),
+        None => (body, String::new()),
+    };
+    if name.contains('@') {
+        return None;
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "help" => Some(Command::Help),
+        "food" => Some(Command::Food(args)),
+        "status" => Some(Command::Status),
+        "plan" => Some(Command::Plan(args)),
+        "brief" => Some(Command::Brief),
+        "cal" => Some(Command::Cal(args)),
+        "trends" => Some(Command::Trends(args)),
+        "tasks" => Some(Command::Tasks(args)),
+        "task" => Some(Command::Task(args)),
+        "memory" => Some(Command::Memory(args)),
+        "reflect" => Some(Command::Reflect),
+        "chat" => Some(Command::Chat),
+        "link" => Some(Command::Link(args)),
+        "whoami" => Some(Command::Whoami),
+        "research" => Some(Command::Research(args)),
+        "sync" => Some(Command::Sync),
+        "login" => Some(Command::Login(args)),
+        "clearfood" => Some(Command::Clearfood(args)),
+        "adjustfood" => Some(Command::Adjustfood(args)),
+        "undofood" => Some(Command::Undofood(args)),
+        "networth" => Some(Command::Networth),
+        "monthly" => Some(Command::Monthly(args)),
+        "budget" => Some(Command::Budget(args)),
+        _ => None,
+    }
+}
+
+fn conversation_allowed(config: &AppConfig, chat_id: &ChatId, sender_aci: &str) -> bool {
+    is_signal_conversation_allowed(config, sender_aci, chat_id.group_id())
+}
+
+fn task_complete_snooze_help(short_id: &str) -> String {
+    format!("/tasks complete {short_id} · /tasks snooze {short_id} [days]")
+}
+
+async fn send_signal(
+    bot: &Bot,
+    chat_id: &ChatId,
+    text: impl AsRef<str>,
+) -> Result<i64, SignalError> {
+    bot.send_text(chat_id, text.as_ref()).await
 }
 
 #[derive(Debug, Clone)]
@@ -96,8 +129,7 @@ pub enum ConversationState {
 type StateMap = Arc<RwLock<HashMap<ChatId, ConversationState>>>;
 type SharedConfig = Arc<RwLock<AppConfig>>;
 
-/// Send a household message to every linked member DM (+ optional TELEGRAM_CHAT_ID fallback).
-/// Returns `true` if at least one send succeeded.
+/// Send a household message to every linked member DM plus optional SIGNAL_GROUP_ID.
 async fn send_household(bot: &Bot, config: &AppConfig, text: impl Into<String>) -> bool {
     send_household_attempts(bot, config, text, 1).await
 }
@@ -109,22 +141,18 @@ async fn send_household_attempts(
     attempts: u32,
 ) -> bool {
     let text = text.into();
-    let targets = telegram_delivery_targets(config);
+    let targets = signal_delivery_targets(config);
     if targets.is_empty() {
-        eprintln!("Telegram Bot: no delivery targets (link a member or set TELEGRAM_CHAT_ID)");
+        eprintln!("Signal: no delivery targets (link a member or set SIGNAL_GROUP_ID)");
         return false;
     }
     let mut any_ok = false;
     for cid in targets {
-        if retry_scheduled_push(attempts, "household send", cid, || {
+        if retry_scheduled_push(attempts, "household send", &cid, || {
             let bot = bot.clone();
             let text = text.clone();
-            async move {
-                bot.send_message(ChatId(cid), text)
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
-                    .await
-                    .map(|_| ())
-            }
+            let cid = cid.clone();
+            async move { send_signal(&bot, &cid, text).await.map(|_| ()) }
         })
         .await
         .is_ok()
@@ -135,42 +163,37 @@ async fn send_household_attempts(
     any_ok
 }
 
-const SCHEDULED_TELEGRAM_ATTEMPTS: u32 = 3;
+const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
 
-fn telegram_error_is_retryable(err: &teloxide::RequestError) -> bool {
-    matches!(err, teloxide::RequestError::Network(_))
+fn signal_error_is_retryable(err: &SignalError) -> bool {
+    matches!(err, SignalError::Io(_) | SignalError::Eof | SignalError::Reconnecting)
 }
 
-/// Retry transient Telegram network errors (truncated TLS, dropped keep-alive).
-/// Non-network failures (bad parse mode, blocked bot, 4xx) fail immediately.
 async fn retry_scheduled_push<F, Fut>(
     attempts: u32,
     label: &str,
-    chat_id: i64,
+    chat_id: &ChatId,
     mut op: F,
-) -> Result<(), teloxide::RequestError>
+) -> Result<(), SignalError>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<(), teloxide::RequestError>>,
+    Fut: std::future::Future<Output = Result<(), SignalError>>,
 {
     let attempts = attempts.max(1);
     for attempt in 1..=attempts {
         match op().await {
             Ok(()) => return Ok(()),
             Err(e) => {
-                let retry = attempt < attempts && telegram_error_is_retryable(&e);
+                let retry = attempt < attempts && signal_error_is_retryable(&e);
                 eprintln!(
-                    "Telegram Bot: {} failed for {} (attempt {}/{}): {:?}",
+                    "Signal: {} failed for {} (attempt {}/{}): {:?}",
                     label, chat_id, attempt, attempts, e
                 );
                 if !retry {
                     return Err(e);
                 }
                 let delay = std::time::Duration::from_secs(2 * u64::from(attempt));
-                eprintln!(
-                    "Telegram Bot: retrying {} for {} in {:?}.",
-                    label, chat_id, delay
-                );
+                eprintln!("Signal: retrying {} for {} in {:?}.", label, chat_id, delay);
                 tokio::time::sleep(delay).await;
             }
         }
@@ -180,81 +203,62 @@ where
 
 async fn send_markdown_retry(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     text: impl Into<String>,
     attempts: u32,
     label: &str,
-) -> Result<(), teloxide::RequestError> {
-    send_text_retry(bot, chat_id, text, attempts, label, true).await
+) -> Result<(), SignalError> {
+    send_text_retry(bot, chat_id, text, attempts, label).await
 }
 
 async fn send_plain_retry(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     text: impl Into<String>,
     attempts: u32,
     label: &str,
-) -> Result<(), teloxide::RequestError> {
-    send_text_retry(bot, chat_id, text, attempts, label, false).await
+) -> Result<(), SignalError> {
+    send_text_retry(bot, chat_id, text, attempts, label).await
 }
 
 async fn send_text_retry(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     text: impl Into<String>,
     attempts: u32,
     label: &str,
-    markdown: bool,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let text = text.into();
-    retry_scheduled_push(attempts, label, chat_id.0, || {
+    retry_scheduled_push(attempts, label, chat_id, || {
         let bot = bot.clone();
         let text = text.clone();
-        async move {
-            let req = bot.send_message(chat_id, text);
-            if markdown {
-                req.parse_mode(teloxide::types::ParseMode::Markdown)
-                    .await
-                    .map(|_| ())
-            } else {
-                req.await.map(|_| ())
-            }
-        }
+        let chat_id = chat_id.clone();
+        async move { send_signal(&bot, &chat_id, text).await.map(|_| ()) }
     })
     .await
 }
 
 async fn push_scheduled_brief(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
-    let _ = bot
-        .send_message(chat_id, "☀️ Building morning brief...")
-        .await;
-    let for_member = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+) -> Result<(), SignalError> {
+    let _ = send_signal(bot, chat_id, "Building morning brief...").await;
+    let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
-    send_markdown_retry(
-        bot,
-        chat_id,
-        report,
-        SCHEDULED_TELEGRAM_ATTEMPTS,
-        "scheduled morning brief",
-    )
-    .await
+    send_markdown_retry(bot, chat_id, report, SCHEDULED_SIGNAL_ATTEMPTS, "scheduled morning brief").await
 }
 
-async fn reject_unlinked_chat(bot: &Bot, chat_id: ChatId) -> Result<(), teloxide::RequestError> {
-    bot.send_message(
+async fn reject_unlinked_chat(bot: &Bot, chat_id: &ChatId) -> Result<(), SignalError> {
+    send_signal(
+        bot,
         chat_id,
         format!(
-            "This chat is not linked to a family member.\n\
-DM the bot and run `/link <member_id>` (use `/chat` to see this chat id: `{}`).",
-            chat_id
+            "This conversation is not linked to a family member.\n\
+DM Chotu and run `/link <member_id>` (this conversation: `{chat_id}`)."
         ),
     )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
     .await?;
     Ok(())
 }
@@ -263,25 +267,24 @@ fn command_bypasses_allowlist(cmd: &Command) -> bool {
     matches!(cmd, Command::Chat | Command::Link(_))
 }
 
-pub async fn start_telegram_bot(
+pub async fn start_signal_client(
     pool: SqlitePool,
     llm: ChotuLlm,
     gemini_key: String,
     config: AppConfig,
 ) -> Result<(), anyhow::Error> {
-    let token = std::env::var("TELEGRAM_BOT_TOKEN")
-        .or_else(|_| std::env::var("TELOXIDE_TOKEN"))
-        .context("Neither TELEGRAM_BOT_TOKEN nor TELOXIDE_TOKEN environment variable is set")?;
-    let bot = Bot::new(token);
+    let socket = std::env::var("SIGNAL_CLI_SOCKET")
+        .context("SIGNAL_CLI_SOCKET environment variable is required")?;
+    let bot = SignalClient::connect(&socket)
+        .await
+        .context("failed to connect to signal-cli Unix socket")?;
     let gemini_client = GeminiClient::new(gemini_key);
     let researcher = StockResearcher::from_env();
     if !researcher.is_configured() {
-        eprintln!(
-            "Telegram Bot: OPENROUTER_API_KEY not set — /research disabled."
-        );
+        eprintln!("Signal: OPENROUTER_API_KEY not set — /research disabled.");
     } else {
         println!(
-            "Telegram Bot: Stock research ready (shared-universe: {} → judge {})",
+            "Signal: Stock research ready (shared-universe: {} → judge {})",
             researcher.panel_display_names(),
             researcher.judge_model()
         );
@@ -293,7 +296,7 @@ pub async fn start_telegram_bot(
             None => format!("{label} off"),
         };
         println!(
-            "Telegram Bot: timezone {} (IANA). {} · {} · {} (sends when linked chats or TELEGRAM_CHAT_ID exist).",
+            "Signal: timezone {} (IANA). {} · {} · {} (sends when linked chats or SIGNAL_GROUP_ID exist).",
             config.resolved_timezone_name(),
             describe("brief", config.schedule_clock(chotu_common::AgentSchedules::morning_brief)),
             describe("portfolio", config.schedule_clock(chotu_common::AgentSchedules::portfolio)),
@@ -302,7 +305,6 @@ pub async fn start_telegram_bot(
     }
     let shared_config: SharedConfig = Arc::new(RwLock::new(config));
 
-    // Proactive jobs from config.yaml `schedules` (blank/omitted = not scheduled).
     let sched_bot = bot.clone();
     let sched_pool = pool.clone();
     let sched_llm = llm.clone();
@@ -316,21 +318,15 @@ pub async fn start_telegram_bot(
             let cfg = sched_config.read().await.clone();
             let now = cfg.now_in_tz();
             let date_str = now.format("%Y-%m-%d").to_string();
-            let targets = telegram_delivery_targets(&cfg);
+            let targets = signal_delivery_targets(&cfg);
             let tz_name = cfg.resolved_timezone_name();
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::morning_brief) {
                 if clock.matches(now) && date_str != last_brief && !targets.is_empty() {
-                    println!(
-                        "Telegram Bot: scheduled morning brief ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
+                    println!("Signal: scheduled morning brief ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
                     let mut any_ok = false;
                     for cid in &targets {
-                        if push_scheduled_brief(&sched_bot, ChatId(*cid), &sched_pool, &cfg)
-                            .await
-                            .is_ok()
-                        {
+                        if push_scheduled_brief(&sched_bot, cid, &sched_pool, &cfg).await.is_ok() {
                             any_ok = true;
                         }
                     }
@@ -342,33 +338,20 @@ pub async fn start_telegram_bot(
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::portfolio) {
                 if clock.matches(now) && date_str != last_portfolio && !targets.is_empty() {
-                    println!(
-                        "Telegram Bot: scheduled portfolio overview ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
+                    println!("Signal: scheduled portfolio overview ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
                     match build_networth_summary(&sched_pool, &cfg).await {
                         Ok(msg) => {
-                            if send_household_attempts(
-                                &sched_bot,
-                                &cfg,
-                                msg,
-                                SCHEDULED_TELEGRAM_ATTEMPTS,
-                            )
-                            .await
-                            {
+                            if send_household_attempts(&sched_bot, &cfg, msg, SCHEDULED_SIGNAL_ATTEMPTS).await {
                                 last_portfolio = date_str.clone();
                             }
                         }
                         Err(e) => {
-                            eprintln!(
-                                "Telegram Bot: failed to build scheduled portfolio overview: {}",
-                                e
-                            );
+                            eprintln!("Signal: failed to build scheduled portfolio overview: {}", e);
                             let _ = send_household_attempts(
                                 &sched_bot,
                                 &cfg,
-                                format!("❌ Portfolio overview failed: {}", e),
-                                SCHEDULED_TELEGRAM_ATTEMPTS,
+                                format!("Portfolio overview failed: {}", e),
+                                SCHEDULED_SIGNAL_ATTEMPTS,
                             )
                             .await;
                         }
@@ -378,20 +361,17 @@ pub async fn start_telegram_bot(
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::reflection) {
                 if clock.matches(now) && date_str != last_reflect && !targets.is_empty() {
-                    println!(
-                        "Telegram Bot: scheduled evening reflection ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
+                    println!("Signal: scheduled evening reflection ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
                     let mut any_ok = false;
                     for cid in &targets {
                         if handle_reflect_trigger(
                             &sched_bot,
-                            ChatId(*cid),
+                            cid,
                             &sched_pool,
                             &sched_llm,
                             sched_states.clone(),
                             &cfg,
-                            SCHEDULED_TELEGRAM_ATTEMPTS,
+                            SCHEDULED_SIGNAL_ATTEMPTS,
                         )
                         .await
                         .is_ok()
@@ -409,492 +389,138 @@ pub async fn start_telegram_bot(
         }
     });
 
-    // One-shot timed task reminders (due_at reached, not yet reminded).
     let remind_bot = bot.clone();
     let remind_pool = pool.clone();
     let remind_config = shared_config.clone();
     tokio::spawn(async move {
-        println!(
-            "Telegram Bot: Task reminder poller running (delivers when linked chats or TELEGRAM_CHAT_ID exist)."
-        );
+        println!("Signal: Task reminder poller running (delivers when linked chats or SIGNAL_GROUP_ID exist).");
         loop {
             let cfg = remind_config.read().await.clone();
-            if has_telegram_delivery(&cfg) {
+            if has_signal_delivery(&cfg) {
                 if let Err(e) = poll_due_task_reminders(&remind_bot, &remind_pool, &cfg).await {
-                    eprintln!("Telegram Bot: task reminder poll failed: {:?}", e);
+                    eprintln!("Signal: task reminder poll failed: {:?}", e);
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
         }
     });
 
-    // Mid-month category spend alerts at 80% / 100% (deduped per month).
     let budget_bot = bot.clone();
     let budget_pool = pool.clone();
     let budget_config = shared_config.clone();
     tokio::spawn(async move {
-        println!(
-            "Telegram Bot: Spend budget alert poller running (delivers when linked chats or TELEGRAM_CHAT_ID exist)."
-        );
+        println!("Signal: Spend budget alert poller running (delivers when linked chats or SIGNAL_GROUP_ID exist).");
         loop {
             let cfg = budget_config.read().await.clone();
-            if has_telegram_delivery(&cfg) {
+            if has_signal_delivery(&cfg) {
                 if let Err(e) = poll_spend_budget_alerts(&budget_bot, &budget_pool, &cfg).await {
-                    eprintln!("Telegram Bot: spend budget alert poll failed: {:?}", e);
+                    eprintln!("Signal: spend budget alert poll failed: {:?}", e);
                 }
             }
             tokio::time::sleep(tokio::time::Duration::from_secs(30 * 60)).await;
         }
     });
 
-    // Scheduled Google Health sync is owned by the Health Coach agent
-    // (8:45 PM local + 11:00 PM ET late steps sync / nudge).
-    println!("Telegram Bot: Google Health scheduled sync is handled by the Health Coach agent.");
-
-    // Background catch-up for local memory RAG index (journals / digests / refs / tasks).
+    println!("Signal: Google Health scheduled sync is handled by the Health Coach agent.");
     spawn_background_reindex(pool.clone());
 
-    let handler = dptree::entry()
-        .branch(
-            Update::filter_message()
-                .branch(
-                    dptree::entry()
-                        .filter_command::<Command>()
-                        .endpoint(handle_command),
+    let mut inbound = bot
+        .subscribe_receive()
+        .await
+        .context("failed to subscribe to signal-cli receive notifications")?;
+    println!("Signal: connected on {socket}, receiving…");
+    loop {
+        match inbound.recv().await {
+            Ok(message) => {
+                if let Err(e) = handle_inbound(
+                    bot.clone(),
+                    message,
+                    pool.clone(),
+                    llm.clone(),
+                    gemini_client.clone(),
+                    researcher.clone(),
+                    conversation_states.clone(),
+                    shared_config.clone(),
                 )
-                .branch(dptree::endpoint(handle_message)),
-        )
-        .branch(Update::filter_callback_query().endpoint(handle_callback_query));
+                .await
+                {
+                    eprintln!("Signal: inbound handler failed: {:?}", e);
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                eprintln!("Signal: dropped {skipped} inbound notifications");
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return Err(anyhow::anyhow!("signal-cli receive subscription closed"));
+            }
+        }
+    }
+}
 
-    println!("Telegram Bot: starting update loop...");
-    Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![
+async fn handle_inbound(
+    bot: Bot,
+    inbound: SignalInbound,
+    pool: SqlitePool,
+    llm: ChotuLlm,
+    gemini_client: GeminiClient,
+    researcher: StockResearcher,
+    states: StateMap,
+    shared_config: SharedConfig,
+) -> Result<(), SignalError> {
+    let chat_id = inbound.recipient.clone();
+    let sender_aci = inbound.sender_aci.clone();
+    let config = shared_config.read().await.clone();
+
+    if inbound.sender_aci.is_empty() {
+        send_signal(&bot, &chat_id, "I can only accept Signal messages that include a sender ACI.").await?;
+        return Ok(());
+    }
+
+    let unsupported = inbound.attachments.iter().find(|attachment| {
+        !attachment.content_type.starts_with("image/") || attachment.id.is_empty()
+    });
+    if let Some(attachment) = unsupported {
+        let reason = if !attachment.content_type.starts_with("image/") {
+            "I only accept image attachments for food logging."
+        } else {
+            "That image is missing an attachment id, so I cannot download it."
+        };
+        send_signal(&bot, &chat_id, reason).await?;
+        return Ok(());
+    }
+
+    let text = inbound.text.clone().unwrap_or_default();
+    if let Some(cmd) = parse_command(&text) {
+        if !command_bypasses_allowlist(&cmd) && !conversation_allowed(&config, &chat_id, &sender_aci) {
+            return reject_unlinked_chat(&bot, &chat_id).await;
+        }
+        return handle_command(
+            bot,
+            chat_id,
+            sender_aci,
+            cmd,
             pool,
             llm,
             gemini_client,
             researcher,
-            conversation_states,
-            shared_config
-        ])
-        .enable_ctrlc_handler()
-        .build()
-        .dispatch()
+            states,
+            shared_config,
+        )
         .await;
-
-    Ok(())
-}
-
-async fn handle_callback_query(
-    bot: Bot,
-    q: CallbackQuery,
-    pool: SqlitePool,
-    shared_config: SharedConfig,
-) -> Result<(), teloxide::RequestError> {
-    let Some(data) = q.data.as_deref() else {
-        bot.answer_callback_query(q.id).await?;
-        return Ok(());
-    };
-
-    let Some(msg) = q.message.as_ref() else {
-        bot.answer_callback_query(q.id)
-            .text("Message too old — use /tasks")
-            .await?;
-        return Ok(());
-    };
-    let chat_id = msg.chat.id;
-
-    let config = shared_config.read().await.clone();
-    if !is_telegram_chat_allowed(&config, chat_id.0) {
-        bot.answer_callback_query(q.id)
-            .text("Chat not linked — send /link first")
-            .show_alert(true)
-            .await?;
-        return Ok(());
     }
 
-    let Some((action, surface, task_id)) = parse_task_callback(data) else {
-        bot.answer_callback_query(q.id).await?;
-        return Ok(());
-    };
-
-    match action {
-        TaskCallbackAction::Done => {
-            match complete_task_by_id(&pool, task_id).await {
-                TaskMutateOutcome::Done { title, already } => {
-                    let toast = if already {
-                        "Already done"
-                    } else {
-                        "Marked done"
-                    };
-                    bot.answer_callback_query(&q.id).text(toast).await?;
-                    if already {
-                        return Ok(());
-                    }
-                    sync_calendar_after_complete(&pool, &config, task_id).await;
-                    let note = format!("✅ Marked done: _{}_", escape_md_basic(&title));
-                    update_message_after_task_action(&bot, msg, task_id, &note, surface).await?;
-                    refresh_task_memory(&pool, task_id).await;
-                }
-                TaskMutateOutcome::NotFound => {
-                    bot.answer_callback_query(&q.id)
-                        .text("Task not found")
-                        .show_alert(true)
-                        .await?;
-                }
-                TaskMutateOutcome::DbError => {
-                    bot.answer_callback_query(&q.id)
-                        .text("Database error")
-                        .show_alert(true)
-                        .await?;
-                }
-                TaskMutateOutcome::Snoozed { .. } => unreachable!(),
-            }
-        }
-        TaskCallbackAction::Snooze => {
-            match snooze_task_by_id(&pool, task_id, 1, &config).await {
-                TaskMutateOutcome::Snoozed { title, due } => {
-                    let calendar_note =
-                        sync_calendar_after_snooze(&pool, &config, task_id, &due).await;
-                    let toast = match calendar_note {
-                        Some("📅 calendar updated") => format!("Snoozed until {due} · calendar"),
-                        Some(other) => format!("Snoozed until {due} · {other}"),
-                        None => format!("Snoozed until {due}"),
-                    };
-                    bot.answer_callback_query(&q.id).text(toast).await?;
-                    let mut note = format!(
-                        "😴 Snoozed until *{}*: _{}_",
-                        due,
-                        escape_md_basic(&title)
-                    );
-                    if let Some(cal_note) = calendar_note {
-                        note.push_str(&format!(" · _{}_", cal_note));
-                    }
-                    update_message_after_task_action(&bot, msg, task_id, &note, surface).await?;
-                    refresh_task_memory(&pool, task_id).await;
-                }
-                TaskMutateOutcome::NotFound => {
-                    bot.answer_callback_query(&q.id)
-                        .text("Task not found")
-                        .show_alert(true)
-                        .await?;
-                }
-                TaskMutateOutcome::DbError => {
-                    bot.answer_callback_query(&q.id)
-                        .text("Database error")
-                        .show_alert(true)
-                        .await?;
-                }
-                TaskMutateOutcome::Done { .. } => unreachable!(),
-            }
-        }
+    if !conversation_allowed(&config, &chat_id, &sender_aci) {
+        return reject_unlinked_chat(&bot, &chat_id).await;
     }
-
-    Ok(())
+    handle_message(bot, chat_id, sender_aci, inbound, pool, llm, gemini_client, states, shared_config).await
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskCallbackAction {
-    Done,
-    Snooze,
-}
-
-/// Where the button was attached — drives whether we rewrite the message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TaskCallbackSurface {
-    /// Reminder or create confirmation: replace text in place.
-    Single,
-    /// `/tasks` list: keep list text, drop that task's button row.
-    List,
-}
-
-fn parse_task_callback(data: &str) -> Option<(TaskCallbackAction, TaskCallbackSurface, &str)> {
-    // Format: t:{d|s}:{1|m}:{uuid} (callback_data max 64 bytes).
-    let rest = data.strip_prefix("t:")?;
-    let (action_raw, rest) = rest.split_once(':')?;
-    let (surface_raw, task_id) = rest.split_once(':')?;
-    if task_id.len() < 8 || task_id.len() > 40 {
-        return None;
-    }
-    if !task_id
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() || c == '-')
-    {
-        return None;
-    }
-    let action = match action_raw {
-        "d" => TaskCallbackAction::Done,
-        "s" => TaskCallbackAction::Snooze,
-        _ => return None,
-    };
-    let surface = match surface_raw {
-        "1" => TaskCallbackSurface::Single,
-        "m" => TaskCallbackSurface::List,
-        _ => return None,
-    };
-    Some((action, surface, task_id))
-}
-
-fn task_callback_data(action: char, surface: TaskCallbackSurface, task_id: &str) -> String {
-    let surface_tag = match surface {
-        TaskCallbackSurface::Single => '1',
-        TaskCallbackSurface::List => 'm',
-    };
-    format!("t:{}:{}:{}", action, surface_tag, task_id)
-}
-
-fn task_action_keyboard(task_id: &str, title: &str) -> InlineKeyboardMarkup {
-    InlineKeyboardMarkup::new(vec![task_action_row(
-        task_id,
-        title,
-        TaskCallbackSurface::Single,
-    )])
-}
-
-fn task_list_keyboard(rows: &[(String, String)]) -> InlineKeyboardMarkup {
-    // Cap buttons so the keyboard stays usable on mobile.
-    InlineKeyboardMarkup::new(
-        rows.iter()
-            .take(15)
-            .map(|(id, title)| task_action_row(id, title, TaskCallbackSurface::List))
-            .collect::<Vec<_>>(),
-    )
-}
-
-fn task_action_row(
-    task_id: &str,
-    title: &str,
-    surface: TaskCallbackSurface,
-) -> Vec<InlineKeyboardButton> {
-    let label = truncate_chars(title.trim(), 28);
-    let done_label = if label.is_empty() {
-        "✅ Done".to_string()
-    } else {
-        format!("✅ {}", label)
-    };
-    vec![
-        InlineKeyboardButton::callback(
-            done_label,
-            task_callback_data('d', surface, task_id),
-        ),
-        InlineKeyboardButton::callback(
-            "😴 +1d",
-            task_callback_data('s', surface, task_id),
-        ),
-    ]
-}
-
-fn strip_task_buttons(
-    markup: &InlineKeyboardMarkup,
-    task_id: &str,
-) -> InlineKeyboardMarkup {
-    let rows: Vec<Vec<InlineKeyboardButton>> = markup
-        .inline_keyboard
-        .iter()
-        .filter(|row| {
-            !row.iter().any(|btn| match &btn.kind {
-                InlineKeyboardButtonKind::CallbackData(d) => {
-                    d.starts_with("t:") && d.ends_with(task_id)
-                }
-                _ => false,
-            })
-        })
-        .cloned()
-        .collect();
-    InlineKeyboardMarkup::new(rows)
-}
-
-/// After a button action: single-task surfaces rewrite the message; list
-/// surfaces drop that task's keyboard row and send a short confirmation.
-async fn update_message_after_task_action(
-    bot: &Bot,
-    msg: &Message,
-    task_id: &str,
-    note_md: &str,
-    surface: TaskCallbackSurface,
-) -> Result<(), teloxide::RequestError> {
-    if surface == TaskCallbackSurface::Single {
-        bot.edit_message_text(msg.chat.id, msg.id, note_md)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .reply_markup(InlineKeyboardMarkup::default())
-            .await?;
-        return Ok(());
-    }
-
-    if let Some(markup) = msg.reply_markup() {
-        let next = strip_task_buttons(markup, task_id);
-        if next.inline_keyboard.is_empty() {
-            bot.edit_message_reply_markup(msg.chat.id, msg.id)
-                .reply_markup(InlineKeyboardMarkup::default())
-                .await?;
-        } else {
-            bot.edit_message_reply_markup(msg.chat.id, msg.id)
-                .reply_markup(next)
-                .await?;
-        }
-    }
-
-    bot.send_message(msg.chat.id, note_md)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
-    Ok(())
-}
-
-#[derive(Debug)]
-enum TaskMutateOutcome {
-    Done { title: String, already: bool },
-    Snoozed { title: String, due: String },
-    NotFound,
-    DbError,
-}
-
-async fn load_task_title_status(
-    pool: &SqlitePool,
-    task_id: &str,
-) -> Result<Option<(String, String)>, sqlx::Error> {
-    sqlx::query_as::<_, (String, String)>("SELECT title, status FROM tasks WHERE id = ?")
-        .bind(task_id)
-        .fetch_optional(pool)
-        .await
-}
-
-async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutcome {
-    let row = match load_task_title_status(pool, task_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to load task {}: {:?}", task_id, e);
-            return TaskMutateOutcome::DbError;
-        }
-    };
-    let Some((title, status)) = row else {
-        return TaskMutateOutcome::NotFound;
-    };
-    if status == "done" {
-        return TaskMutateOutcome::Done {
-            title,
-            already: true,
-        };
-    }
-
-    let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(task_id)
-        .execute(pool)
-        .await
-    {
-        eprintln!("Failed to mark task done: {:?}", e);
-        return TaskMutateOutcome::DbError;
-    }
-
-    TaskMutateOutcome::Done {
-        title,
-        already: false,
-    }
-}
-
-async fn snooze_task_by_id(
-    pool: &SqlitePool,
-    task_id: &str,
-    days: i64,
-    config: &AppConfig,
-) -> TaskMutateOutcome {
-    let row = match load_task_title_status(pool, task_id).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("Failed to load task {}: {:?}", task_id, e);
-            return TaskMutateOutcome::DbError;
-        }
-    };
-    let Some((title, _)) = row else {
-        return TaskMutateOutcome::NotFound;
-    };
-
-    let due = (config.now_in_tz().date_naive() + chrono::Duration::days(days))
-        .format("%Y-%m-%d")
-        .to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    let due_at = parse_due_phrase_tz(&due, config.resolved_tz()).map(|p| p.due_at);
-
-    if let Err(e) = sqlx::query(
-        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(&due)
-    .bind(due_at.as_deref())
-    .bind(&now)
-    .bind(task_id)
-    .execute(pool)
-    .await
-    {
-        eprintln!("Failed to snooze task: {:?}", e);
-        return TaskMutateOutcome::DbError;
-    }
-
-    TaskMutateOutcome::Snoozed { title, due }
-}
-
-#[cfg(test)]
-mod task_button_tests {
-    use super::*;
-
-    #[test]
-    fn parse_task_callback_accepts_done_and_snooze() {
-        let id = "a3f2b91c-1111-2222-3333-444455556666";
-        let done = format!("t:d:1:{id}");
-        let (action, surface, parsed) = parse_task_callback(&done).unwrap();
-        assert_eq!(action, TaskCallbackAction::Done);
-        assert_eq!(surface, TaskCallbackSurface::Single);
-        assert_eq!(parsed, id);
-        let snooze = format!("t:s:m:{id}");
-        let (action, surface, parsed) = parse_task_callback(&snooze).unwrap();
-        assert_eq!(action, TaskCallbackAction::Snooze);
-        assert_eq!(surface, TaskCallbackSurface::List);
-        assert_eq!(parsed, id);
-    }
-
-    #[test]
-    fn parse_task_callback_rejects_junk() {
-        assert!(parse_task_callback("done:abc").is_none());
-        assert!(parse_task_callback("t:x:1:abcdef12").is_none());
-        assert!(parse_task_callback("t:d:1:short").is_none());
-        assert!(parse_task_callback("t:d:1:not a uuid!!!").is_none());
-        assert!(parse_task_callback("t:d:x:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_none());
-        // Legacy format without surface tag.
-        assert!(parse_task_callback("t:d:aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").is_none());
-    }
-
-    #[test]
-    fn strip_task_buttons_removes_matching_row() {
-        let id1 = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
-        let id2 = "11111111-2222-3333-4444-555555555555";
-        let markup = task_list_keyboard(&[
-            (id1.to_string(), "milk".into()),
-            (id2.to_string(), "dentist".into()),
-        ]);
-        assert_eq!(markup.inline_keyboard.len(), 2);
-        let next = strip_task_buttons(&markup, id1);
-        assert_eq!(next.inline_keyboard.len(), 1);
-        let cb = match &next.inline_keyboard[0][0].kind {
-            InlineKeyboardButtonKind::CallbackData(d) => d.as_str(),
-            _ => panic!("expected callback"),
-        };
-        assert!(cb.contains(id2));
-        assert!(cb.contains(":m:"));
-    }
-
-    #[test]
-    fn task_callback_data_fits_telegram_limit() {
-        let id = "a3f2b91c-1111-2222-3333-444455556666"; // 36 chars
-        let done = task_callback_data('d', TaskCallbackSurface::List, id);
-        let snooze = task_callback_data('s', TaskCallbackSurface::Single, id);
-        assert!(done.len() <= 64, "done callback {} bytes", done.len());
-        assert!(snooze.len() <= 64, "snooze callback {} bytes", snooze.len());
-    }
-}
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     bot: Bot,
-    msg: Message,
+    chat_id: ChatId,
+    sender_aci: String,
     cmd: Command,
     pool: SqlitePool,
     llm: ChotuLlm,
@@ -902,261 +528,129 @@ async fn handle_command(
     researcher: StockResearcher,
     states: StateMap,
     shared_config: SharedConfig,
-) -> Result<(), teloxide::RequestError> {
-    let chat_id = msg.chat.id;
-    let username = msg
-        .from()
-        .as_ref()
-        .and_then(|u| u.username.as_deref())
-        .unwrap_or("unknown");
-    println!(
-        "Telegram Bot: Received command from user '{}' in Chat ID: {:?}",
-        username, chat_id
-    );
-
-    {
-        let config = shared_config.read().await;
-        if !command_bypasses_allowlist(&cmd) && !is_telegram_chat_allowed(&config, chat_id.0)
-        {
-            drop(config);
-            return reject_unlinked_chat(&bot, chat_id).await;
-        }
-    }
-
-    // Reset reflection state if they send a command
+) -> Result<(), SignalError> {
+    println!("Signal: Received command from {} in {}", sender_aci, chat_id);
     {
         let mut s = states.write().await;
-        s.insert(chat_id, ConversationState::Idle);
+        s.insert(chat_id.clone(), ConversationState::Idle);
     }
-
     let config = shared_config.read().await.clone();
-
     match cmd {
-        Command::Help => {
-            bot.send_message(chat_id, Command::descriptions().to_string())
-                .await?;
-        }
-        Command::Food(args) => {
-            handle_food_log(&bot, chat_id, args, &pool, &llm, &gemini_client, &config).await?;
-        }
-        Command::Status => {
-            handle_status(&bot, chat_id, &pool, &config, &llm).await?;
-        }
-        Command::Plan(args) => {
-            handle_plan(&bot, chat_id, args, &pool, &config, &llm).await?;
-        }
-        Command::Brief => {
-            handle_brief(&bot, chat_id, &pool, &config).await?;
-        }
-        Command::Cal(args) => {
-            handle_cal(&bot, chat_id, args, &config).await?;
-        }
-        Command::Trends(args) => {
-            handle_trends(&bot, chat_id, args, &pool, &config, &llm).await?;
-        }
-        Command::Tasks(args) | Command::Task(args) => {
-            handle_tasks(&bot, chat_id, args, &pool, &config).await?;
-        }
-        Command::Memory(args) => {
-            handle_memory(&bot, chat_id, args, &pool, &config, &llm, &gemini_client).await?;
-        }
-        Command::Reflect => {
-            handle_reflect_trigger(&bot, chat_id, &pool, &llm, states, &config, 1).await?;
-        }
+        Command::Help => { send_signal(&bot, &chat_id, HELP_TEXT).await?; }
+        Command::Food(args) => { handle_food_log(&bot, &chat_id, args, &pool, &llm, &gemini_client, &config).await?; }
+        Command::Status => { handle_status(&bot, &chat_id, &pool, &config, &llm).await?; }
+        Command::Plan(args) => { handle_plan(&bot, &chat_id, args, &pool, &config, &llm).await?; }
+        Command::Brief => { handle_brief(&bot, &chat_id, &pool, &config).await?; }
+        Command::Cal(args) => { handle_cal(&bot, &chat_id, args, &config).await?; }
+        Command::Trends(args) => { handle_trends(&bot, &chat_id, args, &pool, &config, &llm).await?; }
+        Command::Tasks(args) | Command::Task(args) => { handle_tasks(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Memory(args) => { handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?; }
+        Command::Reflect => { handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, &config, 1).await?; }
         Command::Chat => {
-            bot.send_message(chat_id, format!("Current Chat ID: {}", chat_id))
-                .await?;
+            send_signal(&bot, &chat_id, format!("Current Signal conversation: {chat_id}")).await?;
         }
-        Command::Link(args) => {
-            handle_link(&bot, &msg, args, &shared_config).await?;
-        }
-        Command::Whoami => {
-            handle_whoami(&bot, chat_id, &config).await?;
-        }
+        Command::Link(args) => { handle_link(&bot, &chat_id, &sender_aci, args, &shared_config).await?; }
+        Command::Whoami => { handle_whoami(&bot, &chat_id, &sender_aci, &config).await?; }
         Command::Research(args) => {
-            let targets = if args.trim().is_empty() {
-                None
-            } else {
-                Some(args.as_str())
-            };
-            if let Err(e) =
-                run_and_log_stock_research(&bot, chat_id, &pool, &researcher, config.investment_philosophy.as_ref(), targets).await
-            {
-                eprintln!(
-                    "Telegram Bot: manual stock research trigger failed: {:?}",
-                    e
-                );
-                let _ = bot
-                    .send_message(chat_id, format!("❌ Stock research failed: {}", e))
-                    .await;
+            let targets = if args.trim().is_empty() { None } else { Some(args.as_str()) };
+            if let Err(e) = run_and_log_stock_research(&bot, &chat_id, &pool, &researcher, config.investment_philosophy.as_ref(), targets).await {
+                eprintln!("Signal: manual stock research trigger failed: {:?}", e);
+                let _ = send_signal(&bot, &chat_id, format!("Stock research failed: {}", e)).await;
             }
         }
         Command::Sync => {
-            if let Err(e) = sync_google_health_nutrition(&bot, chat_id, &pool, &gemini_client, &config).await {
-                eprintln!("Telegram Bot: manual Google Health sync failed: {:?}", e);
-                let _ = bot
-                    .send_message(chat_id, format!("❌ Google Health sync failed: {}", e))
-                    .await;
+            if let Err(e) = sync_google_health_nutrition(&bot, &chat_id, &pool, &gemini_client, &config).await {
+                eprintln!("Signal: manual Google Health sync failed: {:?}", e);
+                let _ = send_signal(&bot, &chat_id, format!("Google Health sync failed: {}", e)).await;
             }
         }
         Command::Login(args) => {
             let args_trimmed = args.trim();
             if args_trimmed.to_lowercase().starts_with("code") {
                 let rest = args_trimmed[4..].trim();
-                if let Err(e) = handle_manual_code(&bot, chat_id, rest, &config).await {
-                    eprintln!("Telegram Bot: manual code exchange failed: {:?}", e);
-                    let _ = bot.send_message(chat_id, format!("❌ Manual code exchange failed: {}", e)).await;
+                if let Err(e) = handle_manual_code(&bot, &chat_id, rest, &config).await {
+                    eprintln!("Signal: manual code exchange failed: {:?}", e);
+                    let _ = send_signal(&bot, &chat_id, format!("Manual code exchange failed: {}", e)).await;
                 }
             } else {
                 let lower = args_trimmed.to_lowercase();
                 let mut parts = lower.split_whitespace();
                 let service = parts.next().unwrap_or("");
                 if service == "fitbit" || service == "health" {
-                    let original_member = args_trimmed
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap_or("")
-                        .to_string();
-                    if let Err(e) =
-                        handle_login_google_health(&bot, chat_id, &original_member, &config).await
-                    {
-                        eprintln!("Telegram Bot: Google Health login initialization failed: {:?}", e);
-                        let _ = bot
-                            .send_message(chat_id, format!("❌ Google Health login failed: {}", e))
-                            .await;
+                    let original_member = args_trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
+                    if let Err(e) = handle_login_google_health(&bot, &chat_id, &original_member, &config).await {
+                        eprintln!("Signal: Google Health login initialization failed: {:?}", e);
+                        let _ = send_signal(&bot, &chat_id, format!("Google Health login failed: {}", e)).await;
                     }
                 } else if service == "gmail" || service == "google" {
-                    if let Err(e) = handle_login_google(&bot, chat_id).await {
-                        eprintln!(
-                            "Telegram Bot: Google/Gmail login initialization failed: {:?}",
-                            e
-                        );
-                        let _ = bot
-                            .send_message(chat_id, format!("❌ Google/Gmail login failed: {}", e))
-                            .await;
+                    if let Err(e) = handle_login_google(&bot, &chat_id).await {
+                        eprintln!("Signal: Google/Gmail login initialization failed: {:?}", e);
+                        let _ = send_signal(&bot, &chat_id, format!("Google/Gmail login failed: {}", e)).await;
                     }
                 } else if service == "calendar" {
-                    let member_id = parts.next().unwrap_or("").to_string();
-                    // Preserve original casing from args for member lookup
-                    let original_member = args_trimmed
-                        .split_whitespace()
-                        .nth(1)
-                        .unwrap_or("")
-                        .to_string();
-                    let member_id = if original_member.is_empty() {
-                        member_id
-                    } else {
-                        original_member
-                    };
-                    if let Err(e) = handle_login_calendar(&bot, chat_id, &member_id, &config).await {
-                        eprintln!("Telegram Bot: Calendar login initialization failed: {:?}", e);
-                        let _ = bot
-                            .send_message(chat_id, format!("❌ Calendar login failed: {}", e))
-                            .await;
+                    let original_member = args_trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
+                    if let Err(e) = handle_login_calendar(&bot, &chat_id, &original_member, &config).await {
+                        eprintln!("Signal: Calendar login initialization failed: {:?}", e);
+                        let _ = send_signal(&bot, &chat_id, format!("Calendar login failed: {}", e)).await;
                     }
                 } else {
-                    let _ = bot
-                        .send_message(
-                            chat_id,
-                            "⚠️ Invalid service. Usage: `/login health <member_id>`, `/login gmail`, `/login calendar <member_id>`, or `/login code ...`",
-                        )
-                        .parse_mode(teloxide::types::ParseMode::Markdown)
-                        .await;
+                    let _ = send_signal(
+                        &bot,
+                        &chat_id,
+                        "Invalid service. Usage: `/login health <member_id>`, `/login gmail`, `/login calendar <member_id>`, or `/login code ...`",
+                    ).await;
                 }
             }
         }
-        Command::Clearfood(args) => {
-            handle_clear_food(&bot, chat_id, args, &pool, &config).await?;
-        }
-        Command::Adjustfood(args) => {
-            handle_adjust_food(&bot, chat_id, args, &pool, &config).await?;
-        }
-        Command::Undofood(args) => {
-            handle_undo_food(&bot, chat_id, args, &pool, &config).await?;
-        }
-        Command::Networth => {
-            handle_networth(&bot, chat_id, &pool, &config).await?;
-        }
-        Command::Monthly(args) => {
-            handle_monthly(&bot, chat_id, args, &pool, &config).await?;
-        }
-        Command::Budget(args) => {
-            handle_budget(&bot, chat_id, args, &pool, &config).await?;
-        }
+        Command::Clearfood(args) => { handle_clear_food(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Adjustfood(args) => { handle_adjust_food(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Undofood(args) => { handle_undo_food(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Networth => { handle_networth(&bot, &chat_id, &pool, &config).await?; }
+        Command::Monthly(args) => { handle_monthly(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Budget(args) => { handle_budget(&bot, &chat_id, args, &pool, &config).await?; }
     }
-
     Ok(())
 }
 
 async fn handle_link(
     bot: &Bot,
-    msg: &Message,
+    chat_id: &ChatId,
+    sender_aci: &str,
     args: String,
     shared_config: &SharedConfig,
-) -> Result<(), teloxide::RequestError> {
-    let chat_id = msg.chat.id;
-    if !msg.chat.is_private() {
-        bot.send_message(
-            chat_id,
-            "⚠️ `/link` only works in a private chat with the bot (not groups).",
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
+) -> Result<(), SignalError> {
+    if !matches!(chat_id, SignalRecipient::Direct { .. }) {
+        send_signal(bot, chat_id, "⚠️ `/link` only works in a direct Signal conversation (not groups).").await?;
         return Ok(());
     }
-
     let member_tok = args.trim();
     if member_tok.is_empty() {
         let config = shared_config.read().await;
-        let members = config
-            .family
-            .members
-            .iter()
-            .map(|m| format!("- `{}` ({})", m.id, escape_md_basic(&m.name)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        bot.send_message(
-            chat_id,
-            format!(
-                "⚠️ Usage: `/link <member_id>`\n\nConfigured members:\n{}",
-                members
-            ),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .await?;
+        let members = config.family.members.iter().map(|m| format!("- `{}` ({})", m.id, m.name)).collect::<Vec<_>>().join("\n");
+        send_signal(bot, chat_id, format!("⚠️ Usage: `/link <member_id>`\n\nConfigured members:\n{members}")).await?;
         return Ok(());
     }
-
     let path = config_path();
-    match set_member_telegram_chat_id(&path, member_tok, chat_id.0) {
+    match set_member_signal_aci(&path, member_tok, sender_aci) {
         Ok(updated) => {
-            let member = updated
-                .family
-                .members
-                .iter()
-                .find(|m| m.id.eq_ignore_ascii_case(member_tok))
-                .cloned();
+            let member = updated.family.members.iter().find(|m| m.id.eq_ignore_ascii_case(member_tok)).cloned();
             {
                 let mut cfg = shared_config.write().await;
                 *cfg = updated;
             }
             if let Some(m) = member {
-                bot.send_message(
+                send_signal(
+                    bot,
                     chat_id,
                     format!(
-                        "✅ Linked this chat (`{}`) to *{}* (`{}`).\n\
-Food/tasks without a member id now default to you. \
-Use `/whoami` anytime.",
-                        chat_id, escape_md_basic(&m.name), m.id
+                        "✅ Linked this conversation (`{chat_id}`) to {} (`{}`).\nFood/tasks without a member id now default to you. Use `/whoami` anytime.",
+                        m.name, m.id
                     ),
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await?;
+                ).await?;
             }
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("❌ Failed to link chat: {}", e))
-                .await?;
+            send_signal(bot, chat_id, format!("❌ Failed to link conversation: {e}")).await?;
         }
     }
     Ok(())
@@ -1164,33 +658,26 @@ Use `/whoami` anytime.",
 
 async fn handle_whoami(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
+    sender_aci: &str,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
-    match member_for_telegram_chat(config, chat_id.0) {
+) -> Result<(), SignalError> {
+    match member_for_signal_aci(config, sender_aci) {
         Some(m) => {
-            bot.send_message(
-                chat_id,
-                format!(
+            send_signal(&bot, chat_id, format!(
                     "You are linked as *{}* (`{}`).\nChat id: `{}`",
-                    escape_md_basic(&m.name),
+                    (m.name),
                     m.id,
                     chat_id
-                ),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                ),)
             .await?;
         }
         None => {
-            bot.send_message(
-                chat_id,
-                format!(
+            send_signal(&bot, chat_id, format!(
                     "This chat (`{}`) is not linked to a family member.\n\
 Run `/link <member_id>` to claim it.",
                     chat_id
-                ),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                ),)
             .await?;
         }
     }
@@ -1199,13 +686,13 @@ Run `/link <member_id>` to claim it.",
 
 async fn handle_food_log(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let args = args.trim();
     if args.is_empty() {
         let members_list = config
@@ -1215,34 +702,25 @@ async fn handle_food_log(
             .map(|m| format!("- {} ({})", m.id, m.name))
             .collect::<Vec<String>>()
             .join("\n");
-        bot.send_message(
-            chat_id,
-            format!("Please provide a description, e.g. /food [member_id] <description>\n\nConfigured family members:\n{}", members_list)
-        ).await?;
+        send_signal(&bot, chat_id, format!("Please provide a description, e.g. /food [member_id] <description>\n\nConfigured family members:\n{}", members_list)).await?;
         return Ok(());
     }
 
     let (family_member_id, food_description) =
-        resolve_food_member_and_description(args, config, chat_id.0);
+        resolve_food_member_and_description(args, config, chat_id.lookup_aci());
     if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
         return Ok(());
     }
     if food_description.is_empty() {
-        bot.send_message(
-            chat_id,
-            format!(
+        send_signal(&bot, chat_id, format!(
                 "Please provide a food description after the member ID. E.g. /food {} salad",
                 family_member_id
-            ),
-        )
+            ),)
         .await?;
         return Ok(());
     }
 
-    bot.send_message(
-        chat_id,
-        format!("Got it — logging food for {}...", family_member_id),
-    )
+    send_signal(&bot, chat_id, format!("Got it — logging food for {}...", family_member_id),)
     .await?;
 
     // Let the LLM resolve relative days/times ("yesterday's dinner…") into YYYY-MM-DD / HH:MM.
@@ -1287,7 +765,7 @@ async fn handle_food_log(
 /// `food_description`); used to map lunch/snacks/dinner onto household windows.
 async fn log_food_for_member(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     gemini_client: &GeminiClient,
     config: &AppConfig,
@@ -1296,23 +774,20 @@ async fn log_food_for_member(
     food_date: Option<&str>,
     food_time: Option<&str>,
     timing_utterance: &str,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let food_time = effective_food_time(timing_utterance, food_time);
     let timing = resolve_food_log_timing(food_date, food_time.as_deref());
 
-    bot.send_message(
-        chat_id,
-        format!(
+    send_signal(&bot, chat_id, format!(
             "Estimating nutrition for {}… (usually under a minute)",
             family_member_id
-        ),
-    )
+        ),)
     .await?;
 
     let estimate = {
         let _nudge = ProgressNudge::spawn(
             bot.clone(),
-            chat_id,
+            chat_id.clone(),
             20,
             format!(
                 "Still estimating macros for {} — hang tight, this can take a bit…",
@@ -1341,7 +816,7 @@ async fn log_food_for_member(
         }
         Err(e) => {
             eprintln!("Gemini client error: {:?}", e);
-            bot.send_message(chat_id, format!("❌ Failed to estimate nutrition: {}", e))
+            send_signal(&bot, chat_id, format!("❌ Failed to estimate nutrition: {}", e))
                 .await?;
         }
     }
@@ -1349,24 +824,11 @@ async fn log_food_for_member(
     Ok(())
 }
 
-/// Keep Telegram's "typing…" indicator alive while `fut` runs (chat actions expire ~5s).
-/// Driven with `select!` in this task so cancellation/drop stops typing automatically.
-async fn with_typing_indicator<F, T>(bot: &Bot, chat_id: ChatId, fut: F) -> T
+async fn with_typing_indicator<F, T>(_bot: &Bot, _chat_id: &ChatId, fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    tokio::pin!(fut);
-    loop {
-        tokio::select! {
-            result = &mut fut => return result,
-            _ = async {
-                let _ = bot
-                    .send_chat_action(chat_id, teloxide::types::ChatAction::Typing)
-                    .await;
-                tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-            } => {}
-        }
-    }
+    fut.await
 }
 
 /// Background "still working…" nudge that aborts on drop (safe under handler cancellation).
@@ -1378,8 +840,8 @@ impl ProgressNudge {
     fn spawn(bot: Bot, chat_id: ChatId, delay_secs: u64, text: String) -> Self {
         let handle = tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-            if let Err(e) = bot.send_message(chat_id, text).await {
-                eprintln!("Telegram Bot: failed to send progress nudge: {:?}", e);
+            if let Err(e) = send_signal(&bot, &chat_id, text).await {
+                eprintln!("Signal: failed to send progress nudge: {:?}", e);
             }
         });
         Self {
@@ -1415,12 +877,6 @@ fn strip_leading_food_command(input: &str) -> &str {
     if rest.chars().next().is_some_and(char::is_whitespace) {
         return rest.trim();
     }
-    if let Some(after_at) = rest.strip_prefix('@') {
-        return after_at
-            .split_once(|c: char| c.is_whitespace())
-            .map(|(_, args)| args.trim())
-            .unwrap_or("");
-    }
     trimmed
 }
 
@@ -1429,7 +885,7 @@ fn strip_leading_food_command(input: &str) -> &str {
 fn resolve_food_member_and_description(
     args: &str,
     config: &AppConfig,
-    chat_id: i64,
+    chat_id: &str,
 ) -> (String, String) {
     let mut parts = args.splitn(2, |c: char| c.is_whitespace());
     let first_word = parts.next().unwrap_or("");
@@ -1448,7 +904,7 @@ fn resolve_food_member_and_description(
 }
 
 /// Resolve optional `[member_id]` arg; empty → linked/default member for this chat.
-fn resolve_optional_member_arg(args: &str, config: &AppConfig, chat_id: i64) -> String {
+fn resolve_optional_member_arg(args: &str, config: &AppConfig, chat_id: &str) -> String {
     let member_id = args.trim();
     if member_id.is_empty() {
         return default_member_id(config, chat_id).to_string();
@@ -1465,13 +921,13 @@ fn resolve_optional_member_arg(args: &str, config: &AppConfig, chat_id: i64) -> 
 /// Linked DMs may only mutate food for their own member. Returns `true` if blocked.
 async fn reject_foreign_food_mutation(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     config: &AppConfig,
     target_member_id: &str,
-) -> Result<bool, teloxide::RequestError> {
-    if let Err(msg) = ensure_food_mutation_allowed(config, chat_id.0, target_member_id) {
+) -> Result<bool, SignalError> {
+    if let Err(msg) = ensure_food_mutation_allowed(config, chat_id.lookup_aci(), target_member_id) {
         // Plain text: member ids must not go through Telegram Markdown parse mode.
-        bot.send_message(chat_id, msg).await?;
+        send_signal(&bot, chat_id, msg).await?;
         return Ok(true);
     }
     Ok(false)
@@ -1632,14 +1088,14 @@ async fn persist_food_log_and_tags(
 /// Insert food_log, update day totals, optionally push to Google Health, reply macros-first.
 async fn persist_food_estimation(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     family_member_id: &str,
     food_description: &str,
     est: &chotu_common::NutritionEstimation,
     timing: &chotu_common::FoodLogTiming,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let log_id = uuid::Uuid::new_v4().to_string();
     let log_ts = timing.timestamp;
     let date_str = timing.date.clone();
@@ -1662,7 +1118,7 @@ async fn persist_food_estimation(
     .await
     {
         eprintln!("Failed to persist food_log + tags + summary: {:?}", e);
-        bot.send_message(chat_id, "Database error saving food log.")
+        send_signal(&bot, chat_id, "Database error saving food log.")
             .await?;
         return Ok(());
     }
@@ -1788,8 +1244,7 @@ async fn persist_food_estimation(
         google_sync_note
     );
 
-    bot.send_message(chat_id, msg_text)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, msg_text)
         .await?;
 
     Ok(())
@@ -1797,12 +1252,12 @@ async fn persist_food_estimation(
 
 async fn handle_clear_food(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
-    let target_member_id = resolve_optional_member_arg(&args, config, chat_id.0);
+) -> Result<(), SignalError> {
+    let target_member_id = resolve_optional_member_arg(&args, config, chat_id.lookup_aci());
     if reject_foreign_food_mutation(bot, chat_id, config, &target_member_id).await? {
         return Ok(());
     }
@@ -1815,7 +1270,7 @@ async fn handle_clear_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to compute external nutrition base: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error reading today's summary.")
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.")
                 .await?;
             return Ok(());
         }
@@ -1849,7 +1304,7 @@ async fn handle_clear_food(
     .await
     {
         eprintln!("Failed to clear food_log + tags: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error clearing food logs.")
+        send_signal(&bot, chat_id, "❌ Database error clearing food logs.")
             .await?;
         return Ok(());
     }
@@ -1865,21 +1320,17 @@ async fn handle_clear_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to rebuild health summary after clear: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error resetting health summary.")
+            send_signal(&bot, chat_id, "❌ Database error resetting health summary.")
                 .await?;
             return Ok(());
         }
     };
 
-    bot.send_message(
-        chat_id,
-        format!(
+    send_signal(&bot, chat_id, format!(
             "🧹 *Today's Telegram food logs cleared* for *{}*.\n\
              Remaining (e.g. Google Health): {} kcal · {:.0}g P / {:.0}g C / {:.0}g F",
             target_member_id, rebuilt.calories, rebuilt.protein, rebuilt.carbs, rebuilt.fats
-        ),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
+        ),)
     .await?;
 
     Ok(())
@@ -1887,21 +1338,18 @@ async fn handle_clear_food(
 
 async fn handle_adjust_food(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.is_empty() {
-        bot.send_message(
-            chat_id,
-            "⚠️ Usage: `/adjustfood [member_id] <calories> <protein> <carbs> <fats>`"
-        ).await?;
+        send_signal(&bot, chat_id, "⚠️ Usage: `/adjustfood [member_id] <calories> <protein> <carbs> <fats>`").await?;
         return Ok(());
     }
 
-    let mut member_id = default_member_id(config, chat_id.0).to_string();
+    let mut member_id = default_member_id(config, chat_id.lookup_aci()).to_string();
     let mut offset = 0;
 
     // Check if first token matches a member ID
@@ -1919,14 +1367,11 @@ async fn handle_adjust_food(
 
     let remaining_tokens = &tokens[offset..];
     if remaining_tokens.len() < 4 {
-        bot.send_message(
-            chat_id,
-            format!(
+        send_signal(&bot, chat_id, format!(
                 "⚠️ Missing values. Usage: `/adjustfood [member_id] <calories> <protein> <carbs> <fats>`\n\
                  Example: `/adjustfood {} 2000 150 200 60`",
                 member_id
-            ),
-        )
+            ),)
         .await?;
         return Ok(());
     }
@@ -1934,7 +1379,7 @@ async fn handle_adjust_food(
     let calories: i32 = match remaining_tokens[0].parse() {
         Ok(val) => val,
         Err(_) => {
-            bot.send_message(chat_id, "❌ Invalid calories value. Must be an integer.").await?;
+            send_signal(&bot, chat_id, "❌ Invalid calories value. Must be an integer.").await?;
             return Ok(());
         }
     };
@@ -1942,7 +1387,7 @@ async fn handle_adjust_food(
     let protein: f64 = match remaining_tokens[1].parse() {
         Ok(val) => val,
         Err(_) => {
-            bot.send_message(chat_id, "❌ Invalid protein value. Must be a number.").await?;
+            send_signal(&bot, chat_id, "❌ Invalid protein value. Must be a number.").await?;
             return Ok(());
         }
     };
@@ -1950,7 +1395,7 @@ async fn handle_adjust_food(
     let carbs: f64 = match remaining_tokens[2].parse() {
         Ok(val) => val,
         Err(_) => {
-            bot.send_message(chat_id, "❌ Invalid carbs value. Must be a number.").await?;
+            send_signal(&bot, chat_id, "❌ Invalid carbs value. Must be a number.").await?;
             return Ok(());
         }
     };
@@ -1958,7 +1403,7 @@ async fn handle_adjust_food(
     let fats: f64 = match remaining_tokens[3].parse() {
         Ok(val) => val,
         Err(_) => {
-            bot.send_message(chat_id, "❌ Invalid fats value. Must be a number.").await?;
+            send_signal(&bot, chat_id, "❌ Invalid fats value. Must be a number.").await?;
             return Ok(());
         }
     };
@@ -1972,7 +1417,7 @@ async fn handle_adjust_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to compute external nutrition base: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error reading today's summary.")
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.")
                 .await?;
             return Ok(());
         }
@@ -2041,7 +1486,7 @@ async fn handle_adjust_food(
     .await
     {
         eprintln!("Failed to replace food_log + tags on adjust: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error adjusting food log.")
+        send_signal(&bot, chat_id, "❌ Database error adjusting food log.")
             .await?;
         return Ok(());
     }
@@ -2050,7 +1495,7 @@ async fn handle_adjust_food(
         health_coach::write_summary_nutrition(pool, &member_id, &date_str, &desired).await
     {
         eprintln!("Failed to adjust health summary: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error adjusting health summary.")
+        send_signal(&bot, chat_id, "❌ Database error adjusting health summary.")
             .await?;
         return Ok(());
     }
@@ -2064,8 +1509,7 @@ async fn handle_adjust_food(
         member_id, calories, protein, carbs, fats
     );
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, msg)
         .await?;
 
     Ok(())
@@ -2073,12 +1517,12 @@ async fn handle_adjust_food(
 
 async fn handle_undo_food(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
-    let target_member_id = resolve_optional_member_arg(&args, config, chat_id.0);
+) -> Result<(), SignalError> {
+    let target_member_id = resolve_optional_member_arg(&args, config, chat_id.lookup_aci());
     if reject_foreign_food_mutation(bot, chat_id, config, &target_member_id).await? {
         return Ok(());
     }
@@ -2092,7 +1536,7 @@ async fn handle_undo_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to compute external nutrition base: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error reading today's summary.")
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.")
                 .await?;
             return Ok(());
         }
@@ -2111,7 +1555,7 @@ async fn handle_undo_food(
         Ok(res) => res,
         Err(e) => {
             eprintln!("Failed to fetch last food log: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error retrieving last food entry.")
+            send_signal(&bot, chat_id, "❌ Database error retrieving last food entry.")
                 .await?;
             return Ok(());
         }
@@ -2120,14 +1564,10 @@ async fn handle_undo_food(
     let log_entry = match last_log {
         Some(entry) => entry,
         None => {
-            bot.send_message(
-                chat_id,
-                format!(
+            send_signal(&bot, chat_id, format!(
                     "⚠️ No food log entries found for *{}* today.",
                     target_member_id
-                ),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                ),)
             .await?;
             return Ok(());
         }
@@ -2161,7 +1601,7 @@ async fn handle_undo_food(
     .await
     {
         eprintln!("Failed to delete food_log + tags on undo: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error deleting food log entry.")
+        send_signal(&bot, chat_id, "❌ Database error deleting food log entry.")
             .await?;
         return Ok(());
     }
@@ -2177,7 +1617,7 @@ async fn handle_undo_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to rebuild summary after undo: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error updating today's summary.")
+            send_signal(&bot, chat_id, "❌ Database error updating today's summary.")
                 .await?;
             return Ok(());
         }
@@ -2200,8 +1640,7 @@ async fn handle_undo_food(
         rebuilt.fats
     );
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, msg)
         .await?;
 
     Ok(())
@@ -2219,11 +1658,11 @@ struct TaskListRow {
 
 async fn handle_tasks(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     let first = tokens.first().copied().unwrap_or("");
     let second = tokens.get(1).copied();
@@ -2251,12 +1690,8 @@ async fn handle_tasks(
                     mark_task_complete(bot, chat_id, pool, config, id).await
                 }
                 _ => {
-                    bot.send_message(
-                        chat_id,
-                        "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all` \
-                         (linked DM: yours + unassigned; household: add `confirm`)",
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    send_signal(&bot, chat_id, "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all` \
+                         (linked DM: yours + unassigned; household: add `confirm`)",)
                     .await?;
                     Ok(())
                 }
@@ -2279,11 +1714,7 @@ async fn handle_tasks(
                     snooze_task(bot, chat_id, pool, config, id, days).await
                 }
                 _ => {
-                    bot.send_message(
-                        chat_id,
-                        "⚠️ Usage: `/tasks snooze <id> [days]` (default 1 day)",
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    send_signal(&bot, chat_id, "⚠️ Usage: `/tasks snooze <id> [days]` (default 1 day)",)
                     .await?;
                     Ok(())
                 }
@@ -2308,25 +1739,17 @@ async fn handle_tasks(
                                 .map(|m| m.id.as_str())
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            bot.send_message(
-                                chat_id,
-                                format!(
+                            send_signal(&bot, chat_id, format!(
                                     "⚠️ Unknown member `{}`. Configured: {}",
                                     member_tok, members
-                                ),
-                            )
-                            .parse_mode(teloxide::types::ParseMode::Markdown)
+                                ),)
                             .await?;
                             Ok(())
                         }
                     }
                 }
                 _ => {
-                    bot.send_message(
-                        chat_id,
-                        "⚠️ Usage: `/tasks reassign <id> <member_id>`",
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                    send_signal(&bot, chat_id, "⚠️ Usage: `/tasks reassign <id> <member_id>`",)
                     .await?;
                     Ok(())
                 }
@@ -2395,7 +1818,7 @@ async fn handle_tasks(
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to list tasks: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error listing tasks.")
+            send_signal(&bot, chat_id, "❌ Database error listing tasks.")
                 .await?;
             return Ok(());
         }
@@ -2406,11 +1829,7 @@ async fn handle_tasks(
             .as_deref()
             .map(|m| format!(" for *{}*", m))
             .unwrap_or_default();
-        bot.send_message(
-            chat_id,
-            format!("✅ No *{}* tasks found{}.", label, scope),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, format!("✅ No *{}* tasks found{}.", label, scope),)
         .await?;
         return Ok(());
     }
@@ -2433,13 +1852,13 @@ async fn handle_tasks(
             .email_subject
             .as_deref()
             .filter(|s| !s.is_empty())
-            .map(|s| format!("\n    _{}_", escape_md_basic(&truncate_chars(s, 60))))
+            .map(|s| format!("\n    _{}_", (truncate_chars(s, 60))))
             .unwrap_or_default();
 
         msg.push_str(&format!(
             "• `{}` {} ({}){}{}{}\n",
             short_id,
-            escape_md_basic(&truncate_chars(&row.title, 80)),
+            (truncate_chars(&row.title, 80)),
             row.status,
             due,
             assignee,
@@ -2458,15 +1877,7 @@ async fn handle_tasks(
         );
     }
 
-    let mut send = bot
-        .send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown);
-    if !actionable.is_empty()
-        && (label == "open" || label == "open/snoozed" || label == "snoozed")
-    {
-        send = send.reply_markup(task_list_keyboard(&actionable));
-    }
-    send.await?;
+    send_signal(bot, chat_id, msg).await?;
 
     Ok(())
 }
@@ -2489,10 +1900,10 @@ fn looks_like_task_id_prefix(s: &str) -> bool {
 /// Resolve a unique task by id prefix. Sends Telegram errors on 0/ambiguous matches.
 async fn find_task_by_prefix(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     id_prefix: &str,
-) -> Result<Option<(String, String, String)>, teloxide::RequestError> {
+) -> Result<Option<(String, String, String)>, SignalError> {
     let pattern = format!("{}%", id_prefix);
     let matches: Vec<(String, String, String)> = match sqlx::query_as(
         "SELECT id, title, status FROM tasks WHERE id LIKE ? COLLATE NOCASE LIMIT 5",
@@ -2504,18 +1915,14 @@ async fn find_task_by_prefix(
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to look up task: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error looking up task.")
+            send_signal(&bot, chat_id, "❌ Database error looking up task.")
                 .await?;
             return Ok(None);
         }
     };
 
     if matches.is_empty() {
-        bot.send_message(
-            chat_id,
-            format!("⚠️ No task found starting with `{}`.", id_prefix),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, format!("⚠️ No task found starting with `{}`.", id_prefix),)
         .await?;
         return Ok(None);
     }
@@ -2534,8 +1941,7 @@ async fn find_task_by_prefix(
                 status
             ));
         }
-        bot.send_message(chat_id, msg)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, msg)
             .await?;
         return Ok(None);
     }
@@ -2545,39 +1951,35 @@ async fn find_task_by_prefix(
 
 async fn add_manual_task(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     args: &str,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
     let Some((member_id, title, due_raw)) = split_task_add_args(args, &member_ids) else {
-        bot.send_message(
-            chat_id,
-            "⚠️ Usage: `/tasks add [member] <title> [due|by <when>]`\n\
-             Examples: `/task change battery for fob by today 3 pm` · `/tasks add praj call dentist due tomorrow 15:00`",
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, "⚠️ Usage: `/tasks add [member] <title> [due|by <when>]`\n\
+             Examples: `/task change battery for fob by today 3 pm` · `/tasks add praj call dentist due tomorrow 15:00`",)
         .await?;
         return Ok(());
     };
 
-    let member_id = member_id.or_else(|| Some(default_member_id(config, chat_id.0).to_string()));
+    let member_id = member_id.or_else(|| Some(default_member_id(config, chat_id.lookup_aci()).to_string()));
     create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await
 }
 
 async fn create_manual_task(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     member_id: Option<String>,
     title: String,
     due_raw: Option<String>,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let title = title.trim().to_string();
     if title.is_empty() {
-        bot.send_message(chat_id, "⚠️ Task title cannot be empty.")
+        send_signal(&bot, chat_id, "⚠️ Task title cannot be empty.")
             .await?;
         return Ok(());
     }
@@ -2587,15 +1989,11 @@ async fn create_manual_task(
             Some(p) => {
                 if let Ok(due_dt) = chrono::DateTime::parse_from_rfc3339(&p.due_at) {
                     if due_dt.with_timezone(&chrono::Utc) <= chrono::Utc::now() {
-                        bot.send_message(
-                            chat_id,
-                            format!(
+                        send_signal(&bot, chat_id, format!(
                                 "⚠️ Due `{}` is already in the past. Try a future time \
                                  (e.g. `tomorrow 9am`, `friday 15:00`).",
-                                escape_md_basic(raw)
-                            ),
-                        )
-                        .parse_mode(teloxide::types::ParseMode::Markdown)
+                                (raw)
+                            ),)
                         .await?;
                         return Ok(());
                     }
@@ -2603,14 +2001,10 @@ async fn create_manual_task(
                 Some(p)
             }
             None => {
-                bot.send_message(
-                    chat_id,
-                    format!(
+                send_signal(&bot, chat_id, format!(
                         "⚠️ Couldn't parse due `{}`. Try `tomorrow 3pm`, `friday`, or `2026-08-10`.",
-                        escape_md_basic(raw)
-                    ),
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                        (raw)
+                    ),)
                 .await?;
                 return Ok(());
             }
@@ -2639,14 +2033,14 @@ async fn create_manual_task(
                                 {
                                     Ok(event_id) => {
                                         println!(
-                                            "Telegram Bot: scheduled task on calendar: {}",
+                                            "Signal: scheduled task on calendar: {}",
                                             event_id
                                         );
                                         calendar_event_id = Some(event_id);
                                     }
                                     Err(e) => {
                                         eprintln!(
-                                            "Telegram Bot: failed to schedule task on calendar: {:?}",
+                                            "Signal: failed to schedule task on calendar: {:?}",
                                             e
                                         );
                                         calendar_note = Some("calendar schedule failed");
@@ -2655,7 +2049,7 @@ async fn create_manual_task(
                             }
                             Err(e) => {
                                 eprintln!(
-                                    "Telegram Bot: invalid due_at for calendar: {:?}",
+                                    "Signal: invalid due_at for calendar: {:?}",
                                     e
                                 );
                                 calendar_note = Some("calendar schedule failed");
@@ -2691,7 +2085,7 @@ async fn create_manual_task(
     .await
     {
         eprintln!("Failed to create task: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error creating task.")
+        send_signal(&bot, chat_id, "❌ Database error creating task.")
             .await?;
         return Ok(());
     }
@@ -2700,7 +2094,7 @@ async fn create_manual_task(
     let mut msg = format!(
         "✅ Added task `{}`: _{}_",
         short_id,
-        escape_md_basic(&title)
+        (title)
     );
     if let Some(ref mid) = member_id {
         msg.push_str(&format!(" · @{}", mid));
@@ -2727,9 +2121,7 @@ async fn create_manual_task(
         msg.push_str(&format!(" · _{}_", note));
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
-        .reply_markup(task_action_keyboard(&id, &title))
+    send_signal(&bot, chat_id, msg)
         .await?;
 
     refresh_task_memory(pool, &id).await;
@@ -2789,34 +2181,26 @@ async fn poll_due_task_reminders(
             .unwrap_or_else(|| "now".to_string());
 
         let msg = format!(
-            "⏰ *Reminder*\n`{}` {}\n_Due {}_\n\
-             Tap below, or `/tasks complete {}` · `/tasks snooze {}`",
+            "Reminder\n`{}` {}\nDue {}\n{}",
             short_id,
-            escape_md_basic(&title),
-            escape_md_basic(&when),
-            short_id,
-            short_id
+            title,
+            when,
+            task_complete_snooze_help(&short_id)
         );
-        let keyboard = task_action_keyboard(&id, &title);
-
-        let targets: Vec<i64> = match assigned_to.as_deref() {
-            Some(mid) => match telegram_chat_for_member(config, mid) {
-                Some(cid) => vec![cid],
-                None => telegram_delivery_targets(config),
+        let targets: Vec<ChatId> = match assigned_to.as_deref() {
+            Some(mid) => match signal_aci_for_member(config, mid) {
+                Some(aci) => vec![SignalRecipient::Direct { aci }],
+                None => signal_delivery_targets(config),
             },
-            None => telegram_delivery_targets(config),
+            None => signal_delivery_targets(config),
         };
 
         let mut send_ok = false;
         for cid in &targets {
-            if let Err(e) = bot
-                .send_message(ChatId(*cid), msg.clone())
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .reply_markup(keyboard.clone())
-                .await
+            if let Err(e) = send_signal(bot, cid, msg.clone()).await
             {
                 eprintln!(
-                    "Telegram Bot: failed to send task reminder {} to {}: {:?}",
+                    "Signal: failed to send task reminder {} to {}: {:?}",
                     id, cid, e
                 );
             } else {
@@ -2825,7 +2209,7 @@ async fn poll_due_task_reminders(
         }
 
         if !send_ok {
-            eprintln!("Telegram Bot: failed to send task reminder {}: no delivery", id);
+            eprintln!("Signal: failed to send task reminder {}: no delivery", id);
             // Release claim so the next poll can retry.
             if let Err(reset_err) = sqlx::query(
                 "UPDATE tasks SET reminded_at = NULL, updated_at = ? WHERE id = ? AND reminded_at = ?",
@@ -2837,7 +2221,7 @@ async fn poll_due_task_reminders(
             .await
             {
                 eprintln!(
-                    "Telegram Bot: failed to release reminder claim for {}: {:?}",
+                    "Signal: failed to release reminder claim for {}: {:?}",
                     id, reset_err
                 );
             }
@@ -2847,13 +2231,96 @@ async fn poll_due_task_reminders(
     Ok(())
 }
 
+
+#[derive(Debug)]
+enum TaskMutateOutcome {
+    Done { title: String, already: bool },
+    Snoozed { title: String, due: String },
+    NotFound,
+    DbError,
+}
+
+async fn load_task_title_status(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Option<(String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String)>("SELECT title, status FROM tasks WHERE id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+}
+
+async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to load task {task_id}: {e:?}");
+            return TaskMutateOutcome::DbError;
+        }
+    };
+    let Some((title, status)) = row else {
+        return TaskMutateOutcome::NotFound;
+    };
+    if status == "done" {
+        return TaskMutateOutcome::Done { title, already: true };
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
+        .bind(&now)
+        .bind(task_id)
+        .execute(pool)
+        .await
+    {
+        eprintln!("Failed to mark task done: {e:?}");
+        return TaskMutateOutcome::DbError;
+    }
+    TaskMutateOutcome::Done { title, already: false }
+}
+
+async fn snooze_task_by_id(
+    pool: &SqlitePool,
+    task_id: &str,
+    days: i64,
+    config: &AppConfig,
+) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Failed to load task {task_id}: {e:?}");
+            return TaskMutateOutcome::DbError;
+        }
+    };
+    let Some((title, _)) = row else {
+        return TaskMutateOutcome::NotFound;
+    };
+    let due = (config.now_in_tz().date_naive() + chrono::Duration::days(days))
+        .format("%Y-%m-%d")
+        .to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let due_at = parse_due_phrase_tz(&due, config.resolved_tz()).map(|p| p.due_at);
+    if let Err(e) = sqlx::query(
+        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(&due)
+    .bind(due_at.as_deref())
+    .bind(&now)
+    .bind(task_id)
+    .execute(pool)
+    .await
+    {
+        eprintln!("Failed to snooze task: {e:?}");
+        return TaskMutateOutcome::DbError;
+    }
+    TaskMutateOutcome::Snoozed { title, due }
+}
+
 async fn mark_task_complete(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     id_prefix: &str,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let Some((id, _title, _status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
@@ -2861,23 +2328,22 @@ async fn mark_task_complete(
             match complete_task_by_id(pool, &id).await {
         TaskMutateOutcome::Done { title, already } => {
             let msg = if already {
-                format!("ℹ️ Task already done: _{}_", escape_md_basic(&title))
+                format!("ℹ️ Task already done: _{}_", (title))
             } else {
-                format!("✅ Marked done: _{}_", escape_md_basic(&title))
+                format!("✅ Marked done: _{}_", (title))
             };
             if !already {
                 sync_calendar_after_complete(pool, config, &id).await;
                 refresh_task_memory(pool, &id).await;
             }
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
         }
         TaskMutateOutcome::NotFound => {
-            bot.send_message(chat_id, "⚠️ Task not found.").await?;
+            send_signal(&bot, chat_id, "⚠️ Task not found.").await?;
         }
         TaskMutateOutcome::DbError => {
-            bot.send_message(chat_id, "❌ Database error updating task.")
+            send_signal(&bot, chat_id, "❌ Database error updating task.")
                 .await?;
         }
         TaskMutateOutcome::Snoozed { .. } => unreachable!(),
@@ -2891,12 +2357,12 @@ async fn mark_task_complete(
 /// Household / unlinked chats: preview unless `confirm` is true.
 async fn mark_all_tasks_complete(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     confirm: bool,
-) -> Result<(), teloxide::RequestError> {
-    let linked_member = member_for_telegram_chat(config, chat_id.0);
+) -> Result<(), SignalError> {
+    let linked_member = member_for_signal_aci(config, chat_id.lookup_aci());
     let assignee_filter = linked_member.map(|m| m.id.as_str());
 
     // Household wipe requires an explicit confirm step.
@@ -2905,13 +2371,13 @@ async fn mark_all_tasks_complete(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Failed to preview complete-all tasks: {:?}", e);
-                bot.send_message(chat_id, "❌ Database error listing tasks.")
+                send_signal(&bot, chat_id, "❌ Database error listing tasks.")
                     .await?;
                 return Ok(());
             }
         };
         if rows.is_empty() {
-            bot.send_message(chat_id, "✅ No open or snoozed tasks to complete.")
+            send_signal(&bot, chat_id, "✅ No open or snoozed tasks to complete.")
                 .await?;
             return Ok(());
         }
@@ -2928,15 +2394,14 @@ async fn mark_all_tasks_complete(
             }
             msg.push_str(&format!(
                 "• {}\n",
-                escape_md_basic(&truncate_chars(title, 80))
+                (truncate_chars(title, 80))
             ));
         }
         msg.push_str(
             "\nReply `/tasks complete all confirm` to proceed \
              (linked DMs only clear your tasks + unassigned).",
         );
-        bot.send_message(chat_id, msg)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, msg)
             .await?;
         return Ok(());
     }
@@ -2946,7 +2411,7 @@ async fn mark_all_tasks_complete(
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to mark all tasks done: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error updating tasks.")
+            send_signal(&bot, chat_id, "❌ Database error updating tasks.")
                 .await?;
             return Ok(());
         }
@@ -2958,7 +2423,7 @@ async fn mark_all_tasks_complete(
         } else {
             "✅ No open or snoozed tasks to complete."
         };
-        bot.send_message(chat_id, empty_msg).await?;
+        send_signal(&bot, chat_id, empty_msg).await?;
         return Ok(());
     }
 
@@ -2995,12 +2460,11 @@ async fn mark_all_tasks_complete(
         }
         msg.push_str(&format!(
             "• {}\n",
-            escape_md_basic(&truncate_chars(&row.title, 80))
+            (truncate_chars(&row.title, 80))
         ));
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, msg)
         .await?;
 
     for row in &rows {
@@ -3011,12 +2475,12 @@ async fn mark_all_tasks_complete(
 
 async fn snooze_task(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     id_prefix: &str,
     days: i64,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
@@ -3027,21 +2491,20 @@ async fn snooze_task(
             let mut msg = format!(
                 "😴 Snoozed until *{}*: _{}_",
                 due,
-                escape_md_basic(&title)
+                (title)
             );
             if let Some(note) = calendar_note {
                 msg.push_str(&format!(" · _{}_", note));
             }
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
             refresh_task_memory(pool, &id).await;
         }
         TaskMutateOutcome::NotFound => {
-            bot.send_message(chat_id, "⚠️ Task not found.").await?;
+            send_signal(&bot, chat_id, "⚠️ Task not found.").await?;
         }
         TaskMutateOutcome::DbError => {
-            bot.send_message(chat_id, "❌ Database error snoozing task.")
+            send_signal(&bot, chat_id, "❌ Database error snoozing task.")
                 .await?;
         }
         TaskMutateOutcome::Done { .. } => unreachable!(),
@@ -3065,7 +2528,7 @@ async fn load_task_calendar_link(pool: &SqlitePool, task_id: &str) -> Option<Tas
     .await
     .unwrap_or_else(|e| {
         eprintln!(
-            "Telegram Bot: failed to load calendar link for task {}: {:?}",
+            "Signal: failed to load calendar link for task {}: {:?}",
             task_id, e
         );
         None
@@ -3097,19 +2560,19 @@ async fn delete_linked_calendar_event(config: &AppConfig, link: &TaskCalendarLin
     };
     let Some(client) = calendar_client_for_assignee(config, link.assigned_to.as_deref()) else {
         eprintln!(
-            "Telegram Bot: skip calendar delete for event {} (no client for assignee {:?})",
+            "Signal: skip calendar delete for event {} (no client for assignee {:?})",
             event_id, link.assigned_to
         );
         return false;
     };
     match client.delete_event(event_id).await {
         Ok(()) => {
-            println!("Telegram Bot: deleted calendar event {}", event_id);
+            println!("Signal: deleted calendar event {}", event_id);
             true
         }
         Err(e) => {
             eprintln!(
-                "Telegram Bot: failed to delete calendar event {}: {:?}",
+                "Signal: failed to delete calendar event {}: {:?}",
                 event_id, e
             );
             false
@@ -3128,7 +2591,7 @@ async fn clear_task_calendar_event_id(pool: &SqlitePool, task_id: &str) {
     .await
     {
         eprintln!(
-            "Telegram Bot: failed to clear calendar_event_id for {}: {:?}",
+            "Signal: failed to clear calendar_event_id for {}: {:?}",
             task_id, e
         );
     }
@@ -3194,14 +2657,14 @@ async fn reschedule_linked_calendar_event(
     };
     let Some(client) = calendar_client_for_assignee(config, link.assigned_to.as_deref()) else {
         eprintln!(
-            "Telegram Bot: skip calendar reschedule for event {} (no client for assignee {:?})",
+            "Signal: skip calendar reschedule for event {} (no client for assignee {:?})",
             event_id, link.assigned_to
         );
         return CalendarRescheduleOutcome::Failed;
     };
     let Ok(due_dt) = chrono::DateTime::parse_from_rfc3339(due_at_rfc3339) else {
         eprintln!(
-            "Telegram Bot: invalid due_at for calendar reschedule: {}",
+            "Signal: invalid due_at for calendar reschedule: {}",
             due_at_rfc3339
         );
         return CalendarRescheduleOutcome::Failed;
@@ -3213,14 +2676,14 @@ async fn reschedule_linked_calendar_event(
     match reschedule_at(&client, event_id, start, duration).await {
         Ok(()) => {
             println!(
-                "Telegram Bot: rescheduled calendar event {} to {}",
+                "Signal: rescheduled calendar event {} to {}",
                 event_id, due_at_rfc3339
             );
             CalendarRescheduleOutcome::Updated
         }
         Err(chotu_common::CalendarError::Api { status: 404, .. }) => {
             eprintln!(
-                "Telegram Bot: calendar event {} missing on snooze; clearing stored id",
+                "Signal: calendar event {} missing on snooze; clearing stored id",
                 event_id
             );
             clear_task_calendar_event_id(pool, task_id).await;
@@ -3228,7 +2691,7 @@ async fn reschedule_linked_calendar_event(
         }
         Err(e) => {
             eprintln!(
-                "Telegram Bot: failed to reschedule calendar event {}: {:?}",
+                "Signal: failed to reschedule calendar event {}: {:?}",
                 event_id, e
             );
             CalendarRescheduleOutcome::Failed
@@ -3238,11 +2701,11 @@ async fn reschedule_linked_calendar_event(
 
 async fn reassign_task(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     id_prefix: &str,
     member_id: &str,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
@@ -3257,20 +2720,16 @@ async fn reassign_task(
             .await
     {
         eprintln!("Failed to reassign task: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error reassigning task.")
+        send_signal(&bot, chat_id, "❌ Database error reassigning task.")
             .await?;
         return Ok(());
     }
 
-    bot.send_message(
-        chat_id,
-        format!(
+    send_signal(&bot, chat_id, format!(
             "👤 Assigned to *{}*: _{}_",
             member_id,
-            escape_md_basic(&title)
-        ),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
+            (title)
+        ),)
     .await?;
 
     refresh_task_memory(pool, &id).await;
@@ -3279,20 +2738,16 @@ async fn reassign_task(
 
 async fn reopen_task(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     id_prefix: &str,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
         return Ok(());
     };
 
     if status == "open" {
-        bot.send_message(
-            chat_id,
-            format!("ℹ️ Already open: _{}_", escape_md_basic(&title)),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, format!("ℹ️ Already open: _{}_", (title)),)
         .await?;
         return Ok(());
     }
@@ -3305,16 +2760,12 @@ async fn reopen_task(
         .await
     {
         eprintln!("Failed to reopen task: {:?}", e);
-        bot.send_message(chat_id, "❌ Database error reopening task.")
+        send_signal(&bot, chat_id, "❌ Database error reopening task.")
             .await?;
         return Ok(());
     }
 
-    bot.send_message(
-        chat_id,
-        format!("📂 Reopened: _{}_", escape_md_basic(&title)),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, format!("📂 Reopened: _{}_", (title)),)
     .await?;
 
     refresh_task_memory(pool, &id).await;
@@ -3331,34 +2782,24 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
-fn escape_md_basic(s: &str) -> String {
-    s.replace('_', "\\_")
-        .replace('*', "\\*")
-        .replace('`', "\\`")
-        .replace('[', "\\[")
-}
-
 async fn handle_trends(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
     llm: &ChotuLlm,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let days = args
         .trim()
         .parse::<i64>()
         .unwrap_or(7)
         .clamp(2, 90);
 
-    bot.send_message(
-        chat_id,
-        format!("📈 Building nutrition trends for the last {} days...", days),
-    )
+    send_signal(&bot, chat_id, format!("📈 Building nutrition trends for the last {} days...", days),)
     .await?;
 
-    let only_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    let only_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     match health_coach::build_nutrition_trend_reports(
         pool,
         config,
@@ -3370,23 +2811,18 @@ async fn handle_trends(
     {
         Ok(reports) => {
             if reports.is_empty() {
-                bot.send_message(
-                    chat_id,
-                    "_No trends to show for your linked member in this window._",
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, "_No trends to show for your linked member in this window._",)
                 .await?;
             } else {
                 for report in reports {
-                    bot.send_message(chat_id, report)
-                        .parse_mode(teloxide::types::ParseMode::Markdown)
+                    send_signal(&bot, chat_id, report)
                         .await?;
                 }
             }
         }
         Err(e) => {
             eprintln!("Trends query error: {:?}", e);
-            bot.send_message(chat_id, format!("❌ Failed to build trends: {}", e))
+            send_signal(&bot, chat_id, format!("❌ Failed to build trends: {}", e))
                 .await?;
         }
     }
@@ -3396,45 +2832,40 @@ async fn handle_trends(
 
 async fn handle_brief(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
-    bot.send_message(chat_id, "☀️ Building morning brief...")
+) -> Result<(), SignalError> {
+    send_signal(&bot, chat_id, "☀️ Building morning brief...")
         .await?;
 
     // Linked DMs get private calendar/tasks/nutrition/training; household chat stays family-wide.
-    let for_member = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
-    bot.send_message(chat_id, report)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, report)
         .await?;
     Ok(())
 }
 
 async fn handle_plan(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
     llm: &ChotuLlm,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let regenerate = matches!(
         args.trim().to_lowercase().as_str(),
         "new" | "regen" | "regenerate" | "refresh" | "redo"
     );
     if !args.trim().is_empty() && !regenerate {
-        bot.send_message(
-            chat_id,
-            "Usage: `/plan` (show this week) or `/plan new` (regenerate).",
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, "Usage: `/plan` (show this week) or `/plan new` (regenerate).",)
         .await?;
         return Ok(());
     }
 
-    let member_id = default_member_id(config, chat_id.0).to_string();
+    let member_id = default_member_id(config, chat_id.lookup_aci()).to_string();
     let member = config
         .family
         .members
@@ -3445,15 +2876,11 @@ async fn handle_plan(
         .map(|g| g.is_empty())
         .unwrap_or(true)
     {
-        bot.send_message(
-            chat_id,
-            format!(
+        send_signal(&bot, chat_id, format!(
                 "⚠️ No `fitness_goals` for *{}* in config.yaml yet.\n\
                  Add intent / target_date / sessions_per_week, then try `/plan` again.",
                 member_id
-            ),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+            ),)
         .await?;
         return Ok(());
     }
@@ -3488,21 +2915,17 @@ async fn handle_plan(
                 msg.push_str(&progress);
                 msg.push('\n');
             }
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
             return Ok(());
         }
     }
 
-    bot.send_message(
-        chat_id,
-        if regenerate {
+    send_signal(&bot, chat_id, if regenerate {
             "🏋️ Regenerating this week's training plan (local Ollama)…"
         } else {
             "🏋️ Building this week's training plan (local Ollama)…"
-        },
-    )
+        },)
     .await?;
 
     match health_coach::generate_and_store_weekly_plan(pool, llm, config, &member_id, &week_start)
@@ -3538,13 +2961,12 @@ async fn handle_plan(
                 msg.push_str(&progress);
                 msg.push('\n');
             }
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
         }
         Err(e) => {
             eprintln!("Training plan generation failed: {:?}", e);
-            bot.send_message(chat_id, format!("❌ Could not build plan: {}", e))
+            send_signal(&bot, chat_id, format!("❌ Could not build plan: {}", e))
                 .await?;
         }
     }
@@ -3553,10 +2975,10 @@ async fn handle_plan(
 
 async fn handle_cal(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let trimmed = args.trim().to_lowercase();
     let window = if trimmed.is_empty()
         || trimmed == "today"
@@ -3570,11 +2992,7 @@ async fn handle_cal(
     {
         CalendarWindow::parse(&trimmed)
     } else {
-        bot.send_message(
-            chat_id,
-            "⚠️ Usage: `/cal [today|tomorrow|week]`",
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, "⚠️ Usage: `/cal [today|tomorrow|week]`",)
         .await?;
         return Ok(());
     };
@@ -3582,36 +3000,31 @@ async fn handle_cal(
     let report = compose_calendar_agenda(
         config,
         window,
-        member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str()),
+        member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str()),
     )
     .await;
-    bot.send_message(chat_id, report)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, report)
         .await?;
     Ok(())
 }
 
 async fn handle_memory(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let args = args.trim();
     if args.is_empty() {
-        bot.send_message(
-            chat_id,
-            concat!(
+        send_signal(&bot, chat_id, concat!(
                 "Usage: `/memory <question>`\n",
                 "Household chat searches journals, digests, personal references, and tasks.\n",
                 "Linked DMs search your journals and tasks (including unassigned), not digests or personal references.\n",
                 "Or `/memory reindex` to rebuild the embedding index.",
-            ),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+            ),)
         .await?;
         return Ok(());
     }
@@ -3619,65 +3032,52 @@ async fn handle_memory(
     let index = MemoryIndex::from_env();
 
     if args.eq_ignore_ascii_case("reindex") {
-        bot.send_message(chat_id, "🧠 Rebuilding memory index (this may take a while)...")
+        send_signal(&bot, chat_id, "🧠 Rebuilding memory index (this may take a while)...")
             .await?;
         match index.reindex_all(pool, true).await {
             Ok(stats) => {
-                bot.send_message(
-                    chat_id,
-                    format!(
+                send_signal(&bot, chat_id, format!(
                         "✅ Memory reindex complete.\n• upserted: {}\n• skipped: {}\n• deleted: {}\n• errors: {}",
                         stats.upserted, stats.skipped, stats.deleted, stats.errors
-                    ),
-                )
+                    ),)
                 .await?;
             }
             Err(e) => {
                 eprintln!("Memory reindex failed: {:?}", e);
-                bot.send_message(chat_id, format!("❌ Memory reindex failed: {}", e))
+                send_signal(&bot, chat_id, format!("❌ Memory reindex failed: {}", e))
                     .await?;
             }
         }
         return Ok(());
     }
 
-    bot.send_message(chat_id, "🧠 Searching memory...")
+    send_signal(&bot, chat_id, "🧠 Searching memory...")
         .await?;
 
-    let for_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.as_str());
+    let for_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     let hits = match index.search(pool, args, None, for_member_id).await {
         Ok(h) => h,
         Err(e) => {
             eprintln!("Memory search failed: {:?}", e);
-            bot.send_message(
-                chat_id,
-                format!(
+            send_signal(&bot, chat_id, format!(
                     "❌ Memory search failed: {}.\nTip: run `/memory reindex` after `ollama pull nomic-embed-text`.",
                     e
-                ),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                ),)
             .await?;
             return Ok(());
         }
     };
 
     if hits.is_empty() {
-        bot.send_message(
-            chat_id,
-            "I couldn't find anything relevant in journals, digests, personal references, or tasks.",
-        )
+        send_signal(&bot, chat_id, "I couldn't find anything relevant in journals, digests, personal references, or tasks.",)
         .await?;
         return Ok(());
     }
 
-    bot.send_message(
-        chat_id,
-        format!(
+    send_signal(&bot, chat_id, format!(
             "📚 Found {} matches — drafting with local Ollama (usually ~10–30s; times out at 45s)…",
             hits.len()
-        ),
-    )
+        ),)
     .await?;
 
     // Prefer local Ollama (same model as email/intent); Gemini only if Ollama fails.
@@ -3689,8 +3089,7 @@ async fn handle_memory(
         }
     };
 
-    bot.send_message(chat_id, reply)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, reply)
         .await?;
     Ok(())
 }
@@ -3741,11 +3140,11 @@ async fn refresh_task_memory(pool: &SqlitePool, task_id: &str) {
 
 async fn handle_status(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
     llm: &ChotuLlm,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     // Query daily financials and health summaries
@@ -3753,7 +3152,7 @@ async fn handle_status(
         Ok(data) => data,
         Err(e) => {
             eprintln!("Status query error: {:?}", e);
-            bot.send_message(chat_id, "Failed to retrieve today's logs from database.")
+            send_signal(&bot, chat_id, "Failed to retrieve today's logs from database.")
                 .await?;
             return Ok(());
         }
@@ -3779,13 +3178,12 @@ async fn handle_status(
             ));
         }
     }
-    bot.send_message(chat_id, finance_report)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, finance_report)
         .await?;
 
     // 2. Build per-member health reports, then coach tips in parallel.
     // Linked personal DMs only see their own health/fitness (goals stay private).
-    let status_member_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.clone());
+    let status_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.clone());
     let mut pending: Vec<(String, Option<health_coach::NutritionCoachContext>)> = Vec::new();
 
     for h in &healths {
@@ -4105,8 +3503,7 @@ async fn handle_status(
                 report.push('\n');
             }
         }
-        bot.send_message(chat_id, report)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, report)
             .await?;
     }
 
@@ -4115,10 +3512,10 @@ async fn handle_status(
 
 async fn handle_networth(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let has_holdings: bool =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM portfolio_holdings")
             .fetch_one(pool)
@@ -4126,18 +3523,17 @@ async fn handle_networth(
             .unwrap_or(0)
             > 0;
     if has_holdings {
-        bot.send_message(chat_id, "🔍 Fetching live quotes via Yahoo Finance...")
+        send_signal(&bot, chat_id, "🔍 Fetching live quotes via Yahoo Finance...")
             .await?;
     }
 
     match build_networth_summary(pool, config).await {
         Ok(msg) => {
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("❌ {}", e)).await?;
+            send_signal(&bot, chat_id, format!("❌ {}", e)).await?;
         }
     }
 
@@ -4333,17 +3729,17 @@ fn holding_values_in_base(
 
 async fn handle_monthly(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let date_str = args.trim().to_string();
     let target_month = if date_str.is_empty() {
         chrono::Local::now().format("%Y-%m").to_string()
     } else {
         if date_str.len() != 7 || !date_str.contains('-') {
-            bot.send_message(chat_id, "⚠️ Invalid format. Usage: `/monthly [YYYY-MM]` (e.g. `/monthly 2026-06`)").await?;
+            send_signal(&bot, chat_id, "⚠️ Invalid format. Usage: `/monthly [YYYY-MM]` (e.g. `/monthly 2026-06`)").await?;
             return Ok(());
         }
         date_str
@@ -4362,14 +3758,13 @@ async fn handle_monthly(
         Ok(res) => res,
         Err(e) => {
             eprintln!("Failed to fetch monthly transactions: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error retrieving monthly ledger.").await?;
+            send_signal(&bot, chat_id, "❌ Database error retrieving monthly ledger.").await?;
             return Ok(());
         }
     };
 
     if entries.is_empty() {
-        bot.send_message(chat_id, format!("📅 *No transactions found for {}*.", target_month))
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+        send_signal(&bot, chat_id, format!("📅 *No transactions found for {}*.", target_month))
             .await?;
         return Ok(());
     }
@@ -4454,8 +3849,7 @@ async fn handle_monthly(
         }
     }
 
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, msg)
         .await?;
 
     Ok(())
@@ -4463,11 +3857,11 @@ async fn handle_monthly(
 
 async fn handle_budget(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
         return send_budget_progress(bot, chat_id, pool, config).await;
@@ -4480,51 +3874,42 @@ async fn handle_budget(
             let category = parts.next().unwrap_or("").trim();
             let amount_raw = parts.next().unwrap_or("").trim();
             if category.is_empty() || amount_raw.is_empty() {
-                bot.send_message(
-                    chat_id,
-                    "⚠️ Usage: `/budget set <Category> <amount>` (e.g. `/budget set Food 800`)",
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, "⚠️ Usage: `/budget set <Category> <amount>` (e.g. `/budget set Food 800`)",)
                 .await?;
                 return Ok(());
             }
             let Ok(amount) = amount_raw.replace(',', "").parse::<f64>() else {
-                bot.send_message(chat_id, "⚠️ Amount must be a number (e.g. `800`).")
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, "⚠️ Amount must be a number (e.g. `800`).")
                     .await?;
                 return Ok(());
             };
             if amount <= 0.0 {
-                bot.send_message(chat_id, "⚠️ Amount must be greater than zero.")
+                send_signal(&bot, chat_id, "⚠️ Amount must be greater than zero.")
                     .await?;
                 return Ok(());
             }
             let display = display_category(category);
             if display.is_empty() || display.to_lowercase() == "income" {
-                bot.send_message(chat_id, "⚠️ Invalid category name.")
+                send_signal(&bot, chat_id, "⚠️ Invalid category name.")
                     .await?;
                 return Ok(());
             }
             match set_budget_override(pool, &display, amount).await {
                 Ok(()) => {
                     let base = config.currency();
-                    bot.send_message(
-                        chat_id,
-                        format!(
+                    send_signal(&bot, chat_id, format!(
                             "✅ Budget set: *{}* → ${:.0} {} / month\n\n{}",
-                            escape_md_basic(&display),
+                            (display),
                             amount,
                             base,
                             "_Telegram override (wins over config.yaml)._"
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                        ),)
                     .await?;
                     send_budget_progress(bot, chat_id, pool, config).await?;
                 }
                 Err(e) => {
                     eprintln!("Failed to set budget override: {:?}", e);
-                    bot.send_message(chat_id, "❌ Failed to save budget override.")
+                    send_signal(&bot, chat_id, "❌ Failed to save budget override.")
                         .await?;
                 }
             }
@@ -4532,54 +3917,38 @@ async fn handle_budget(
         "clear" => {
             let category = parts.next().unwrap_or("").trim();
             if category.is_empty() {
-                bot.send_message(
-                    chat_id,
-                    "⚠️ Usage: `/budget clear <Category>` (e.g. `/budget clear Entertainment`)",
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, "⚠️ Usage: `/budget clear <Category>` (e.g. `/budget clear Entertainment`)",)
                 .await?;
                 return Ok(());
             }
             let display = display_category(category);
             match clear_budget_override(pool, &display).await {
                 Ok(true) => {
-                    bot.send_message(
-                        chat_id,
-                        format!(
+                    send_signal(&bot, chat_id, format!(
                             "✅ Cleared Telegram override for *{}* (falls back to config.yaml if set).",
-                            escape_md_basic(&display)
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                            (display)
+                        ),)
                     .await?;
                     send_budget_progress(bot, chat_id, pool, config).await?;
                 }
                 Ok(false) => {
-                    bot.send_message(
-                        chat_id,
-                        format!(
+                    send_signal(&bot, chat_id, format!(
                             "ℹ️ No Telegram override found for *{}*. YAML budgets are unchanged.",
-                            escape_md_basic(&display)
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                            (display)
+                        ),)
                     .await?;
                 }
                 Err(e) => {
                     eprintln!("Failed to clear budget override: {:?}", e);
-                    bot.send_message(chat_id, "❌ Failed to clear budget override.")
+                    send_signal(&bot, chat_id, "❌ Failed to clear budget override.")
                         .await?;
                 }
             }
         }
         _ => {
-            bot.send_message(
-                chat_id,
-                "⚠️ Usage:\n• `/budget` — this month's progress\n\
+            send_signal(&bot, chat_id, "⚠️ Usage:\n• `/budget` — this month's progress\n\
                  • `/budget set <Category> <amount>`\n\
-                 • `/budget clear <Category>`",
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                 • `/budget clear <Category>`",)
             .await?;
         }
     }
@@ -4588,22 +3957,21 @@ async fn handle_budget(
 
 async fn send_budget_progress(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let month = current_budget_month();
     let base = config.currency();
     match compute_budget_progress(pool, config, &month).await {
         Ok(rows) => {
             let msg = format_budget_progress_markdown(&month, base, &rows);
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
         }
         Err(e) => {
             eprintln!("Failed to compute budget progress: {:?}", e);
-            bot.send_message(chat_id, "❌ Database error retrieving budgets.")
+            send_signal(&bot, chat_id, "❌ Database error retrieving budgets.")
                 .await?;
         }
     }
@@ -4614,13 +3982,13 @@ async fn poll_spend_budget_alerts(
     bot: &Bot,
     pool: &SqlitePool,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let month = current_budget_month();
     let base = config.currency();
     let alerts = match pending_budget_alerts(pool, config, &month).await {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("Telegram Bot: pending_budget_alerts failed: {:?}", e);
+            eprintln!("Signal: pending_budget_alerts failed: {:?}", e);
             return Ok(());
         }
     };
@@ -4636,13 +4004,13 @@ async fn poll_spend_budget_alerts(
         msg.push_str(&alert.format_markdown(base));
     }
     println!(
-        "Telegram Bot: Pushing {} spend budget alert(s) for {}",
+        "Signal: Pushing {} spend budget alert(s) for {}",
         alerts.len(),
         month
     );
     if !send_household(bot, config, msg).await {
         eprintln!(
-            "Telegram Bot: spend budget alerts not delivered; will retry on next poll"
+            "Signal: spend budget alerts not delivered; will retry on next poll"
         );
         return Ok(());
     }
@@ -4652,7 +4020,7 @@ async fn poll_spend_budget_alerts(
             mark_budget_alert_sent(pool, &month, &alert.category, alert.threshold).await
         {
             eprintln!(
-                "Telegram Bot: failed to mark budget alert sent ({}/{}): {:?}",
+                "Signal: failed to mark budget alert sent ({}/{}): {:?}",
                 alert.category, alert.threshold, e
             );
         }
@@ -4662,20 +4030,16 @@ async fn poll_spend_budget_alerts(
 
 async fn handle_reflect_trigger(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     llm: &ChotuLlm,
     states: StateMap,
     config: &AppConfig,
     prompt_attempts: u32,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    let ping = bot
-        .send_message(
-            chat_id,
-            "Querying daily metrics and generating evening reflection prompt via local Ollama...",
-        )
+    let ping = send_signal(&bot, chat_id, "Querying daily metrics and generating evening reflection prompt via local Ollama...",)
         .await;
     // Scheduled runs ignore a failed status ping so we can still deliver the prompt.
     // Interactive `/reflect` still surfaces the send error.
@@ -4727,7 +4091,7 @@ async fn handle_reflect_trigger(
 
             let mut s = states.write().await;
             s.insert(
-                chat_id,
+                chat_id.clone(),
                 ConversationState::WaitingForReflection {
                     date: date_str,
                     prompt,
@@ -4752,70 +4116,48 @@ async fn handle_reflect_trigger(
 
 async fn handle_message(
     bot: Bot,
-    msg: Message,
+    chat_id: ChatId,
+    sender_aci: String,
+    inbound: SignalInbound,
     pool: SqlitePool,
     llm: ChotuLlm,
     gemini_client: GeminiClient,
     states: StateMap,
     shared_config: SharedConfig,
-) -> Result<(), teloxide::RequestError> {
-    let chat_id = msg.chat.id;
-    let username = msg
-        .from()
-        .as_ref()
-        .and_then(|u| u.username.as_deref())
-        .unwrap_or("unknown");
-    let text = msg.text().unwrap_or("");
-    println!(
-        "Telegram Bot: Received message from user '{}' in Chat ID: {:?}. Content: {:?}",
-        username, chat_id, text
-    );
-
+) -> Result<(), SignalError> {
+    let text = inbound.text.clone().unwrap_or_default();
+    println!("Signal: Received message from {} in {}. Content: {:?}", sender_aci, chat_id, text);
     let config = shared_config.read().await.clone();
-    if !is_telegram_chat_allowed(&config, chat_id.0) {
-        return reject_unlinked_chat(&bot, chat_id).await;
-    }
 
-    // Check if the message is a reply to a previous bot notification
-    if let Some(reply_to_msg) = msg.reply_to_message() {
+    if let Some(quote_timestamp) = inbound.quote_timestamp {
         let reply_text = text.trim().to_lowercase();
-        let is_unactionable_cue = reply_text == "not useful"
-            || reply_text == "unactionable"
-            || reply_text == "ignore"
-            || reply_text == "not worth it"
-            || reply_text == "delete"
-            || reply_text == "trash"
-            || reply_text == "useless"
-            || reply_text.contains("not useful")
-            || reply_text.contains("unactionable")
-            || reply_text.contains("ignore")
-            || reply_text.contains("not worth")
-            || reply_text.contains("useless");
-
+        let is_unactionable_cue = [
+            "not useful", "unactionable", "ignore", "not worth it", "delete", "trash", "useless",
+        ].iter().any(|cue| reply_text == *cue || reply_text.contains(cue) || reply_text.contains("not worth"));
         if is_unactionable_cue {
-            let replied_msg_id = reply_to_msg.id.0;
+            let (kind, recipient_id) = match &chat_id {
+                SignalRecipient::Direct { aci } => ("direct", aci.as_str()),
+                SignalRecipient::Group { group_id } => ("group", group_id.as_str()),
+            };
             let task_opt: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-                "SELECT title, email_sender, email_subject, id FROM tasks WHERE telegram_message_id = ?"
+                "SELECT t.title, t.email_sender, t.email_subject, t.id \
+                 FROM tasks t \
+                 JOIN task_signal_messages m ON m.task_id = t.id \
+                 WHERE m.recipient_kind = ? AND m.recipient_id = ? AND m.message_timestamp = ?"
             )
-            .bind(replied_msg_id)
+            .bind(kind)
+            .bind(recipient_id)
+            .bind(quote_timestamp)
             .fetch_optional(&pool)
             .await
             .ok()
             .flatten();
-
             if let Some((title, email_sender, email_subject, task_id)) = task_opt {
-                println!("Telegram Bot: Marking task as ignored and recording feedback for task: {}", title);
-
-                sqlx::query("UPDATE tasks SET status = 'ignored' WHERE id = ?")
-                    .bind(&task_id)
-                    .execute(&pool)
-                    .await
-                    .ok();
-
+                println!("Signal: Marking task as ignored and recording feedback for task: {}", title);
+                sqlx::query("UPDATE tasks SET status = 'ignored' WHERE id = ?").bind(&task_id).execute(&pool).await.ok();
                 let feedback_id = uuid::Uuid::new_v4().to_string();
                 let sender = email_sender.unwrap_or_else(|| "Unknown".to_string());
                 let subject = email_subject.unwrap_or_else(|| "No Subject".to_string());
-
                 sqlx::query(
                     "INSERT INTO unactionable_emails_feedback (id, sender, subject, task_description) VALUES (?, ?, ?, ?)"
                 )
@@ -4826,204 +4168,122 @@ async fn handle_message(
                 .execute(&pool)
                 .await
                 .ok();
-
-                bot.send_message(
-                    chat_id,
-                    format!("🗑️ Got it! Marked the task \"{}\" as unactionable. Similar emails will be filtered out in the future.", title)
-                ).await?;
+                send_signal(&bot, &chat_id, format!("Got it! Marked the task \"{title}\" as unactionable. Similar emails will be filtered out in the future.")).await?;
                 return Ok(());
             }
         }
     }
 
-    // Check if waiting for reflection
     let active_state = {
         let s = states.read().await;
         s.get(&chat_id).cloned()
     };
 
     if let Some(ConversationState::WaitingForReflection { date, prompt }) = active_state {
-        // Photos have no `text()` (captions don't count). Don't treat them as an
-        // empty journal reply — that's the food-photo path, including captions
-        // like `/food pray`. Slash commands still cancel via `handle_command`.
-        if msg.photo().is_some() {
-            handle_food_photo(&bot, chat_id, &msg, &pool, &llm, &gemini_client, &config)
-                .await?;
-            bot.send_message(
-                chat_id,
-                "Evening reflection is still open — type your journal reply, or send a command to cancel.",
-            )
-            .await?;
+        if inbound.attachments.iter().any(|a| a.content_type.starts_with("image/")) {
+            handle_food_photo(&bot, &chat_id, &inbound, &pool, &llm, &gemini_client, &config).await?;
+            send_signal(&bot, &chat_id, "Evening reflection is still open — type your journal reply, or send a command to cancel.").await?;
             return Ok(());
         }
-
-        let response_text = msg.text().unwrap_or("").trim();
+        let response_text = text.trim();
         if response_text.is_empty() {
-            bot.send_message(chat_id, "Reflection text cannot be empty. Please type your reflection or send a command to cancel.").await?;
+            send_signal(&bot, &chat_id, "Reflection text cannot be empty. Please type your reflection or send a command to cancel.").await?;
             return Ok(());
         }
-
-        bot.send_message(chat_id, "Saving reflection entry to your local journal...")
-            .await?;
-
-        // Query day data again to write in YAML
+        send_signal(&bot, &chat_id, "Saving reflection entry to your local journal...").await?;
         let (txs, healths) = match crate::reflection::get_daily_data(&pool, &date, &config).await {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Failed to query daily data during save: {:?}", e);
-                bot.send_message(
-                    chat_id,
-                    "Failed to retrieve today's logs to compile journal header.",
-                )
-                .await?;
+                send_signal(&bot, &chat_id, "Failed to retrieve today's logs to compile journal header.").await?;
                 return Ok(());
             }
         };
-
         match crate::reflection::save_reflection(
             &date,
             &prompt,
             response_text,
             &txs,
             &healths,
-            member_for_telegram_chat(&config, chat_id.0).map(|m| m.id.as_str()),
-        )
-        .await
-        {
+            member_for_signal_aci(&config, chat_id.lookup_aci()).map(|m| m.id.as_str()),
+        ).await {
             Ok(filepath) => {
-                // Clear state
                 {
                     let mut s = states.write().await;
-                    s.insert(chat_id, ConversationState::Idle);
+                    s.insert(chat_id.clone(), ConversationState::Idle);
                 }
-
                 let index = MemoryIndex::from_env();
                 if let Err(e) = index.index_journal_file(&pool, &filepath).await {
                     eprintln!("Memory: failed to index journal {:?}: {:?}", filepath, e);
                 }
-
-                let filename = filepath
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("journal.md");
-                bot.send_message(
-                    chat_id,
-                    format!("✨ *Reflection Recorded!*\nSaved file `{}` inside `~/chotu_brain/Journal/`.", filename)
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
-                .await?;
+                let filename = filepath.file_name().and_then(|n| n.to_str()).unwrap_or("journal.md");
+                send_signal(&bot, &chat_id, format!("Reflection recorded.\nSaved file `{filename}` inside `~/chotu_brain/Journal/`.")).await?;
             }
             Err(e) => {
                 eprintln!("Failed to save journal reflection file: {:?}", e);
-                bot.send_message(chat_id, format!("❌ Failed to write journal file: {}", e))
-                    .await?;
+                send_signal(&bot, &chat_id, format!("Failed to write journal file: {e}")).await?;
             }
         }
-    } else if msg.photo().is_some() {
-        handle_food_photo(&bot, chat_id, &msg, &pool, &llm, &gemini_client, &config).await?;
+    } else if inbound.attachments.iter().any(|a| a.content_type.starts_with("image/")) {
+        handle_food_photo(&bot, &chat_id, &inbound, &pool, &llm, &gemini_client, &config).await?;
     } else {
-        dispatch_free_text_intent(
-            &bot,
-            chat_id,
-            text,
-            &pool,
-            &llm,
-            &gemini_client,
-            &config,
-        )
-        .await?;
+        dispatch_free_text_intent(&bot, &chat_id, &text, &pool, &llm, &gemini_client, &config).await?;
     }
-
     Ok(())
 }
 
-/// Download a Telegram food photo, analyze with Gemini (+ Open Food Facts for barcodes), persist.
+/// Download a Signal food photo, analyze with Gemini (+ Open Food Facts for barcodes), persist.
 async fn handle_food_photo(
     bot: &Bot,
-    chat_id: ChatId,
-    msg: &Message,
+    chat_id: &ChatId,
+    inbound: &SignalInbound,
     pool: &SqlitePool,
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
-    let photos = match msg.photo() {
-        Some(p) if !p.is_empty() => p,
-        _ => {
-            bot.send_message(chat_id, "Couldn't read that photo. Try sending it again.")
-                .await?;
-            return Ok(());
-        }
+) -> Result<(), SignalError> {
+    let Some(attachment) = inbound.attachments.iter().find(|a| a.content_type.starts_with("image/") && !a.id.is_empty()) else {
+        send_signal(bot, chat_id, "Couldn't read that photo. Try sending it again.").await?;
+        return Ok(());
     };
-    // Last PhotoSize is the largest resolution.
-    let best = photos.last().expect("non-empty photo sizes");
-    let caption = strip_leading_food_command(msg.caption().unwrap_or(""));
+    let body = inbound.text.as_deref().unwrap_or("").trim();
+    let caption_src = if !body.is_empty() { body } else { attachment.caption.as_deref().unwrap_or("") };
+    let caption = strip_leading_food_command(caption_src);
 
-    let (member_id, caption_rest) =
-        resolve_food_member_and_description(caption, config, chat_id.0);
+    let (member_id, caption_rest) = resolve_food_member_and_description(caption, config, chat_id.lookup_aci());
     if reject_foreign_food_mutation(bot, chat_id, config, &member_id).await? {
         return Ok(());
     }
 
-    bot.send_message(
-        chat_id,
-        "🔍 Analyzing food photo (barcode / package / plate)… usually under a minute",
-    )
-    .await?;
-
-    let file = match bot.get_file(&best.file.id).await {
-        Ok(f) => f,
+    send_signal(bot, chat_id, "Analyzing food photo (barcode / package / plate)… usually under a minute").await?;
+    let image_bytes = match bot.get_attachment(chat_id, &attachment.id).await {
+        Ok(bytes) => bytes,
         Err(e) => {
-            eprintln!("Failed to get Telegram file metadata: {:?}", e);
-            bot.send_message(chat_id, "❌ Couldn't download that photo from Telegram.")
-                .await?;
+            eprintln!("Failed to download Signal photo: {:?}", e);
+            send_signal(bot, chat_id, "Couldn't download that photo from Signal.").await?;
             return Ok(());
         }
     };
-
-    let mut image_bytes: Vec<u8> = Vec::new();
-    if let Err(e) = bot.download_file(&file.path, &mut image_bytes).await {
-        eprintln!("Failed to download Telegram photo: {:?}", e);
-        bot.send_message(chat_id, "❌ Couldn't download that photo from Telegram.")
-            .await?;
-        return Ok(());
-    }
 
     let analysis = {
         let _photo_nudge = ProgressNudge::spawn(
             bot.clone(),
-            chat_id,
+            chat_id.clone(),
             20,
             "Still analyzing that photo — hang tight…".to_string(),
         );
-        with_typing_indicator(bot, chat_id, async {
-            gemini_client
-                .approximate_nutrition_from_image(&image_bytes, "image/jpeg", caption)
-                .await
-        })
-        .await
+        gemini_client.approximate_nutrition_from_image(&image_bytes, &attachment.content_type, caption).await
     };
-
     let analysis = match analysis {
         Ok(a) => a,
         Err(e) => {
             eprintln!("Gemini food-photo analysis failed: {:?}", e);
-            bot.send_message(
-                chat_id,
-                format!("❌ Failed to analyze food photo: {}", e),
-            )
-            .await?;
+            send_signal(bot, chat_id, format!("Failed to analyze food photo: {e}")).await?;
             return Ok(());
         }
     };
-
     if analysis.kind == FoodPhotoKind::Unknown {
-        bot.send_message(
-            chat_id,
-            "Doesn't look like food — send a barcode, product package, or plated meal \
-             (optional caption like `praj half the bowl`).",
-        )
-        .await?;
+        send_signal(bot, chat_id, "Doesn't look like food — send a barcode, product package, or plated meal (optional caption like `praj half the bowl`).").await?;
         return Ok(());
     }
 
@@ -5033,16 +4293,9 @@ async fn handle_food_photo(
                 let desc = if caption_rest.is_empty() {
                     format!("{} [barcode {}]", product.product_name, barcode)
                 } else {
-                    format!(
-                        "{} — {} [barcode {}]",
-                        product.product_name, caption_rest, barcode
-                    )
+                    format!("{} — {} [barcode {}]", product.product_name, caption_rest, barcode)
                 };
-                (
-                    desc,
-                    product.nutrition,
-                    format!("Open Food Facts ({})", barcode),
-                )
+                (desc, product.nutrition, format!("Open Food Facts ({})", barcode))
             }
             Ok(None) => {
                 let desc = if analysis.description.trim().is_empty() {
@@ -5052,35 +4305,18 @@ async fn handle_food_photo(
                 } else {
                     format!("{} ({})", analysis.description, caption_rest)
                 };
-                (
-                    desc,
-                    analysis.nutrition,
-                    format!("Gemini vision; barcode {} not in Open Food Facts", barcode),
-                )
+                (desc, analysis.nutrition, format!("Gemini vision; barcode {} not in Open Food Facts", barcode))
             }
             Err(e) => {
                 eprintln!("Open Food Facts lookup error: {:?}", e);
-                let desc = if caption_rest.is_empty() {
-                    analysis.description.clone()
-                } else {
-                    format!("{} ({})", analysis.description, caption_rest)
-                };
+                let desc = if caption_rest.is_empty() { analysis.description.clone() } else { format!("{} ({})", analysis.description, caption_rest) };
                 (desc, analysis.nutrition, "Gemini vision (OFF lookup failed)".to_string())
             }
         }
     } else {
         let desc = if analysis.description.trim().is_empty() {
-            if caption_rest.is_empty() {
-                "Food photo".to_string()
-            } else {
-                caption_rest.clone()
-            }
-        } else if caption_rest.is_empty()
-            || analysis
-                .description
-                .to_lowercase()
-                .contains(&caption_rest.to_lowercase())
-        {
+            if caption_rest.is_empty() { "Food photo".to_string() } else { caption_rest.clone() }
+        } else if caption_rest.is_empty() || analysis.description.to_lowercase().contains(&caption_rest.to_lowercase()) {
             analysis.description.clone()
         } else {
             format!("{} ({})", analysis.description, caption_rest)
@@ -5088,19 +4324,9 @@ async fn handle_food_photo(
         (desc, analysis.nutrition, "Gemini vision".to_string())
     };
 
-    println!(
-        "Telegram Bot: food photo kind={:?} source={} member={}",
-        analysis.kind, source_note, member_id
-    );
+    println!("Signal: food photo kind={:?} source={} member={}", analysis.kind, source_note, member_id);
+    send_signal(bot, chat_id, format!("Using {} for *{}*…", source_note, member_id)).await?;
 
-    bot.send_message(
-        chat_id,
-        format!("Using {} for *{}*…", source_note, member_id),
-    )
-    .parse_mode(teloxide::types::ParseMode::Markdown)
-    .await?;
-
-    // Caption may backdate the meal ("yesterday's dinner"); resolve via LLM when present.
     let timing = if caption_rest.trim().is_empty() {
         resolve_food_log_timing(None, None)
     } else {
@@ -5110,45 +4336,29 @@ async fn handle_food_photo(
                 resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
             }
             Err(e) => {
-                eprintln!(
-                    "Food photo caption timing extract failed (using now): {:?}",
-                    e
-                );
+                eprintln!("Food photo caption timing extract failed (using now): {:?}", e);
                 resolve_food_log_timing(None, None)
             }
         }
     };
 
-    persist_food_estimation(
-        bot,
-        chat_id,
-        pool,
-        config,
-        &member_id,
-        &description,
-        &nutrition,
-        &timing,
-    )
-    .await?;
-
+    persist_food_estimation(bot, chat_id, pool, config, &member_id, &description, &nutrition, &timing).await?;
     Ok(())
 }
 
 /// Classify idle free-text with local Ollama and reuse existing command handlers.
 async fn dispatch_free_text_intent(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     text: &str,
     pool: &SqlitePool,
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
-) -> Result<(), teloxide::RequestError> {
+) -> Result<(), SignalError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        bot.send_message(
-            chat_id,
-            "Send a message like \"what's today\", \"morning brief\", \"open tasks\", or \"log eggs for praj\".",
+        send_signal(&bot, chat_id, "Send a message like \"what's today\", \"morning brief\", \"open tasks\", or \"log eggs for praj\".",
         )
         .await?;
         return Ok(());
@@ -5156,7 +4366,7 @@ async fn dispatch_free_text_intent(
 
     // Local Ollama classification can take a while — acknowledge immediately so the chat
     // doesn't look frozen (food logs especially felt stuck for ~1–2 minutes).
-    bot.send_message(chat_id, "Got it — working on that…")
+    send_signal(&bot, chat_id, "Got it — working on that…")
         .await?;
 
     let member_ids: Vec<String> = config
@@ -5169,7 +4379,7 @@ async fn dispatch_free_text_intent(
     let classification = {
         let _classify_nudge = ProgressNudge::spawn(
             bot.clone(),
-            chat_id,
+            chat_id.clone(),
             20,
             "Still figuring that out — local model is thinking…".to_string(),
         );
@@ -5183,17 +4393,14 @@ async fn dispatch_free_text_intent(
         Ok(c) => c,
         Err(e) => {
             eprintln!("Intent classification failed: {:?}", e);
-            bot.send_message(
-                chat_id,
-                "I couldn't understand that just now. Try a slash command (`/status`, `/tasks`, `/food`) or rephrase.",
-            )
+            send_signal(&bot, chat_id, "I couldn't understand that just now. Try a slash command (`/status`, `/tasks`, `/food`) or rephrase.",)
             .await?;
             return Ok(());
         }
     };
 
     println!(
-        "Telegram Bot: free-text intent={:?} reason={}",
+        "Signal: free-text intent={:?} reason={}",
         classification.intent, classification.reason
     );
 
@@ -5224,7 +4431,7 @@ async fn dispatch_free_text_intent(
             due_raw,
         } => {
             let member_id =
-                member_id.or_else(|| Some(default_member_id(config, chat_id.0).to_string()));
+                member_id.or_else(|| Some(default_member_id(config, chat_id.lookup_aci()).to_string()));
             create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
         }
         UserIntent::Memory { query } => {
@@ -5235,7 +4442,7 @@ async fn dispatch_free_text_intent(
                 sync_google_health_nutrition(bot, chat_id, pool, gemini_client, config).await
             {
                 eprintln!("Free-text sync failed: {:?}", e);
-                bot.send_message(chat_id, format!("❌ Sync failed: {}", e))
+                send_signal(&bot, chat_id, format!("❌ Sync failed: {}", e))
                     .await?;
             }
         }
@@ -5246,7 +4453,7 @@ async fn dispatch_free_text_intent(
             time,
         } => {
             let family_member_id = member_id.unwrap_or_else(|| {
-                default_member_id(config, chat_id.0).to_string()
+                default_member_id(config, chat_id.lookup_aci()).to_string()
             });
             if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
                 return Ok(());
@@ -5286,12 +4493,12 @@ async fn dispatch_free_text_intent(
                 "👋 Hi! I'm Chotu. You can use slash commands or plain English \
                  (calendar, brief, status, tasks, remind me, memory, food, sync, trends, net worth, monthly, budget).\n\n{}",
 
-                Command::descriptions()
+                HELP_TEXT
             );
-            bot.send_message(chat_id, help_text).await?;
+            send_signal(&bot, chat_id, help_text).await?;
         }
         UserIntent::Unknown { clarify_question } => {
-            bot.send_message(chat_id, clarify_question).await?;
+            send_signal(&bot, chat_id, clarify_question).await?;
         }
     }
 
@@ -5398,13 +4605,13 @@ fn format_elapsed(secs: u64) -> String {
 
 async fn run_and_log_stock_research(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     researcher: &StockResearcher,
     philosophy: Option<&InvestmentPhilosophy>,
     targets: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    run_and_log_stock_research_multi(bot, &[chat_id], pool, researcher, philosophy, targets).await
+    run_and_log_stock_research_multi(bot, &[chat_id.clone()], pool, researcher, philosophy, targets).await
 }
 
 async fn run_and_log_stock_research_multi(
@@ -5415,16 +4622,13 @@ async fn run_and_log_stock_research_multi(
     philosophy: Option<&InvestmentPhilosophy>,
     targets: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let Some(&progress_chat) = chat_ids.first() else {
+    let Some(progress_chat) = chat_ids.first().cloned() else {
         return Ok(());
     };
 
     if !researcher.is_configured() {
-        for &chat_id in chat_ids {
-            bot.send_message(
-                chat_id,
-                "❌ Stock research requires `OPENROUTER_API_KEY` in `.env`. Gemini is not used for `/research`.",
-            )
+        for chat_id in chat_ids {
+            send_signal(&bot, chat_id, "❌ Stock research requires `OPENROUTER_API_KEY` in `.env`. Gemini is not used for `/research`.",)
             .await?;
         }
         return Ok(());
@@ -5436,8 +4640,8 @@ async fn run_and_log_stock_research_multi(
     let progress_task = tokio::spawn(async move {
         while let Some(event) = progress_rx.recv().await {
             let msg = format_research_progress(&event, started.elapsed().as_secs());
-            if let Err(e) = progress_bot.send_message(progress_chat, msg).await {
-                eprintln!("Telegram Bot: failed to send research progress: {:?}", e);
+            if let Err(e) = send_signal(&progress_bot, &progress_chat, msg).await {
+                eprintln!("Signal: failed to send research progress: {:?}", e);
             }
         }
     });
@@ -5449,15 +4653,12 @@ async fn run_and_log_stock_research_multi(
             Ok(r) => r,
             Err(e) => {
                 let _ = progress_task.await;
-                for &chat_id in chat_ids {
-                    bot.send_message(
-                        chat_id,
-                        format!(
+                for chat_id in chat_ids {
+                    send_signal(&bot, chat_id, format!(
                             "❌ Stock research failed after {}: {}",
                             format_elapsed(started.elapsed().as_secs()),
                             e
-                        ),
-                    )
+                        ),)
                     .await?;
                 }
                 return Err(anyhow::anyhow!("Stock research failed: {:?}", e));
@@ -5466,31 +4667,26 @@ async fn run_and_log_stock_research_multi(
 
     let _ = progress_task.await;
 
-    for &chat_id in chat_ids {
-        bot.send_message(
-            chat_id,
-            format!(
+    for chat_id in chat_ids {
+        send_signal(&bot, chat_id, format!(
                 "✅ Research complete in {}. Sending report…",
                 format_elapsed(started.elapsed().as_secs())
-            ),
-        )
+            ),)
         .await?;
     }
 
-    // Split the report into chunks under 4000 characters to respect Telegram's message limit
+    // Split the report into chunks under 4000 characters to keep long research reports segmented
     let chunks = split_message(&report, 4000);
     for chunk in chunks {
-        for &chat_id in chat_ids {
-            if let Err(e) = bot
-                .send_message(chat_id, &chunk)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+        for chat_id in chat_ids {
+            if let Err(e) = send_signal(&bot, chat_id, &chunk)
                 .await
             {
                 eprintln!(
-                    "Telegram Bot: failed to send report chunk with Markdown format ({:?}). Falling back to plain text...",
+                    "Signal: failed to send report chunk with Markdown format ({:?}). Falling back to plain text...",
                     e
                 );
-                bot.send_message(chat_id, &chunk).await?;
+                send_signal(&bot, chat_id, &chunk).await?;
             }
         }
     }
@@ -5500,20 +4696,17 @@ async fn run_and_log_stock_research_multi(
 
 async fn sync_google_health_nutrition(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     pool: &SqlitePool,
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
-    bot.send_message(
-        chat_id,
-        "🔄 Connecting to Google Health API and pulling today's health metrics...",
-    )
+    send_signal(&bot, chat_id, "🔄 Connecting to Google Health API and pulling today's health metrics...",)
     .await?;
 
     match health_coach::sync_configured_members_today(pool, Some(gemini_client), config).await {
         Ok(reports) => {
-            let only_id = member_for_telegram_chat(config, chat_id.0).map(|m| m.id.clone());
+            let only_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.clone());
             let mut shown = 0usize;
             for report in &reports {
                 if let Some(ref only) = only_id {
@@ -5521,41 +4714,32 @@ async fn sync_google_health_nutrition(
                         continue;
                     }
                 }
-                bot.send_message(chat_id, report.telegram_markdown())
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, report.telegram_markdown())
                     .await?;
                 shown += 1;
             }
             if let Some(ref only) = only_id {
                 if shown == 0 {
-                    bot.send_message(
-                        chat_id,
-                        format!(
+                    send_signal(&bot, chat_id, format!(
                             "✅ Sync finished for the household, but no Google Health data for *{}* \
                              (link Health with `/login health {}`).",
                             only, only
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                        ),)
                     .await?;
                 } else if reports.len() > 1 {
-                    bot.send_message(
-                        chat_id,
-                        format!(
+                    send_signal(&bot, chat_id, format!(
                             "_Synced {} member(s); showing only your private metrics._",
                             reports.len()
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                        ),)
                     .await?;
                 }
             } else if reports.is_empty() {
-                bot.send_message(chat_id, "_Sync finished — no member reports._")
+                send_signal(&bot, chat_id, "_Sync finished — no member reports._")
                     .await?;
             }
         }
         Err(e) => {
-            bot.send_message(chat_id, format!("❌ Google Health sync failed: {}", e))
+            send_signal(&bot, chat_id, format!("❌ Google Health sync failed: {}", e))
                 .await?;
         }
     }
@@ -5601,7 +4785,7 @@ fn split_message(text: &str, limit: usize) -> Vec<String> {
 
 async fn handle_login_calendar(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     member_id: &str,
     config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
@@ -5618,14 +4802,10 @@ async fn handle_login_calendar(
         } else {
             members.join(", ")
         };
-        bot.send_message(
-            chat_id,
-            format!(
+        send_signal(&bot, chat_id, format!(
                 "⚠️ Usage: `/login calendar <member_id>`\n\nConfigured calendar members: {}",
                 list
-            ),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+            ),)
         .await?;
         return Ok(());
     }
@@ -5633,28 +4813,20 @@ async fn handle_login_calendar(
     let member = match config.family.members.iter().find(|m| m.id == member_id) {
         Some(m) => m,
         None => {
-            bot.send_message(
-                chat_id,
-                format!(
+            send_signal(&bot, chat_id, format!(
                     "❌ Unknown member `{}`. Check `family.members` in config.yaml.",
                     member_id
-                ),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                ),)
             .await?;
             return Ok(());
         }
     };
 
     if member.calendar.is_none() {
-        bot.send_message(
-            chat_id,
-            format!(
+        send_signal(&bot, chat_id, format!(
                 "❌ Member `{}` has no `calendar:` block in config.yaml.",
                 member_id
-            ),
-        )
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+            ),)
         .await?;
         return Ok(());
     }
@@ -5662,11 +4834,7 @@ async fn handle_login_calendar(
     let client_id = match std::env::var("CHOTU_OAUTH_CLIENT_ID") {
         Ok(val) => val,
         Err(_) => {
-            bot.send_message(
-                chat_id,
-                "❌ *Calendar Setup Required*\n\nConfigure `CHOTU_OAUTH_CLIENT_ID` and `CHOTU_OAUTH_CLIENT_SECRET` in `.env` (same Google OAuth client as Gmail).",
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, "❌ *Calendar Setup Required*\n\nConfigure `CHOTU_OAUTH_CLIENT_ID` and `CHOTU_OAUTH_CLIENT_SECRET` in `.env` (same Google OAuth client as Gmail).",)
             .await?;
             return Ok(());
         }
@@ -5674,10 +4842,7 @@ async fn handle_login_calendar(
     let client_secret = match std::env::var("CHOTU_OAUTH_CLIENT_SECRET") {
         Ok(val) => val,
         Err(_) => {
-            bot.send_message(
-                chat_id,
-                "❌ Configure `CHOTU_OAUTH_CLIENT_SECRET` in `.env`.",
-            )
+            send_signal(&bot, chat_id, "❌ Configure `CHOTU_OAUTH_CLIENT_SECRET` in `.env`.",)
             .await?;
             return Ok(());
         }
@@ -5703,11 +4868,11 @@ async fn handle_login_calendar(
         auth_url,
         member.id
     );
-    bot.send_message(chat_id, msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, msg)
         .await?;
 
     let bot_clone = bot.clone();
+    let chat_owned = chat_id.clone();
     let member_id_owned = member.id.clone();
     tokio::spawn(async move {
         let listener = tokio::time::timeout(
@@ -5730,50 +4895,31 @@ async fn handle_login_calendar(
                         if let Err(e) =
                             save_calendar_refresh_token(&member_id_owned, &tokens.refresh_token)
                         {
-                            let _ = bot_clone
-                                .send_message(
-                                    chat_id,
-                                    format!("❌ Failed to save calendar token: {}", e),
-                                )
+                            let _ = send_signal(&bot_clone, &chat_owned, format!("❌ Failed to save calendar token: {}", e),)
                                 .await;
                             return;
                         }
-                        let _ = bot_clone
-                            .send_message(
-                                chat_id,
-                                format!(
+                        let _ = send_signal(&bot_clone, &chat_owned, format!(
                                     "✅ *Calendar Authorization Successful!*\nSaved `{}` to `.env`.",
                                     env_key
-                                ),
-                            )
-                            .parse_mode(teloxide::types::ParseMode::Markdown)
+                                ),)
                             .await;
                     }
                     Err(e) => {
-                        let _ = bot_clone
-                            .send_message(
-                                chat_id,
-                                format!("❌ Calendar token exchange failed: {}", e),
-                            )
+                        let _ = send_signal(&bot_clone, &chat_owned, format!("❌ Calendar token exchange failed: {}", e),)
                             .await;
                     }
                 }
             }
             Ok(Err(e)) => {
-                let _ = bot_clone
-                    .send_message(chat_id, format!("❌ Calendar OAuth listener error: {}", e))
+                let _ = send_signal(&bot_clone, &chat_owned, format!("❌ Calendar OAuth listener error: {}", e))
                     .await;
             }
             Err(_) => {
-                let _ = bot_clone
-                    .send_message(
-                        chat_id,
-                        format!(
+                let _ = send_signal(&bot_clone, &chat_owned, format!(
                             "❌ *Calendar Login Timeout*\n\nTry again with `/login calendar {}` or `/login code calendar {} <code>`.",
                             member_id_owned, member_id_owned
-                        ),
-                    )
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                        ),)
                     .await;
             }
         }
@@ -5784,7 +4930,7 @@ async fn handle_login_calendar(
 
 async fn handle_login_google_health(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     member_id: &str,
     config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
@@ -5792,11 +4938,7 @@ async fn handle_login_google_health(
         match config.family.members.first() {
             Some(m) => m.id.clone(),
             None => {
-                bot.send_message(
-                    chat_id,
-                    "⚠️ Usage: `/login health <member_id>`\n\nNo family members configured in config.yaml.",
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login health <member_id>`\n\nNo family members configured in config.yaml.",)
                 .await?;
                 return Ok(());
             }
@@ -5819,15 +4961,11 @@ async fn handle_login_google_health(
                 .iter()
                 .map(|m| format!("`{}` ({})", m.id, m.name))
                 .collect();
-            bot.send_message(
-                chat_id,
-                format!(
+            send_signal(&bot, chat_id, format!(
                     "❌ Unknown member `{}`.\n\nConfigured family members: {}",
                     member_id,
                     members.join(", ")
-                ),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+                ),)
             .await?;
             return Ok(());
         }
@@ -5850,8 +4988,7 @@ async fn handle_login_google_health(
                 2. Configure the OAuth Consent Screen (add each family member's email as a test user).\n\
                 3. Go to Credentials, create a client ID for a **Web Application**, and set the redirect URI to `http://localhost:8080/callback`.\n\
                 4. Paste the client credentials into your `.env` file as `FITBIT_CLIENT_ID` and `FITBIT_CLIENT_SECRET`, then restart the agent.";
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
             return Ok(());
         }
@@ -5861,8 +4998,7 @@ async fn handle_login_google_health(
         Err(_) => {
             let msg = "❌ *Google Health Setup Required*\n\n\
                 Please configure `FITBIT_CLIENT_SECRET` in your `.env` file.";
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
             return Ok(());
         }
@@ -5884,11 +5020,11 @@ async fn handle_login_google_health(
         member_name, member_name, auth_url, member_id, env_key
     );
 
-    bot.send_message(chat_id, setup_msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, setup_msg)
         .await?;
 
     let bot_clone = bot.clone();
+    let chat_owned = chat_id.clone();
     let member_id_owned = member_id.clone();
     let env_key_owned = env_key.clone();
     tokio::spawn(async move {
@@ -5905,11 +5041,7 @@ async fn handle_login_google_health(
         match listener_result {
             Ok(Ok(code)) => {
                 println!("OAuth: Received authorization code. Exchanging for tokens...");
-                let _ = bot_clone
-                    .send_message(
-                        chat_id,
-                        "⏳ Received authorization code. Swapping for tokens...",
-                    )
+                let _ = send_signal(&bot_clone, &chat_owned, "⏳ Received authorization code. Swapping for tokens...",)
                     .await;
 
                 match exchange_google_code(
@@ -5933,9 +5065,7 @@ async fn handle_login_google_health(
                                      `/sync` and `/food {}` will use this account.",
                                     env_key_owned, member_id_owned, member_id_owned
                                 );
-                                let _ = bot_clone
-                                    .send_message(chat_id, success_msg)
-                                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                                let _ = send_signal(&bot_clone, &chat_owned, success_msg)
                                     .await;
                                 println!(
                                     "OAuth: Google Health refresh token saved as {}",
@@ -5947,21 +5077,21 @@ async fn handle_login_google_health(
                                     "❌ Failed to write Google Health refresh token to `.env`: {}",
                                     e
                                 );
-                                let _ = bot_clone.send_message(chat_id, err_msg).await;
+                                let _ = send_signal(&bot_clone, &chat_owned, err_msg).await;
                                 eprintln!("OAuth: Failed to write Google Health token: {:?}", e);
                             }
                         }
                     }
                     Err(e) => {
                         let err_msg = format!("❌ Google Health token exchange failed: {}", e);
-                        let _ = bot_clone.send_message(chat_id, err_msg).await;
+                        let _ = send_signal(&bot_clone, &chat_owned, err_msg).await;
                         eprintln!("OAuth: Google Health token exchange failed: {:?}", e);
                     }
                 }
             }
             Ok(Err(e)) => {
                 let err_msg = format!("❌ Google Health callback server failed: {}", e);
-                let _ = bot_clone.send_message(chat_id, err_msg).await;
+                let _ = send_signal(&bot_clone, &chat_owned, err_msg).await;
                 eprintln!("OAuth: Google Health callback listener failed: {:?}", e);
             }
             Err(_) => {
@@ -5970,9 +5100,7 @@ async fn handle_login_google_health(
                      Try again with `/login health {}` or `/login code health {} <code>`.",
                     member_id_owned, member_id_owned
                 );
-                let _ = bot_clone
-                    .send_message(chat_id, timeout_msg)
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                let _ = send_signal(&bot_clone, &chat_owned, timeout_msg)
                     .await;
                 println!("OAuth: Google Health redirect listener timed out");
             }
@@ -5982,7 +5110,7 @@ async fn handle_login_google_health(
     Ok(())
 }
 
-async fn handle_login_google(bot: &Bot, chat_id: ChatId) -> Result<(), anyhow::Error> {
+async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::Error> {
     let client_id = match std::env::var("CHOTU_OAUTH_CLIENT_ID") {
         Ok(val) => val,
         Err(_) => {
@@ -5991,8 +5119,7 @@ async fn handle_login_google(bot: &Bot, chat_id: ChatId) -> Result<(), anyhow::E
                 1. Go to the [Google Cloud Console](https://console.cloud.google.com/), create a project and OAuth 2.0 Credentials.\n\
                 2. Set the Redirect URI to `http://localhost:8080/callback`.\n\
                 3. Paste the client credentials into your `.env` file and restart the agent.";
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
             return Ok(());
         }
@@ -6002,8 +5129,7 @@ async fn handle_login_google(bot: &Bot, chat_id: ChatId) -> Result<(), anyhow::E
         Err(_) => {
             let msg = "❌ *Google Setup Required*\n\n\
                 Please configure `CHOTU_OAUTH_CLIENT_SECRET` in your `.env` file.";
-            bot.send_message(chat_id, msg)
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, msg)
                 .await?;
             return Ok(());
         }
@@ -6023,11 +5149,11 @@ async fn handle_login_google(bot: &Bot, chat_id: ChatId) -> Result<(), anyhow::E
         auth_url
     );
 
-    bot.send_message(chat_id, setup_msg)
-        .parse_mode(teloxide::types::ParseMode::Markdown)
+    send_signal(&bot, chat_id, setup_msg)
         .await?;
 
     let bot_clone = bot.clone();
+    let chat_owned = chat_id.clone();
     tokio::spawn(async move {
         println!("OAuth: Starting Google redirect listener on port 8080...");
         // 5-minute timeout for user to authorize
@@ -6040,11 +5166,7 @@ async fn handle_login_google(bot: &Bot, chat_id: ChatId) -> Result<(), anyhow::E
         match listener_result {
             Ok(Ok(code)) => {
                 println!("OAuth: Received Google authorization code. Exchanging for tokens...");
-                let _ = bot_clone
-                    .send_message(
-                        chat_id,
-                        "⏳ Received authorization code. Swapping for tokens...",
-                    )
+                let _ = send_signal(&bot_clone, &chat_owned, "⏳ Received authorization code. Swapping for tokens...",)
                     .await;
 
                 match exchange_google_code(
@@ -6060,36 +5182,32 @@ async fn handle_login_google(bot: &Bot, chat_id: ChatId) -> Result<(), anyhow::E
                             let success_msg = "✅ *Google/Gmail Authorization Successful!*\n\n\
                                     The new refresh token has been successfully written to your `.env` file.\n\
                                     Google statement/receipt email sync is now active!";
-                            let _ = bot_clone
-                                .send_message(chat_id, success_msg)
-                                .parse_mode(teloxide::types::ParseMode::Markdown)
+                            let _ = send_signal(&bot_clone, &chat_owned, success_msg)
                                 .await;
                             println!("OAuth: Google refresh token successfully saved to .env");
                         }
                         Err(e) => {
                             let err_msg =
                                 format!("❌ Failed to write Google refresh token to `.env`: {}", e);
-                            let _ = bot_clone.send_message(chat_id, err_msg).await;
+                            let _ = send_signal(&bot_clone, &chat_owned, err_msg).await;
                             eprintln!("OAuth: Failed to write Google token: {:?}", e);
                         }
                     },
                     Err(e) => {
                         let err_msg = format!("❌ Google token exchange failed: {}", e);
-                        let _ = bot_clone.send_message(chat_id, err_msg).await;
+                        let _ = send_signal(&bot_clone, &chat_owned, err_msg).await;
                         eprintln!("OAuth: Google token exchange failed: {:?}", e);
                     }
                 }
             }
             Ok(Err(e)) => {
                 let err_msg = format!("❌ Google callback server failed: {}", e);
-                let _ = bot_clone.send_message(chat_id, err_msg).await;
+                let _ = send_signal(&bot_clone, &chat_owned, err_msg).await;
                 eprintln!("OAuth: Google callback listener failed: {:?}", e);
             }
             Err(_) => {
                 let timeout_msg = "❌ *Google Login Timeout*\n\nThe login listener timed out after 5 minutes. Please try again with `/login gmail`.";
-                let _ = bot_clone
-                    .send_message(chat_id, timeout_msg)
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                let _ = send_signal(&bot_clone, &chat_owned, timeout_msg)
                     .await;
                 println!("OAuth: Google redirect listener timed out");
             }
@@ -6112,7 +5230,7 @@ fn clean_oauth_code(code_or_url: &str) -> String {
 
 async fn handle_manual_code(
     bot: &Bot,
-    chat_id: ChatId,
+    chat_id: &ChatId,
     args: &str,
     config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
@@ -6120,10 +5238,7 @@ async fn handle_manual_code(
     let service = match parts.next() {
         Some(s) => s.to_lowercase(),
         None => {
-            bot.send_message(
-                chat_id,
-                "⚠️ Usage: `/login code <gmail|health|calendar> ...`",
-            )
+            send_signal(&bot, chat_id, "⚠️ Usage: `/login code <gmail|health|calendar> ...`",)
             .await?;
             return Ok(());
         }
@@ -6133,7 +5248,7 @@ async fn handle_manual_code(
         let code_raw = match parts.next() {
             Some(c) => c,
             None => {
-                bot.send_message(chat_id, "⚠️ Usage: `/login code gmail <code_or_url>`").await?;
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code gmail <code_or_url>`").await?;
                 return Ok(());
             }
         };
@@ -6142,24 +5257,21 @@ async fn handle_manual_code(
         let client_id = std::env::var("CHOTU_OAUTH_CLIENT_ID")?;
         let client_secret = std::env::var("CHOTU_OAUTH_CLIENT_SECRET")?;
 
-        bot.send_message(chat_id, "⏳ Swapping manual code for Google/Gmail tokens...").await?;
+        send_signal(&bot, chat_id, "⏳ Swapping manual code for Google/Gmail tokens...").await?;
         match exchange_google_code(&client_id, &client_secret, &code, "http://localhost:8080/callback").await {
             Ok(tokens) => {
                 save_google_refresh_token(&tokens.refresh_token)?;
-                bot.send_message(chat_id, "✅ *Google/Gmail Authorization Successful!*\nRefresh token saved manually.").await?;
+                send_signal(&bot, chat_id, "✅ *Google/Gmail Authorization Successful!*\nRefresh token saved manually.").await?;
             }
             Err(e) => {
-                bot.send_message(chat_id, format!("❌ Gmail Token exchange failed: {}", e)).await?;
+                send_signal(&bot, chat_id, format!("❌ Gmail Token exchange failed: {}", e)).await?;
             }
         }
     } else if service == "fitbit" || service == "health" {
         let first = match parts.next() {
             Some(c) => c.to_string(),
             None => {
-                bot.send_message(
-                    chat_id,
-                    "⚠️ Usage: `/login code health <member_id> <code_or_url>`",
-                )
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <member_id> <code_or_url>`",)
                 .await?;
                 return Ok(());
             }
@@ -6171,10 +5283,7 @@ async fn handle_manual_code(
             None => {
                 // Back-compat: `/login code health <code>` → primary member
                 if config.family.members.iter().any(|m| m.id == first) {
-                    bot.send_message(
-                        chat_id,
-                        "⚠️ Usage: `/login code health <member_id> <code_or_url>`",
-                    )
+                    send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <member_id> <code_or_url>`",)
                     .await?;
                     return Ok(());
                 }
@@ -6196,8 +5305,7 @@ async fn handle_manual_code(
         {
             Some(m) => m,
             None => {
-                bot.send_message(chat_id, format!("❌ Unknown member `{}`.", member_id))
-                    .parse_mode(teloxide::types::ParseMode::Markdown)
+                send_signal(&bot, chat_id, format!("❌ Unknown member `{}`.", member_id))
                     .await?;
                 return Ok(());
             }
@@ -6214,7 +5322,7 @@ async fn handle_manual_code(
         let client_id = std::env::var("FITBIT_CLIENT_ID")?;
         let client_secret = std::env::var("FITBIT_CLIENT_SECRET")?;
 
-        bot.send_message(chat_id, "⏳ Swapping manual code for Google Health tokens...")
+        send_signal(&bot, chat_id, "⏳ Swapping manual code for Google Health tokens...")
             .await?;
         match exchange_google_code(
             &client_id,
@@ -6226,21 +5334,14 @@ async fn handle_manual_code(
         {
             Ok(tokens) => {
                 save_health_refresh_token(&member_id, &tokens.refresh_token, is_primary)?;
-                bot.send_message(
-                    chat_id,
-                    format!(
+                send_signal(&bot, chat_id, format!(
                         "✅ *Google Health Authorization Successful!*\nSaved `{}`.",
                         env_key
-                    ),
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                    ),)
                 .await?;
             }
             Err(e) => {
-                bot.send_message(
-                    chat_id,
-                    format!("❌ Google Health Token exchange failed: {}", e),
-                )
+                send_signal(&bot, chat_id, format!("❌ Google Health Token exchange failed: {}", e),)
                 .await?;
             }
         }
@@ -6248,30 +5349,20 @@ async fn handle_manual_code(
         let member_id = match parts.next() {
             Some(m) => m.to_string(),
             None => {
-                bot.send_message(
-                    chat_id,
-                    "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",
-                )
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",)
                 .await?;
                 return Ok(());
             }
         };
         if !config.family.members.iter().any(|m| m.id == member_id) {
-            bot.send_message(
-                chat_id,
-                format!("❌ Unknown member `{}`.", member_id),
-            )
-            .parse_mode(teloxide::types::ParseMode::Markdown)
+            send_signal(&bot, chat_id, format!("❌ Unknown member `{}`.", member_id),)
             .await?;
             return Ok(());
         }
         let code_raw = match parts.next() {
             Some(c) => c,
             None => {
-                bot.send_message(
-                    chat_id,
-                    "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",
-                )
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",)
                 .await?;
                 return Ok(());
             }
@@ -6280,7 +5371,7 @@ async fn handle_manual_code(
         let client_id = std::env::var("CHOTU_OAUTH_CLIENT_ID")?;
         let client_secret = std::env::var("CHOTU_OAUTH_CLIENT_SECRET")?;
 
-        bot.send_message(chat_id, "⏳ Swapping manual code for Calendar tokens...")
+        send_signal(&bot, chat_id, "⏳ Swapping manual code for Calendar tokens...")
             .await?;
         match exchange_google_code(
             &client_id,
@@ -6292,26 +5383,19 @@ async fn handle_manual_code(
         {
             Ok(tokens) => {
                 save_calendar_refresh_token(&member_id, &tokens.refresh_token)?;
-                bot.send_message(
-                    chat_id,
-                    format!(
+                send_signal(&bot, chat_id, format!(
                         "✅ *Calendar Authorization Successful!*\nSaved `CALENDAR_REFRESH_TOKEN_{}`.",
                         member_id.to_uppercase()
-                    ),
-                )
-                .parse_mode(teloxide::types::ParseMode::Markdown)
+                    ),)
                 .await?;
             }
             Err(e) => {
-                bot.send_message(chat_id, format!("❌ Calendar token exchange failed: {}", e))
+                send_signal(&bot, chat_id, format!("❌ Calendar token exchange failed: {}", e))
                     .await?;
             }
         }
     } else {
-        bot.send_message(
-            chat_id,
-            "⚠️ Unknown service. Supported: `gmail`, `health`, `calendar`",
-        )
+        send_signal(&bot, chat_id, "⚠️ Unknown service. Supported: `gmail`, `health`, `calendar`",)
         .await?;
     }
 
@@ -6345,10 +5429,8 @@ mod tests {
     fn strip_leading_food_command_from_captions() {
         assert_eq!(strip_leading_food_command("/food pray"), "pray");
         assert_eq!(strip_leading_food_command("/FOOD pray leftover"), "pray leftover");
-        assert_eq!(strip_leading_food_command("/food@chottu pray"), "pray");
         assert_eq!(strip_leading_food_command("  /food  praj oats "), "praj oats");
         assert_eq!(strip_leading_food_command("/food"), "");
-        assert_eq!(strip_leading_food_command("/food@chottu"), "");
         assert_eq!(
             strip_leading_food_command("pray leftover rice"),
             "pray leftover rice"
@@ -6417,5 +5499,62 @@ mod tests {
         assert!(v.missing_quote);
         assert!((v.price_base - 10.0).abs() < 1e-9);
         assert!((v.cost_base - 30.0).abs() < 1e-9);
+    }
+    #[test]
+    fn parse_command_reads_leading_slash_case_insensitively() {
+        assert!(matches!(parse_command("/HELP"), Some(Command::Help)));
+        assert!(matches!(parse_command("  /Food eggs"), Some(Command::Food(s)) if s == "eggs"));
+        assert!(parse_command("/food@bot eggs").is_none());
+        assert!(parse_command("food eggs").is_none());
+        assert!(matches!(parse_command("/tasks complete abcdef12"), Some(Command::Tasks(s)) if s == "complete abcdef12"));
+    }
+
+    #[test]
+    fn task_instructions_are_plain_text_commands() {
+        let help = task_complete_snooze_help("abcdef12");
+        assert!(help.contains("/tasks complete abcdef12"));
+        assert!(help.contains("/tasks snooze abcdef12"));
+        assert!(!help.contains("callback"));
+        assert!(!help.contains("t:d:"));
+    }
+
+    fn inbound_direct(aci: &str, text: &str) -> SignalInbound {
+        SignalInbound {
+            sender_aci: aci.to_string(),
+            recipient: SignalRecipient::Direct { aci: aci.to_string() },
+            text: Some(text.to_string()),
+            quote_timestamp: None,
+            attachments: vec![],
+        }
+    }
+
+    #[test]
+    fn inbound_fixtures_cover_direct_group_and_missing_aci() {
+        let direct = inbound_direct("aci-alex", "/whoami");
+        assert!(matches!(direct.recipient, SignalRecipient::Direct { .. }));
+        assert_eq!(direct.sender_aci, "aci-alex");
+        let group = SignalInbound {
+            sender_aci: "aci-alex".into(),
+            recipient: SignalRecipient::Group { group_id: "household".into() },
+            text: Some("/tasks".into()),
+            quote_timestamp: None,
+            attachments: vec![],
+        };
+        assert_eq!(group.recipient.group_id(), Some("household"));
+        let missing = SignalInbound {
+            sender_aci: String::new(),
+            recipient: SignalRecipient::Direct { aci: String::new() },
+            text: Some("/help".into()),
+            quote_timestamp: None,
+            attachments: vec![],
+        };
+        assert!(missing.sender_aci.is_empty());
+        let bad_file = chotu_common::SignalAttachment {
+            id: String::new(),
+            content_type: "application/pdf".into(),
+            size: None,
+            caption: None,
+        };
+        assert!(!bad_file.content_type.starts_with("image/") || bad_file.id.is_empty());
     }
 }

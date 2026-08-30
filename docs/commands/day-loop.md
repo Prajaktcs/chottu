@@ -6,7 +6,7 @@ Calendar, tasks, morning brief, and evening reflection — the daily rhythm arou
 
 ## `/brief`
 
-Manual morning digest (also scheduled at `schedules.morning_brief` in `config.yaml`; blank = off). Linked DMs get a private slice; household chat stays family-wide. `TELEGRAM_CHAT_ID` is an optional shared fallback.
+Manual morning digest (also scheduled at `schedules.morning_brief` in `config.yaml`; blank = off). Linked DMs get a private slice; household chat stays family-wide. `SIGNAL_GROUP_ID` is an optional shared fallback.
 
 **Looks like**
 

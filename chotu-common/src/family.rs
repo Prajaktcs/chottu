@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::schedule::{resolve_timezone_name, resolve_tz, AgentSchedules, DEFAULT_TIMEZONE};
+use crate::signal::SignalRecipient;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalendarConfig {
@@ -341,8 +342,8 @@ impl HealthCondition {
         self.lag_window[1]
     }
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct FamilyMember {
     pub id: String,
     pub name: String,
@@ -358,10 +359,10 @@ pub struct FamilyMember {
     /// Optional chronic conditions (empty = none). Watchlists live in the DB.
     #[serde(default)]
     pub health_conditions: Vec<HealthCondition>,
-    /// Telegram private-chat id for this member (per-person DMs).
+    /// Signal ACI for this member's linked direct conversation.
     /// Set via `/link <member_id>` or manually in config.yaml.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub telegram_chat_id: Option<i64>,
+    pub signal_aci: Option<String>,
 }
 
 impl FamilyMember {
@@ -618,7 +619,7 @@ impl Default for AppConfig {
                     nutrition_goals: None,
                     fitness_goals: None,
                     health_conditions: vec![],
-                    telegram_chat_id: None,
+                    signal_aci: None,
                 }],
             },
             investment_philosophy: Some(InvestmentPhilosophy::default()),
@@ -633,152 +634,154 @@ impl Default for AppConfig {
     }
 }
 
-/// Member linked to this Telegram chat, if any.
-pub fn member_for_telegram_chat(config: &AppConfig, chat_id: i64) -> Option<&FamilyMember> {
+/// Member linked to this Signal ACI, if any.
+pub fn member_for_signal_aci<'a>(config: &'a AppConfig, aci: &str) -> Option<&'a FamilyMember> {
     config
         .family
         .members
         .iter()
-        .find(|m| m.telegram_chat_id == Some(chat_id))
+        .find(|member| member.signal_aci.as_deref() == Some(aci))
 }
 
-/// Default family member id for a chat: linked member, else the primary (first) member.
-pub fn default_member_id(config: &AppConfig, chat_id: i64) -> &str {
-    member_for_telegram_chat(config, chat_id)
-        .map(|m| m.id.as_str())
-        .or_else(|| config.family.members.first().map(|m| m.id.as_str()))
+/// Default family member id for a direct conversation: linked member, else primary member.
+pub fn default_member_id<'a>(config: &'a AppConfig, aci: &str) -> &'a str {
+    member_for_signal_aci(config, aci)
+        .map(|member| member.id.as_str())
+        .or_else(|| config.family.members.first().map(|member| member.id.as_str()))
         .unwrap_or("alex")
 }
 
-/// Food writes from a linked personal DM may only target that chat's member.
-/// Household / unlinked chats may target any member (returns `Ok(())`).
+/// Food writes from a linked direct conversation may only target that member.
+/// Household and unlinked conversations may target any member.
 pub fn ensure_food_mutation_allowed(
     config: &AppConfig,
-    chat_id: i64,
+    aci: &str,
     target_member_id: &str,
 ) -> Result<(), String> {
-    match member_for_telegram_chat(config, chat_id) {
+    match member_for_signal_aci(config, aci) {
         Some(linked) if !linked.id.eq_ignore_ascii_case(target_member_id) => Err(format!(
-            "This chat is linked as {}. Food commands here only work for you — \
-             use the household chat to log or change food for someone else.",
+            "This direct conversation is linked as {}. Food commands here only work for you — \
+             use the household group to log or change food for someone else.",
             linked.id
         )),
         _ => Ok(()),
     }
 }
 
-/// True when at least one member has a linked Telegram chat.
-pub fn has_any_telegram_link(config: &AppConfig) -> bool {
+/// True when at least one member has a linked Signal direct conversation.
+pub fn has_any_signal_link(config: &AppConfig) -> bool {
     config
         .family
         .members
         .iter()
-        .any(|m| m.telegram_chat_id.is_some())
+        .any(|member| member.signal_aci.is_some())
 }
 
-/// When any member is linked, only linked chats (plus the env household fallback) are allowed.
-/// Before the first `/link`, the bot stays open so setup can proceed.
-pub fn is_telegram_chat_allowed(config: &AppConfig, chat_id: i64) -> bool {
-    if !has_any_telegram_link(config) {
-        return true;
-    }
-    if member_for_telegram_chat(config, chat_id).is_some() {
-        return true;
-    }
-    env_telegram_chat_id() == Some(chat_id)
+/// Before the first `/link`, direct conversations remain open so setup can proceed.
+/// Afterwards, only a linked ACI or the configured household group is accepted.
+pub fn is_signal_conversation_allowed(
+    config: &AppConfig,
+    sender_aci: &str,
+    group_id: Option<&str>,
+) -> bool {
+    !has_any_signal_link(config)
+        || member_for_signal_aci(config, sender_aci).is_some()
+        || matches!(
+            (group_id, env_signal_group_id()),
+            (Some(inbound), Some(configured)) if inbound == configured
+        )
 }
 
-/// Private-chat id linked to `member_id`, if any.
-pub fn telegram_chat_for_member(config: &AppConfig, member_id: &str) -> Option<i64> {
+/// Signal ACI linked to `member_id`, if any.
+pub fn signal_aci_for_member(config: &AppConfig, member_id: &str) -> Option<String> {
     config
         .family
         .members
         .iter()
-        .find(|m| m.id.eq_ignore_ascii_case(member_id))
-        .and_then(|m| m.telegram_chat_id)
+        .find(|member| member.id.eq_ignore_ascii_case(member_id))
+        .and_then(|member| member.signal_aci.clone())
 }
 
-/// Unique household delivery targets: every linked member chat, plus `TELEGRAM_CHAT_ID` if set
-/// and not already included.
-pub fn telegram_delivery_targets(config: &AppConfig) -> Vec<i64> {
-    let mut targets: Vec<i64> = Vec::new();
-    for m in &config.family.members {
-        if let Some(cid) = m.telegram_chat_id {
-            if !targets.contains(&cid) {
-                targets.push(cid);
+/// Unique direct and household-group delivery targets.
+pub fn signal_delivery_targets(config: &AppConfig) -> Vec<SignalRecipient> {
+    let mut targets = Vec::new();
+    for member in &config.family.members {
+        if let Some(aci) = &member.signal_aci {
+            let target = SignalRecipient::Direct { aci: aci.clone() };
+            if !targets.contains(&target) {
+                targets.push(target);
             }
         }
     }
-    if let Some(env_cid) = env_telegram_chat_id() {
-        if !targets.contains(&env_cid) {
-            targets.push(env_cid);
+    if let Some(group_id) = env_signal_group_id() {
+        let target = SignalRecipient::Group { group_id };
+        if !targets.contains(&target) {
+            targets.push(target);
         }
     }
     targets
 }
 
-/// True when proactive Telegram delivery has somewhere to go.
-pub fn has_telegram_delivery(config: &AppConfig) -> bool {
-    !telegram_delivery_targets(config).is_empty()
+/// True when proactive Signal delivery has somewhere to go.
+pub fn has_signal_delivery(config: &AppConfig) -> bool {
+    !signal_delivery_targets(config).is_empty()
 }
 
-fn env_telegram_chat_id() -> Option<i64> {
-    std::env::var("TELEGRAM_CHAT_ID")
+fn env_signal_group_id() -> Option<String> {
+    std::env::var("SIGNAL_GROUP_ID")
         .ok()
-        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|group_id| !group_id.trim().is_empty())
 }
 
-/// Link `chat_id` to `member_id` in `config.yaml` (and clear that chat from any other member).
+/// Link `aci` to `member_id` in config.yaml and clear that ACI from another member.
 /// Returns the updated config on success.
 ///
-/// Uses a strict parse (no silent default fallback) so a bad write cannot wipe the file.
-pub fn set_member_telegram_chat_id<P: AsRef<Path>>(
+/// Uses a strict parse so a bad write cannot wipe the file.
+pub fn set_member_signal_aci<P: AsRef<Path>>(
     path: P,
     member_id: &str,
-    chat_id: i64,
+    aci: &str,
 ) -> Result<AppConfig, String> {
     let path_ref = path.as_ref();
     let content = std::fs::read_to_string(path_ref)
-        .map_err(|e| format!("Failed to read {:?}: {e}", path_ref))?;
+        .map_err(|error| format!("Failed to read {:?}: {error}", path_ref))?;
     let mut config: AppConfig = serde_yaml::from_str(&content)
-        .map_err(|e| format!("Failed to parse {:?}: {e}", path_ref))?;
+        .map_err(|error| format!("Failed to parse {:?}: {error}", path_ref))?;
     if config.family.members.is_empty() {
         return Err(format!("{:?} has no family members", path_ref));
     }
 
-    let Some(idx) = config
+    let Some(member_index) = config
         .family
         .members
         .iter()
-        .position(|m| m.id.eq_ignore_ascii_case(member_id))
+        .position(|member| member.id.eq_ignore_ascii_case(member_id))
     else {
         return Err(format!("Unknown member `{member_id}`"));
     };
 
-    // Refuse hijack: an unknown chat must not steal a member already linked elsewhere.
-    // Idempotent re-link of the same chat is allowed. To move a member, clear
-    // `telegram_chat_id` in config.yaml first.
-    if let Some(existing) = config.family.members[idx].telegram_chat_id {
-        if existing != chat_id {
+    if let Some(existing) = config.family.members[member_index].signal_aci.as_deref() {
+        if existing != aci {
             return Err(format!(
-                "Member `{member_id}` is already linked to chat `{existing}`. \
-                 Clear that member's `telegram_chat_id` in config.yaml, then retry `/link`."
+                "Member `{member_id}` is already linked to Signal ACI `{existing}`. \
+                 Clear that member's `signal_aci` in config.yaml, then retry `/link`."
             ));
         }
         return Ok(config);
     }
 
-    for (i, m) in config.family.members.iter_mut().enumerate() {
-        if i == idx {
-            m.telegram_chat_id = Some(chat_id);
-        } else if m.telegram_chat_id == Some(chat_id) {
-            m.telegram_chat_id = None;
+    for (index, member) in config.family.members.iter_mut().enumerate() {
+        if index == member_index {
+            member.signal_aci = Some(aci.to_owned());
+        } else if member.signal_aci.as_deref() == Some(aci) {
+            member.signal_aci = None;
         }
     }
 
     let yaml = serde_yaml::to_string(&config)
-        .map_err(|e| format!("Failed to serialize config.yaml: {e}"))?;
-    std::fs::write(path_ref, yaml).map_err(|e| format!("Failed to write {:?}: {e}", path_ref))?;
+        .map_err(|error| format!("Failed to serialize config.yaml: {error}"))?;
+    std::fs::write(path_ref, yaml)
+        .map_err(|error| format!("Failed to write {:?}: {error}", path_ref))?;
     Ok(config)
 }
 
@@ -990,7 +993,7 @@ mod tests {
             nutrition_goals: None,
             fitness_goals: None,
             health_conditions: vec![],
-            telegram_chat_id: None,
+            signal_aci: None,
         };
         assert_eq!(member.calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
         assert_eq!(member.health_refresh_token_env_key(), "HEALTH_REFRESH_TOKEN_ALEX");
@@ -1289,7 +1292,7 @@ family:
                     notes: None,
                 },
             ],
-            telegram_chat_id: None,
+            signal_aci: None,
         };
         let warnings = member.health_condition_warnings();
         assert!(warnings.iter().any(|w| w.contains("duplicate")));
@@ -1339,7 +1342,7 @@ family:
             nutrition_goals: None,
             fitness_goals: None,
             health_conditions: vec![],
-            telegram_chat_id: None,
+            signal_aci: None,
         });
         assert_eq!(
             health_refresh_token_env_key("jordan"),
@@ -1375,7 +1378,7 @@ family:
 
     fn two_member_config() -> AppConfig {
         let mut config = AppConfig::default();
-        config.family.members[0].telegram_chat_id = Some(111);
+        config.family.members[0].signal_aci = Some("aci-alex".to_string());
         config.family.members.push(FamilyMember {
             id: "jordan".to_string(),
             name: "Jordan".to_string(),
@@ -1384,75 +1387,86 @@ family:
             nutrition_goals: None,
             fitness_goals: None,
             health_conditions: vec![],
-            telegram_chat_id: Some(222),
+            signal_aci: Some("aci-jordan".to_string()),
         });
         config
     }
 
     #[test]
-    fn test_member_for_telegram_chat_and_default() {
+    fn test_member_for_signal_aci_and_default() {
         let config = two_member_config();
         assert_eq!(
-            member_for_telegram_chat(&config, 111).map(|m| m.id.as_str()),
+            member_for_signal_aci(&config, "aci-alex").map(|member| member.id.as_str()),
             Some("alex")
         );
         assert_eq!(
-            member_for_telegram_chat(&config, 222).map(|m| m.id.as_str()),
+            member_for_signal_aci(&config, "aci-jordan").map(|member| member.id.as_str()),
             Some("jordan")
         );
-        assert!(member_for_telegram_chat(&config, 999).is_none());
-        assert_eq!(default_member_id(&config, 222), "jordan");
-        assert_eq!(default_member_id(&config, 999), "alex");
+        assert!(member_for_signal_aci(&config, "aci-unknown").is_none());
+        assert_eq!(default_member_id(&config, "aci-jordan"), "jordan");
+        assert_eq!(default_member_id(&config, "aci-unknown"), "alex");
     }
 
     #[test]
-    fn test_food_mutation_guard_linked_dm() {
+    fn test_food_mutation_guard_linked_direct_conversation() {
         let config = two_member_config();
-        assert!(ensure_food_mutation_allowed(&config, 111, "alex").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, 111, "Alex").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, 111, "jordan").is_err());
-        assert!(ensure_food_mutation_allowed(&config, 222, "jordan").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, 222, "alex").is_err());
-        // Unlinked / household chat may target anyone.
-        assert!(ensure_food_mutation_allowed(&config, 999, "alex").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, 999, "jordan").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, "aci-alex", "alex").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, "aci-alex", "Alex").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, "aci-alex", "jordan").is_err());
+        assert!(ensure_food_mutation_allowed(&config, "aci-jordan", "jordan").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, "aci-jordan", "alex").is_err());
+        assert!(ensure_food_mutation_allowed(&config, "aci-unknown", "alex").is_ok());
+        assert!(ensure_food_mutation_allowed(&config, "aci-unknown", "jordan").is_ok());
     }
 
     #[test]
     fn test_allowlist_open_until_first_link() {
         let open = AppConfig::default();
-        assert!(!has_any_telegram_link(&open));
-        assert!(is_telegram_chat_allowed(&open, 999));
+        assert!(!has_any_signal_link(&open));
+        assert!(is_signal_conversation_allowed(&open, "aci-unknown", None));
 
         let linked = two_member_config();
-        assert!(has_any_telegram_link(&linked));
-        assert!(is_telegram_chat_allowed(&linked, 111));
-        assert!(is_telegram_chat_allowed(&linked, 222));
-        assert!(!is_telegram_chat_allowed(&linked, 999));
+        assert!(has_any_signal_link(&linked));
+        assert!(is_signal_conversation_allowed(&linked, "aci-alex", None));
+        assert!(is_signal_conversation_allowed(&linked, "aci-jordan", None));
+        assert!(!is_signal_conversation_allowed(&linked, "aci-unknown", None));
     }
 
     #[test]
-    fn test_allowlist_includes_env_household_fallback() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    fn test_allowlist_and_delivery_include_household_group() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let linked = two_member_config();
-        with_env_var("TELEGRAM_CHAT_ID", Some("333"), || {
-            assert!(is_telegram_chat_allowed(&linked, 333));
-            let targets = telegram_delivery_targets(&linked);
-            assert_eq!(targets, vec![111, 222, 333]);
+        with_env_var("SIGNAL_GROUP_ID", Some("household-group"), || {
+            assert!(is_signal_conversation_allowed(
+                &linked,
+                "aci-unknown",
+                Some("household-group")
+            ));
+            assert!(!is_signal_conversation_allowed(
+                &linked,
+                "aci-unknown",
+                Some("other-group")
+            ));
+            assert_eq!(
+                signal_delivery_targets(&linked),
+                vec![
+                    SignalRecipient::Direct {
+                        aci: "aci-alex".to_string()
+                    },
+                    SignalRecipient::Direct {
+                        aci: "aci-jordan".to_string()
+                    },
+                    SignalRecipient::Group {
+                        group_id: "household-group".to_string()
+                    }
+                ]
+            );
         });
     }
 
     #[test]
-    fn test_delivery_targets_dedupe_env_overlap() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let linked = two_member_config();
-        with_env_var("TELEGRAM_CHAT_ID", Some("111"), || {
-            assert_eq!(telegram_delivery_targets(&linked), vec![111, 222]);
-        });
-    }
-
-    #[test]
-    fn test_set_member_telegram_chat_id_persists_and_moves() {
+    fn test_set_member_signal_aci_persists_and_moves_matching_aci() {
         let yaml_content = r#"
 family:
   members:
@@ -1467,39 +1481,47 @@ currency: "CAD"
         let mut tmp_file = NamedTempFile::new().unwrap();
         write!(tmp_file, "{}", yaml_content).unwrap();
 
-        let updated =
-            set_member_telegram_chat_id(tmp_file.path(), "jordan", 555).expect("link jordan");
+        let updated = set_member_signal_aci(tmp_file.path(), "jordan", "aci-shared")
+            .expect("link jordan");
         assert_eq!(
-            telegram_chat_for_member(&updated, "jordan"),
-            Some(555)
+            signal_aci_for_member(&updated, "jordan").as_deref(),
+            Some("aci-shared")
         );
-        assert!(telegram_chat_for_member(&updated, "alex").is_none());
+        assert!(signal_aci_for_member(&updated, "alex").is_none());
 
-        // Same chat may reassign from jordan → alex (clears jordan).
-        let moved =
-            set_member_telegram_chat_id(tmp_file.path(), "alex", 555).expect("move link to alex");
-        assert_eq!(telegram_chat_for_member(&moved, "alex"), Some(555));
-        assert!(telegram_chat_for_member(&moved, "jordan").is_none());
+        let moved = set_member_signal_aci(tmp_file.path(), "alex", "aci-shared")
+            .expect("move link to alex");
+        assert_eq!(signal_aci_for_member(&moved, "alex").as_deref(), Some("aci-shared"));
+        assert!(signal_aci_for_member(&moved, "jordan").is_none());
 
-        let reloaded = load_config(tmp_file.path());
-        assert_eq!(telegram_chat_for_member(&reloaded, "alex"), Some(555));
+        let again = set_member_signal_aci(tmp_file.path(), "alex", "aci-shared")
+            .expect("idempotent");
+        assert_eq!(signal_aci_for_member(&again, "alex").as_deref(), Some("aci-shared"));
 
-        // Idempotent re-link of the same chat.
-        let again =
-            set_member_telegram_chat_id(tmp_file.path(), "alex", 555).expect("idempotent");
-        assert_eq!(telegram_chat_for_member(&again, "alex"), Some(555));
-
-        // Different chat must not hijack an already-linked member.
-        let hijack = set_member_telegram_chat_id(tmp_file.path(), "alex", 999);
+        let hijack = set_member_signal_aci(tmp_file.path(), "alex", "aci-other");
         assert!(hijack.is_err());
         assert!(hijack.unwrap_err().contains("already linked"));
-        let still = load_config(tmp_file.path());
-        assert_eq!(telegram_chat_for_member(&still, "alex"), Some(555));
     }
 
     #[test]
-    fn test_load_telegram_chat_id_from_yaml() {
-        let yaml_content = r#"
+    fn test_yaml_serializes_signal_aci_only() {
+        let yaml = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+      signal_aci: aci-alex
+"#;
+        let mut tmp_file = NamedTempFile::new().unwrap();
+        write!(tmp_file, "{}", yaml).unwrap();
+        let loaded = load_config(tmp_file.path());
+        assert_eq!(loaded.family.members[0].signal_aci.as_deref(), Some("aci-alex"));
+        let serialized = serde_yaml::to_string(&loaded).unwrap();
+        assert!(serialized.contains("signal_aci: aci-alex"));
+        assert!(!serialized.contains("telegram_chat_id"));
+
+        let legacy = r#"
 family:
   members:
     - id: alex
@@ -1507,9 +1529,6 @@ family:
       role: adult
       telegram_chat_id: 424242
 "#;
-        let mut tmp_file = NamedTempFile::new().unwrap();
-        write!(tmp_file, "{}", yaml_content).unwrap();
-        let loaded = load_config(tmp_file.path());
-        assert_eq!(loaded.family.members[0].telegram_chat_id, Some(424242));
+        assert!(serde_yaml::from_str::<AppConfig>(legacy).is_err());
     }
 }

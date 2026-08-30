@@ -398,7 +398,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         .await?;
 
     // Final runtime schema (base + later ALTER columns). Migrations already ran,
-    // so this must include message_id / telegram fields / due_at / reminded_at.
+    // so this must include message_id, email metadata, due_at, and reminded_at.
     sqlx::query(
         "CREATE TABLE tasks (
             id                  TEXT PRIMARY KEY,
@@ -414,7 +414,6 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             calendar_event_id   TEXT,
             source              TEXT NOT NULL DEFAULT 'manual',
             message_id          TEXT,
-            telegram_message_id INTEGER,
             email_sender        TEXT,
             email_subject       TEXT,
             due_at              TEXT,
@@ -480,8 +479,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         "INSERT INTO tasks (
             id, created_at, updated_at, title, description, assigned_to, due_date,
             duration_minutes, priority, status, calendar_event_id, source,
-            message_id, telegram_message_id, email_sender, email_subject,
-            due_at, reminded_at
+            message_id, email_sender, email_subject, due_at, reminded_at
          )
          SELECT
             id,
@@ -497,7 +495,6 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             {calendar_event_id},
             {source},
             {message_id},
-            {telegram_message_id},
             {email_sender},
             {email_subject},
             {due_at},
@@ -515,7 +512,6 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         calendar_event_id = col("calendar_event_id", "NULL"),
         source = col("source", "'manual'"),
         message_id = col("message_id", "NULL"),
-        telegram_message_id = col("telegram_message_id", "NULL"),
         email_sender = col("email_sender", "NULL"),
         email_subject = col("email_subject", "NULL"),
         due_at = col("due_at", "NULL"),
@@ -723,6 +719,26 @@ mod tests {
                 "fresh DB tasks missing column `{required}`; have {names:?}"
             );
         }
+        assert!(
+            !names.contains("telegram_message_id"),
+            "fresh DB must not retain Telegram correlation"
+        );
+
+        sqlx::query(
+            "INSERT INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
+             VALUES ('task-1', 'direct', 'aci-1', 42)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert Signal task mapping");
+        let mapped_task: String = sqlx::query_scalar(
+            "SELECT task_id FROM task_signal_messages \
+             WHERE recipient_kind = 'direct' AND recipient_id = 'aci-1' AND message_timestamp = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look up Signal task mapping");
+        assert_eq!(mapped_task, "task-1");
 
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(

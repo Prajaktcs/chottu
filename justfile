@@ -16,9 +16,11 @@ setup:
     if [ ! -f .env ]; then
         echo "Creating template .env file..."
         echo "# Project Chotu Environment Secrets" > .env
-        echo "TELEGRAM_BOT_TOKEN=" >> .env
+        echo "SIGNAL_ACCOUNT=" >> .env
+        echo "SIGNAL_CLI_DATA_DIR=" >> .env
+        echo "SIGNAL_CLI_SOCKET=" >> .env
+        echo "SIGNAL_GROUP_ID=" >> .env
         echo "GEMINI_API_KEY=" >> .env
-        echo "TELEGRAM_CHAT_ID=" >> .env
         echo "" >> .env
         echo "# Ollama Configuration" >> .env
         echo "OLLAMA_HOST=http://localhost" >> .env
@@ -44,9 +46,14 @@ prereqs:
 # Run the supervisor coordinator
 run: setup
     #!/usr/bin/env bash
-    if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$GEMINI_API_KEY" ]; then
-        echo "WARNING: TELEGRAM_BOT_TOKEN or GEMINI_API_KEY is not configured in your environment or .env file."
+    if [ -z "$SIGNAL_CLI_SOCKET" ] || [ -z "$GEMINI_API_KEY" ]; then
+        echo "WARNING: SIGNAL_CLI_SOCKET or GEMINI_API_KEY is not configured in your environment or .env file."
         echo "Please edit the .env file and add your credentials first."
+        exit 1
+    fi
+    if [ ! -S "$SIGNAL_CLI_SOCKET" ]; then
+        echo "SIGNAL_CLI_SOCKET is not a Unix socket: $SIGNAL_CLI_SOCKET"
+        echo "Start signal-cli before just run."
         exit 1
     fi
     cargo run -p coordinator

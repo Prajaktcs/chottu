@@ -21,7 +21,7 @@ struct BriefBillRow {
     due_date: Option<String>,
 }
 
-/// Assemble a Markdown morning brief for Telegram.
+/// Assemble a morning brief for Signal.
 ///
 /// When `for_member_id` is set (linked personal DM), calendar, tasks, nutrition,
 /// and training sections are scoped to that member so private chats do not see

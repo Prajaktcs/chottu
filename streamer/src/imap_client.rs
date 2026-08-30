@@ -451,10 +451,8 @@ where
                         }
 
                         let id = uuid::Uuid::new_v4().to_string();
-                        let telegram_msg_id = send_telegram_reminder(&task_desc, config).await;
-
-                        sqlx::query(
-                            "INSERT OR IGNORE INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, status, source, message_id, telegram_message_id, email_sender, email_subject, calendar_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        let inserted = sqlx::query(
+                            "INSERT OR IGNORE INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, status, source, message_id, email_sender, email_subject, calendar_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                         )
                         .bind(&id)
                         .bind(email_date)
@@ -465,12 +463,14 @@ where
                         .bind("open")
                         .bind("inferred")
                         .bind(&message_id)
-                        .bind(telegram_msg_id)
                         .bind(&metadata.sender)
                         .bind(&metadata.subject)
                         .bind(calendar_event_id.as_deref())
                         .execute(pool)
                         .await?;
+                        if inserted.rows_affected() > 0 {
+                            send_signal_reminder(pool, &id, &task_desc, config).await;
+                        }
                         println!("Action item committed to database: {}", task_desc);
 
                         let mem = MemoryIndex::from_env();
@@ -955,41 +955,75 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
     output.trim().to_string()
 }
 
-async fn send_telegram_reminder(task_desc: &str, config: &AppConfig) -> Option<i32> {
-    let Ok(token) =
-        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
-    else {
-        println!("Telegram credentials not fully configured; skipping notification push.");
-        return None;
+async fn send_signal_reminder(
+    pool: &SqlitePool,
+    task_id: &str,
+    task_desc: &str,
+    config: &AppConfig,
+) {
+    let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => {
+            println!("SIGNAL_CLI_SOCKET is missing; skipping notification push.");
+            return;
+        }
     };
-    let targets = chotu_common::telegram_delivery_targets(config);
+    let targets = chotu_common::signal_delivery_targets(config);
     if targets.is_empty() {
-        println!("Telegram delivery targets empty; skipping notification push.");
-        return None;
+        println!("Signal delivery targets empty; skipping notification push.");
+        return;
     }
-    let bot = teloxide::Bot::new(token);
-    // Plain text: task descriptions from email can contain Markdown metacharacters.
-    let message = format!("🔔 Action Item Reminder:\n{}", task_desc);
-    use teloxide::requests::Requester;
-    let mut last_msg_id = None;
-    for cid in targets {
-        match bot
-            .send_message(teloxide::types::ChatId(cid), message.clone())
-            .await
-        {
-            Ok(msg) => {
-                println!("Action item reminder sent to Telegram chat {}.", cid);
-                last_msg_id = Some(msg.id.0);
+    let client = match chotu_common::SignalClient::connect(&socket).await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("SIGNAL_CLI_SOCKET is unreachable ({socket}): {error:?}");
+            return;
+        }
+    };
+    let message = format!("Action Item Reminder:\n{}", task_desc);
+    for recipient in targets {
+        match client.send_text(&recipient, &message).await {
+            Ok(timestamp) => {
+                if let Err(error) = record_task_signal_message(pool, task_id, &recipient, timestamp).await {
+                    eprintln!("Failed to persist Signal reminder mapping for {task_id}: {error:?}");
+                } else {
+                    println!("Action item reminder sent to Signal {recipient}.");
+                }
             }
-            Err(e) => {
-                eprintln!(
-                    "Failed to send action item reminder to {}: {:?}",
-                    cid, e
-                );
+            Err(error) => {
+                eprintln!("Failed to send action item reminder to {recipient}: {error:?}");
             }
         }
     }
-    last_msg_id
+}
+
+pub(crate) fn signal_mapping_parts(
+    recipient: &chotu_common::SignalRecipient,
+) -> (&'static str, String) {
+    match recipient {
+        chotu_common::SignalRecipient::Direct { aci } => ("direct", aci.clone()),
+        chotu_common::SignalRecipient::Group { group_id } => ("group", group_id.clone()),
+    }
+}
+
+async fn record_task_signal_message(
+    pool: &SqlitePool,
+    task_id: &str,
+    recipient: &chotu_common::SignalRecipient,
+    timestamp: i64,
+) -> Result<(), sqlx::Error> {
+    let (kind, recipient_id) = signal_mapping_parts(recipient);
+    sqlx::query(
+        "INSERT OR IGNORE INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(task_id)
+    .bind(kind)
+    .bind(recipient_id)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, Vec<u8>)>) {
@@ -1006,5 +1040,58 @@ fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, 
     }
     for subpart in &parsed.subparts {
         find_pdf_attachments(subpart, pdfs);
+    }
+}
+
+#[cfg(test)]
+mod signal_mapping_tests {
+    use super::*;
+    use chotu_common::{init_db, SignalRecipient};
+
+    #[test]
+    fn mapping_parts_cover_direct_and_group() {
+        assert_eq!(
+            signal_mapping_parts(&SignalRecipient::Direct { aci: "aci-1".into() }),
+            ("direct", "aci-1".into())
+        );
+        assert_eq!(
+            signal_mapping_parts(&SignalRecipient::Group { group_id: "g1".into() }),
+            ("group", "g1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn each_successful_recipient_creates_one_mapping() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("map.db");
+        let pool = init_db(db.to_str().unwrap()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO tasks (id, created_at, updated_at, title, status, source) VALUES ('task-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'buy milk', 'open', 'inferred')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let recipients = [
+            SignalRecipient::Direct { aci: "aci-1".into() },
+            SignalRecipient::Group { group_id: "household".into() },
+        ];
+        for (idx, recipient) in recipients.iter().enumerate() {
+            record_task_signal_message(&pool, "task-1", recipient, 100 + idx as i64)
+                .await
+                .unwrap();
+        }
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT recipient_kind, recipient_id, message_timestamp FROM task_signal_messages WHERE task_id = 'task-1' ORDER BY message_timestamp"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("direct".into(), "aci-1".into(), 100),
+                ("group".into(), "household".into(), 101),
+            ]
+        );
     }
 }

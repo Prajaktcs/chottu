@@ -35,7 +35,7 @@ What leaves is temporary: processing and extraction the mini cannot do yet. A fo
 
 ## How it runs
 
-The baseline this was built for is a Mac mini: local Ollama, SQLite, a Telegram bot, optional API calls for the jobs the mini cannot do. `just setup`, fill `.env` and `config.yaml`, `just run`. How each command behaves is in [`docs/README.md`](docs/README.md). How the process is shaped is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+The baseline this was built for is a Mac mini: local Ollama, SQLite, a Signal interface via `signal-cli`, optional API calls for the jobs the mini cannot do. `just setup`, fill `.env` and `config.yaml`, start the signal-cli daemon, then `just run`. How each command behaves is in [`docs/README.md`](docs/README.md). How the process is shaped is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## If you want to contribute
 
