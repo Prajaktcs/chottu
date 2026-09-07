@@ -960,6 +960,14 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
     output.trim().to_string()
 }
 
+fn action_item_reminder_message(task_id: &str, task_desc: &str) -> String {
+    let short_id: String = task_id.chars().take(8).collect();
+    format!(
+        "Action Item Reminder:\n`{}` {}\n/tasks complete {} · /tasks snooze {} [days]",
+        short_id, task_desc, short_id, short_id
+    )
+}
+
 async fn send_signal_reminder(
     pool: &SqlitePool,
     task_id: &str,
@@ -985,7 +993,7 @@ async fn send_signal_reminder(
             return;
         }
     };
-    let message = format!("Action Item Reminder:\n{}", task_desc);
+    let message = action_item_reminder_message(task_id, task_desc);
     for recipient in targets {
         match client.send_text(&recipient, &message).await {
             Ok(timestamp) => {
@@ -1052,6 +1060,18 @@ fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, 
 mod signal_mapping_tests {
     use super::*;
     use chotu_common::{init_db, SignalRecipient};
+
+    #[test]
+    fn action_item_reminder_includes_id_and_commands() {
+        let msg = action_item_reminder_message(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            "Reply to the HOA about parking",
+        );
+        assert!(msg.contains("`abcdef12`"));
+        assert!(msg.contains("Reply to the HOA about parking"));
+        assert!(msg.contains("/tasks complete abcdef12"));
+        assert!(msg.contains("/tasks snooze abcdef12 [days]"));
+    }
 
     #[test]
     fn mapping_parts_cover_direct_and_group() {
