@@ -14,6 +14,7 @@ Chotu’s chat transport is now **Signal via `signal-cli`** (Unix-socket JSON-RP
 ## You miss (or change)
 
 ### 1. Tap-to-act task buttons
+
 Telegram had **inline keyboards + callback queries** on reminders/task lists (“Complete” / “Snooze” buttons that edited the message).
 
 On Signal those are gone. Reminders print plain-text instructions instead:
@@ -24,14 +25,17 @@ On Signal those are gone. Reminders print plain-text instructions instead:
 ```
 
 ### 2. Real Markdown rendering
+
 Telegram `ParseMode::Markdown` made `*bold*` / `_italic_` render. Signal `send_text` is plain text, so leftover `*` / `_` show literally until formatters are cleaned.
 
 Health sync/nudge copy and the budget/food mutation replies called out in PR review are plain text. Broader status/trends/plan Markdown cleanup may still remain.
 
 ### 3. In-place message edits
+
 Telegram could clear/update keyboard markup and edit reminder text after a tap. Signal has **no edit-message UX** in this client — replies are new messages only.
 
 ### 4. Bot-platform conveniences
+
 Gone with Teloxide / Bot API:
 
 - Bot usernames / `/command@bot` routing quirks (mostly irrelevant on Signal)
@@ -39,6 +43,7 @@ Gone with Teloxide / Bot API:
 - Teloxide dependency / bot tokens (`TELEGRAM_*` env vars)
 
 ### 5. Ops surface is heavier
+
 Telegram was “create bot → paste token.” Signal needs:
 
 - `signal-cli` linked as a secondary device
@@ -47,6 +52,7 @@ Telegram was “create bot → paste token.” Signal needs:
 - `/link` in a **1:1 DM** to write each member’s ACI (groups rejected for `/link`)
 
 ### 6. Reminder correlation model
+
 Telegram stored `tasks.telegram_message_id` for reply correlation. Signal uses `task_signal_messages` keyed by **recipient + outbound timestamp** (and inbound quote timestamp when present). Email “unactionable” replies still work; the wiring is different under the hood.
 
 ## Non-goals that did **not** change with this switch
