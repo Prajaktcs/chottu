@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
 
     let targets = parse_targets(env::args().skip(1).collect())?;
-    let philosophy = load_philosophy();
+    let philosophy = load_philosophy()?;
     let run_id = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
     let out_root = PathBuf::from("evals/research-ab").join(&run_id);
     fs::create_dir_all(&out_root)
@@ -152,10 +152,13 @@ fn parse_targets(args: Vec<String>) -> Result<String> {
     Ok(targets.unwrap_or_else(|| DEFAULT_TARGETS.to_string()))
 }
 
-fn load_philosophy() -> InvestmentPhilosophy {
-    let cfg = load_config(config_path()).expect("valid config.yaml");
-    cfg.investment_philosophy
-        .unwrap_or_else(InvestmentPhilosophy::default)
+fn load_philosophy() -> Result<InvestmentPhilosophy> {
+    let cfg = load_config(config_path())
+        .map_err(anyhow::Error::msg)
+        .context("Failed to load configuration")?;
+    Ok(cfg
+        .investment_philosophy
+        .unwrap_or_else(InvestmentPhilosophy::default))
 }
 
 fn write_arm_artifacts(

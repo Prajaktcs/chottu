@@ -901,7 +901,7 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
         .map_err(|e| format!("Failed to read configuration file {:?}: {e}", path_ref))?;
     let config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
         format!(
-            "Failed to parse configuration file {:?}: {e}.              Remove legacy keys (e.g. telegram_chat_id) and match config.yaml.example.",
+            "Failed to parse configuration file {:?}: {e}. Remove legacy keys (e.g. telegram_chat_id) and match config.yaml.example.",
             path_ref
         )
     })?;
