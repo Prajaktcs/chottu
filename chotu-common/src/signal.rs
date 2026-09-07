@@ -395,7 +395,7 @@ fn dispatch_frame(
 ) -> Result<(), SignalError> {
     let frame = str::from_utf8(frame)
         .map_err(|error| SignalError::Utf8(error.to_string()))?
-        .trim_end_matches(['\r', '\n']);
+        .trim_end_matches(&['\r', '\n'][..]);
     let message: Value = serde_json::from_str(frame)
         .map_err(|error| SignalError::Json(error.to_string()))?;
 

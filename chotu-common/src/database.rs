@@ -288,8 +288,7 @@ async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
 
     let mut tx = pool.begin().await?;
     if has_created_at.0 > 0 {
@@ -545,8 +544,7 @@ async fn drop_tasks_telegram_message_id_if_present(pool: &SqlitePool) -> Result<
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
     if has_tasks.0 == 0 {
         return Ok(());
     }
@@ -555,8 +553,7 @@ async fn drop_tasks_telegram_message_id_if_present(pool: &SqlitePool) -> Result<
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='telegram_message_id'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
     if has_col.0 == 0 {
         return Ok(());
     }
@@ -574,8 +571,7 @@ async fn drop_tasks_telegram_message_id_if_present(pool: &SqlitePool) -> Result<
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
     if has_created_at.0 == 0 {
         // Legacy shape still present; ensure_modern_tasks_schema owns the rebuild.
         return Ok(());
