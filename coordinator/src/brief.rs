@@ -1,9 +1,9 @@
 //! Morning brief: calendar, open tasks, bills due, yesterday's nutrition vs goals, training.
 
-use chrono::{Duration, Local};
 use chotu_common::{
     escape_md, format_brief_calendar_section, truncate, AppConfig, HealthFamilySummary,
 };
+use chrono::{Duration, Local};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -21,7 +21,7 @@ struct BriefBillRow {
     due_date: Option<String>,
 }
 
-/// Assemble a morning brief for Signal.
+/// Assemble a Markdown-formatted morning brief for plain-text delivery on Signal.
 ///
 /// When `for_member_id` is set (linked personal DM), calendar, tasks, nutrition,
 /// and training sections are scoped to that member so private chats do not see
@@ -201,10 +201,7 @@ async fn format_bills_section(pool: &SqlitePool, today: &str) -> String {
 
     let mut lines = String::new();
     for b in rows {
-        let amount = b
-            .amount
-            .map(|a| format!(" ${:.2}", a))
-            .unwrap_or_default();
+        let amount = b.amount.map(|a| format!(" ${:.2}", a)).unwrap_or_default();
         let due = b.due_date.as_deref().unwrap_or("?");
         let urgency = if due < today {
             " *overdue*"
