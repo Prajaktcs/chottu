@@ -1327,7 +1327,7 @@ async fn handle_clear_food(
     };
 
     send_signal(&bot, chat_id, format!(
-            "🧹 *Today's Telegram food logs cleared* for *{}*.\n\
+            "🧹 Today's food logs cleared for {}.\n\
              Remaining (e.g. Google Health): {} kcal · {:.0}g P / {:.0}g C / {:.0}g F",
             target_member_id, rebuilt.calories, rebuilt.protein, rebuilt.carbs, rebuilt.fats
         ),)
@@ -1501,7 +1501,7 @@ async fn handle_adjust_food(
     }
 
     let msg = format!(
-        "✅ *Nutrition Updated* for *{}* (Telegram food logs replaced):\n\n\
+        "✅ Nutrition Updated for {} (food logs replaced):\n\n\
          • Calories: {} kcal\n\
          • Protein: {:.1}g\n\
          • Carbs: {:.1}g\n\
@@ -3898,11 +3898,11 @@ async fn handle_budget(
                 Ok(()) => {
                     let base = config.currency();
                     send_signal(&bot, chat_id, format!(
-                            "✅ Budget set: *{}* → ${:.0} {} / month\n\n{}",
+                            "✅ Budget set: {} → ${:.0} {} / month\n\n{}",
                             (display),
                             amount,
                             base,
-                            "_Telegram override (wins over config.yaml)._"
+                            "Override saved (wins over config.yaml)."
                         ),)
                     .await?;
                     send_budget_progress(bot, chat_id, pool, config).await?;
@@ -3925,7 +3925,7 @@ async fn handle_budget(
             match clear_budget_override(pool, &display).await {
                 Ok(true) => {
                     send_signal(&bot, chat_id, format!(
-                            "✅ Cleared Telegram override for *{}* (falls back to config.yaml if set).",
+                            "✅ Cleared budget override for {} (falls back to config.yaml if set).",
                             (display)
                         ),)
                     .await?;
@@ -3933,7 +3933,7 @@ async fn handle_budget(
                 }
                 Ok(false) => {
                     send_signal(&bot, chat_id, format!(
-                            "ℹ️ No Telegram override found for *{}*. YAML budgets are unchanged.",
+                            "ℹ️ No budget override found for {}. YAML budgets are unchanged.",
                             (display)
                         ),)
                     .await?;

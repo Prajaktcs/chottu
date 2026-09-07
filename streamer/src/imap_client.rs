@@ -470,25 +470,30 @@ where
                         .await?;
                         if inserted.rows_affected() > 0 {
                             send_signal_reminder(pool, &id, &task_desc, config).await;
-                        }
-                        println!("Action item committed to database: {}", task_desc);
+                            println!("Action item committed to database: {}", task_desc);
 
-                        let mem = MemoryIndex::from_env();
-                        let created_at_str = email_date.to_rfc3339();
-                        if let Err(e) = mem
-                            .index_task(
-                                pool,
-                                &id,
-                                &task_desc,
-                                None,
-                                "open",
-                                due_date.as_deref(),
-                                assigned_to_member.as_deref(),
-                                Some(&created_at_str),
-                            )
-                            .await
-                        {
-                            eprintln!("Memory: failed to index new task: {:?}", e);
+                            let mem = MemoryIndex::from_env();
+                            let created_at_str = email_date.to_rfc3339();
+                            if let Err(e) = mem
+                                .index_task(
+                                    pool,
+                                    &id,
+                                    &task_desc,
+                                    None,
+                                    "open",
+                                    due_date.as_deref(),
+                                    assigned_to_member.as_deref(),
+                                    Some(&created_at_str),
+                                )
+                                .await
+                            {
+                                eprintln!("Memory: failed to index new task: {:?}", e);
+                            }
+                        } else {
+                            println!(
+                                "Action item skipped (duplicate message_id); not indexing memory for {}",
+                                task_desc
+                            );
                         }
 
                         let mut seen_stream = session.uid_store(&query, "+FLAGS (\\Seen)").await?;
