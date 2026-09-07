@@ -12,7 +12,6 @@ finance-advisor = { path = "../finance-advisor" }
 tokio = { workspace = true }
 sqlx = { workspace = true }
 anyhow = { workspace = true }
-teloxide = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 serde = { workspace = true }

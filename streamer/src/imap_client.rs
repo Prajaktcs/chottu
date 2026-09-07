@@ -2,9 +2,9 @@ use anyhow::{Context, Result};
 use async_imap::extensions::idle::IdleResponse;
 use chotu_common::{
     format_xoauth2_string, looks_like_non_transaction_alert, refresh_oauth2_token,
-    validate_ledger_amount, AppConfig, ChotuLlm, EmailClassification, EmailMetadata,
-    LedgerExtraction, ActionItemExtraction, TravelItineraryExtraction, UpcomingBillExtraction,
-    MemoryIndex, PersonalReferenceExtraction,
+    validate_ledger_amount, ActionItemExtraction, AppConfig, ChotuLlm, EmailClassification,
+    EmailMetadata, LedgerExtraction, MemoryIndex, PersonalReferenceExtraction,
+    TravelItineraryExtraction, UpcomingBillExtraction,
 };
 use futures::StreamExt;
 use native_tls::TlsConnector;
@@ -451,10 +451,8 @@ where
                         }
 
                         let id = uuid::Uuid::new_v4().to_string();
-                        let telegram_msg_id = send_telegram_reminder(&task_desc, config).await;
-
-                        sqlx::query(
-                            "INSERT OR IGNORE INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, status, source, message_id, telegram_message_id, email_sender, email_subject, calendar_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        let inserted = sqlx::query(
+                            "INSERT OR IGNORE INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, status, source, message_id, email_sender, email_subject, calendar_event_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                         )
                         .bind(&id)
                         .bind(email_date)
@@ -465,30 +463,37 @@ where
                         .bind("open")
                         .bind("inferred")
                         .bind(&message_id)
-                        .bind(telegram_msg_id)
                         .bind(&metadata.sender)
                         .bind(&metadata.subject)
                         .bind(calendar_event_id.as_deref())
                         .execute(pool)
                         .await?;
-                        println!("Action item committed to database: {}", task_desc);
+                        if inserted.rows_affected() > 0 {
+                            send_signal_reminder(pool, &id, &task_desc, config).await;
+                            println!("Action item committed to database: {}", task_desc);
 
-                        let mem = MemoryIndex::from_env();
-                        let created_at_str = email_date.to_rfc3339();
-                        if let Err(e) = mem
-                            .index_task(
-                                pool,
-                                &id,
-                                &task_desc,
-                                None,
-                                "open",
-                                due_date.as_deref(),
-                                assigned_to_member.as_deref(),
-                                Some(&created_at_str),
-                            )
-                            .await
-                        {
-                            eprintln!("Memory: failed to index new task: {:?}", e);
+                            let mem = MemoryIndex::from_env();
+                            let created_at_str = email_date.to_rfc3339();
+                            if let Err(e) = mem
+                                .index_task(
+                                    pool,
+                                    &id,
+                                    &task_desc,
+                                    None,
+                                    "open",
+                                    due_date.as_deref(),
+                                    assigned_to_member.as_deref(),
+                                    Some(&created_at_str),
+                                )
+                                .await
+                            {
+                                eprintln!("Memory: failed to index new task: {:?}", e);
+                            }
+                        } else {
+                            println!(
+                                "Action item skipped (duplicate message_id); not indexing memory for {}",
+                                task_desc
+                            );
                         }
 
                         let mut seen_stream = session.uid_store(&query, "+FLAGS (\\Seen)").await?;
@@ -588,7 +593,10 @@ where
                         .bind(&message_id)
                         .execute(pool)
                         .await?;
-                        println!("Travel itinerary committed to database for: {}", ext.destination);
+                        println!(
+                            "Travel itinerary committed to database for: {}",
+                            ext.destination
+                        );
 
                         let mut seen_stream = session.uid_store(&query, "+FLAGS (\\Seen)").await?;
                         while seen_stream.next().await.is_some() {}
@@ -651,7 +659,10 @@ where
                         .bind(&message_id)
                         .execute(pool)
                         .await?;
-                        println!("Upcoming bill committed to database: {} (Due: {:?})", ext.biller, ext.due_date);
+                        println!(
+                            "Upcoming bill committed to database: {} (Due: {:?})",
+                            ext.biller, ext.due_date
+                        );
 
                         let mut seen_stream = session.uid_store(&query, "+FLAGS (\\Seen)").await?;
                         while seen_stream.next().await.is_some() {}
@@ -674,10 +685,17 @@ where
                                         if pdfs.is_empty() {
                                             println!("No PDF attachments found in statement document email.");
                                         } else {
-                                            let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
-                                            let drop_dir = std::path::PathBuf::from(home).join("chotu_drop");
-                                            if let Err(e) = tokio::fs::create_dir_all(&drop_dir).await {
-                                                eprintln!("Failed to create drop directory: {:?}", e);
+                                            let home = std::env::var("HOME")
+                                                .unwrap_or_else(|_| "/Users/user".to_string());
+                                            let drop_dir =
+                                                std::path::PathBuf::from(home).join("chotu_drop");
+                                            if let Err(e) =
+                                                tokio::fs::create_dir_all(&drop_dir).await
+                                            {
+                                                eprintln!(
+                                                    "Failed to create drop directory: {:?}",
+                                                    e
+                                                );
                                             } else {
                                                 for (filename, content) in pdfs {
                                                     let unique_filename = format!(
@@ -686,10 +704,18 @@ where
                                                         filename
                                                     );
                                                     let file_path = drop_dir.join(&unique_filename);
-                                                    if let Err(e) = tokio::fs::write(&file_path, content).await {
-                                                        eprintln!("Failed to save PDF attachment: {:?}", e);
+                                                    if let Err(e) =
+                                                        tokio::fs::write(&file_path, content).await
+                                                    {
+                                                        eprintln!(
+                                                            "Failed to save PDF attachment: {:?}",
+                                                            e
+                                                        );
                                                     } else {
-                                                        println!("Saved PDF attachment to: {:?}", file_path);
+                                                        println!(
+                                                            "Saved PDF attachment to: {:?}",
+                                                            file_path
+                                                        );
                                                     }
                                                 }
                                             }
@@ -711,16 +737,20 @@ where
                     EmailClassification::Newsletter => {
                         println!("Processing newsletter for message {}...", uid);
                         session.uid_copy(&query, "AI-ReadingList").await?;
-                        let mut delete_stream = session.uid_store(&query, "+FLAGS (\\Deleted)").await?;
+                        let mut delete_stream =
+                            session.uid_store(&query, "+FLAGS (\\Deleted)").await?;
                         while delete_stream.next().await.is_some() {}
                         drop(delete_stream);
                         let mut expunge_stream = Box::pin(session.expunge().await?);
                         while expunge_stream.next().await.is_some() {}
                         drop(expunge_stream);
 
-                        let brain_dir_str = std::env::var("CHOTU_BRAIN_DIR").unwrap_or_else(|_| "~/chotu_brain".to_string());
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
-                        let brain_path = std::path::PathBuf::from(brain_dir_str.replace("~", &home));
+                        let brain_dir_str = std::env::var("CHOTU_BRAIN_DIR")
+                            .unwrap_or_else(|_| "~/chotu_brain".to_string());
+                        let home =
+                            std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
+                        let brain_path =
+                            std::path::PathBuf::from(brain_dir_str.replace("~", &home));
                         let readings_dir = brain_path.join("Readings");
 
                         if let Err(e) = tokio::fs::create_dir_all(&readings_dir).await {
@@ -731,7 +761,10 @@ where
 
                             let mut md_content = String::new();
                             if !file_path.exists() {
-                                md_content.push_str(&format!("# Daily Newsletter Digest - {}\n\n", today));
+                                md_content.push_str(&format!(
+                                    "# Daily Newsletter Digest - {}\n\n",
+                                    today
+                                ));
                             }
                             md_content.push_str(&format!(
                                 "## {}\n- **Sender**: {}\n- **Received At**: {}\n- **Preview**: {}\n\n---\n\n",
@@ -751,7 +784,10 @@ where
                                 if let Err(e) = file.write_all(md_content.as_bytes()).await {
                                     eprintln!("Failed to write newsletter digest: {:?}", e);
                                 } else {
-                                    println!("Appended newsletter to daily digest: {:?}", file_path);
+                                    println!(
+                                        "Appended newsletter to daily digest: {:?}",
+                                        file_path
+                                    );
                                 }
                             }
                         }
@@ -800,9 +836,12 @@ where
                             eprintln!("Memory: failed to index personal reference: {:?}", e);
                         }
 
-                        let brain_dir_str = std::env::var("CHOTU_BRAIN_DIR").unwrap_or_else(|_| "~/chotu_brain".to_string());
-                        let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
-                        let brain_path = std::path::PathBuf::from(brain_dir_str.replace("~", &home));
+                        let brain_dir_str = std::env::var("CHOTU_BRAIN_DIR")
+                            .unwrap_or_else(|_| "~/chotu_brain".to_string());
+                        let home =
+                            std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
+                        let brain_path =
+                            std::path::PathBuf::from(brain_dir_str.replace("~", &home));
                         let references_dir = brain_path.join("References");
 
                         if let Err(e) = tokio::fs::create_dir_all(&references_dir).await {
@@ -876,11 +915,11 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
     let mut clean_text = String::new();
     let mut in_tag = false;
     let mut tag_content = String::new();
-    
+
     // Track whether we are inside a style or script tag block
     let mut in_style = false;
     let mut in_script = false;
-    
+
     let chars: Vec<char> = body_str.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -906,7 +945,7 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
             i += 1;
             continue;
         }
-        
+
         if in_tag {
             tag_content.push(c);
         } else if !in_style && !in_script {
@@ -918,26 +957,28 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
                 clean_text.push(c);
             }
         }
-        
+
         if clean_text.len() >= 300 {
             break;
         }
         i += 1;
     }
-    
+
     let mut finalized = String::new();
     for line in clean_text.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with("--") 
+        if trimmed.starts_with("--")
             || trimmed.to_lowercase().starts_with("content-type:")
-            || trimmed.to_lowercase().starts_with("content-transfer-encoding:")
+            || trimmed
+                .to_lowercase()
+                .starts_with("content-transfer-encoding:")
         {
             continue;
         }
         finalized.push_str(trimmed);
         finalized.push(' ');
     }
-    
+
     let mut output = String::new();
     let mut last_was_space = false;
     for c in finalized.chars() {
@@ -951,45 +992,113 @@ fn parse_body_preview(body_bytes: &[u8]) -> String {
             last_was_space = false;
         }
     }
-    
+
     output.trim().to_string()
 }
 
-async fn send_telegram_reminder(task_desc: &str, config: &AppConfig) -> Option<i32> {
-    let Ok(token) =
-        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
-    else {
-        println!("Telegram credentials not fully configured; skipping notification push.");
-        return None;
+fn action_item_reminder_message(task_id: &str, task_desc: &str) -> String {
+    let short_id: String = task_id.chars().take(8).collect();
+    format!(
+        "Action Item Reminder:\n`{}` {}\n/tasks complete {} · /tasks snooze {} [days]",
+        short_id, task_desc, short_id, short_id
+    )
+}
+
+async fn send_signal_reminder(
+    pool: &SqlitePool,
+    task_id: &str,
+    task_desc: &str,
+    config: &AppConfig,
+) {
+    let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => {
+            println!("SIGNAL_CLI_SOCKET is missing; skipping notification push.");
+            return;
+        }
     };
-    let targets = chotu_common::telegram_delivery_targets(config);
+    let targets = chotu_common::signal_delivery_targets(config);
     if targets.is_empty() {
-        println!("Telegram delivery targets empty; skipping notification push.");
-        return None;
+        println!("Signal delivery targets empty; skipping notification push.");
+        return;
     }
-    let bot = teloxide::Bot::new(token);
-    // Plain text: task descriptions from email can contain Markdown metacharacters.
-    let message = format!("🔔 Action Item Reminder:\n{}", task_desc);
-    use teloxide::requests::Requester;
-    let mut last_msg_id = None;
-    for cid in targets {
-        match bot
-            .send_message(teloxide::types::ChatId(cid), message.clone())
-            .await
-        {
-            Ok(msg) => {
-                println!("Action item reminder sent to Telegram chat {}.", cid);
-                last_msg_id = Some(msg.id.0);
+    let client = match chotu_common::SignalClient::connect(&socket).await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("SIGNAL_CLI_SOCKET is unreachable ({socket}): {error:?}");
+            return;
+        }
+    };
+    let message = action_item_reminder_message(task_id, task_desc);
+    for recipient in targets {
+        match client.send_text(&recipient, &message).await {
+            Ok(timestamp) => {
+                if let Err(error) =
+                    record_task_signal_message(pool, task_id, &recipient, timestamp).await
+                {
+                    eprintln!("Failed to persist Signal reminder mapping for {task_id}: {error:?}");
+                } else {
+                    println!("Action item reminder sent to Signal {recipient}.");
+                }
             }
-            Err(e) => {
-                eprintln!(
-                    "Failed to send action item reminder to {}: {:?}",
-                    cid, e
-                );
+            Err(error) => {
+                eprintln!("Failed to send action item reminder to {recipient}: {error:?}");
             }
         }
     }
-    last_msg_id
+}
+
+pub(crate) fn signal_mapping_parts(
+    recipient: &chotu_common::SignalRecipient,
+) -> (&'static str, String) {
+    match recipient {
+        chotu_common::SignalRecipient::Direct { aci } => ("direct", aci.clone()),
+        chotu_common::SignalRecipient::Group { group_id } => ("group", group_id.clone()),
+    }
+}
+
+async fn record_task_signal_message(
+    pool: &SqlitePool,
+    task_id: &str,
+    recipient: &chotu_common::SignalRecipient,
+    timestamp: i64,
+) -> Result<()> {
+    let (kind, recipient_id) = signal_mapping_parts(recipient);
+    let inserted = sqlx::query(
+        "INSERT INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
+         VALUES (?, ?, ?, ?) \
+         ON CONFLICT(recipient_kind, recipient_id, message_timestamp) DO NOTHING",
+    )
+    .bind(task_id)
+    .bind(kind)
+    .bind(&recipient_id)
+    .bind(timestamp)
+    .execute(pool)
+    .await?;
+    if inserted.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    let existing_task: Option<String> = sqlx::query_scalar(
+        "SELECT task_id FROM task_signal_messages \
+         WHERE recipient_kind = ? AND recipient_id = ? AND message_timestamp = ?",
+    )
+    .bind(kind)
+    .bind(&recipient_id)
+    .bind(timestamp)
+    .fetch_optional(pool)
+    .await?;
+    match existing_task.as_deref() {
+        Some(existing) if existing == task_id => Ok(()),
+        Some(existing) => anyhow::bail!(
+            "Signal reminder mapping collision for {kind}:{recipient_id}:{timestamp}: \
+             existing task {existing}, attempted task {task_id}"
+        ),
+        None => anyhow::bail!(
+            "Signal reminder mapping insert was skipped without an existing row for \
+             {kind}:{recipient_id}:{timestamp}"
+        ),
+    }
 }
 
 fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, Vec<u8>)>) {
@@ -1006,5 +1115,111 @@ fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, 
     }
     for subpart in &parsed.subparts {
         find_pdf_attachments(subpart, pdfs);
+    }
+}
+
+#[cfg(test)]
+mod signal_mapping_tests {
+    use super::*;
+    use chotu_common::{init_db, SignalRecipient};
+
+    #[test]
+    fn action_item_reminder_includes_id_and_commands() {
+        let msg = action_item_reminder_message(
+            "abcdef12-3456-7890-abcd-ef1234567890",
+            "Reply to the HOA about parking",
+        );
+        assert!(msg.contains("`abcdef12`"));
+        assert!(msg.contains("Reply to the HOA about parking"));
+        assert!(msg.contains("/tasks complete abcdef12"));
+        assert!(msg.contains("/tasks snooze abcdef12 [days]"));
+    }
+
+    #[test]
+    fn mapping_parts_cover_direct_and_group() {
+        assert_eq!(
+            signal_mapping_parts(&SignalRecipient::Direct {
+                aci: "aci-1".into()
+            }),
+            ("direct", "aci-1".into())
+        );
+        assert_eq!(
+            signal_mapping_parts(&SignalRecipient::Group {
+                group_id: "g1".into()
+            }),
+            ("group", "g1".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn each_successful_recipient_creates_one_mapping() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("map.db");
+        let pool = init_db(db.to_str().unwrap()).await.unwrap();
+        sqlx::query(
+            "INSERT INTO tasks (id, created_at, updated_at, title, status, source) VALUES ('task-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'buy milk', 'open', 'inferred')"
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let recipients = [
+            SignalRecipient::Direct {
+                aci: "aci-1".into(),
+            },
+            SignalRecipient::Group {
+                group_id: "household".into(),
+            },
+        ];
+        for (idx, recipient) in recipients.iter().enumerate() {
+            record_task_signal_message(&pool, "task-1", recipient, 100 + idx as i64)
+                .await
+                .unwrap();
+        }
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT recipient_kind, recipient_id, message_timestamp FROM task_signal_messages WHERE task_id = 'task-1' ORDER BY message_timestamp"
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("direct".into(), "aci-1".into(), 100),
+                ("group".into(), "household".into(), 101),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_mapping_is_idempotent_but_cross_task_collision_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("map-collision.db");
+        let pool = init_db(db.to_str().unwrap()).await.unwrap();
+        for (id, title) in [("task-1", "buy milk"), ("task-2", "call dentist")] {
+            sqlx::query(
+                "INSERT INTO tasks (id, created_at, updated_at, title, status, source) \
+                 VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, 'open', 'inferred')",
+            )
+            .bind(id)
+            .bind(title)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let recipient = SignalRecipient::Direct {
+            aci: "aci-1".into(),
+        };
+
+        record_task_signal_message(&pool, "task-1", &recipient, 42)
+            .await
+            .unwrap();
+        record_task_signal_message(&pool, "task-1", &recipient, 42)
+            .await
+            .expect("same mapping should be idempotent");
+
+        let error = record_task_signal_message(&pool, "task-2", &recipient, 42)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("mapping collision"), "{error}");
     }
 }

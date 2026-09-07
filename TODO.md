@@ -11,24 +11,24 @@
 - [x] Improve formatting of the `/status` command response (currently contains a very long text list of macros/micros/minerals)
 - [x] Send status updates/reports as a different message for each user (rather than a single giant combined message)
 - [x] Fix Google Health nutrient unit conversion (grams → mg/mcg for micros)
-- [x] Merge Telegram `/food` into evening `/sync` instead of overwriting
+- [x] Merge Signal `/food` into evening `/sync` instead of overwriting
 - [x] Allow scheduled Google Health sync when GEMINI_API_KEY is missing
 - [x] Fix `/adjustfood` audit row + `/undofood` inconsistency (rebuild summary from food_log)
 - [x] Slim noisy `/food` / `/undofood` replies (macros-first, like `/status`)
 - [x] Optional: per-member nutrition goals in config + progress on `/status`/`/trends`
-- [x] Two-way food sync: push Telegram `/food` to Google Health; `/sync` treats Google as shared store
+- [x] Two-way food sync: push Signal `/food` to Google Health; `/sync` treats Google as shared store
 
 ## Tasks & Calendar
 
-- [x] Telegram `/tasks` to list open tasks and mark them complete
-- [x] Optional: snooze / reassign tasks from Telegram
+- [x] `/tasks` to list open tasks and mark them complete
+- [x] Optional: snooze / reassign tasks from Signal
 
 ## Personal Agent
 
 ### Short path (build in order)
 
 - [x] Free-text intent router over existing tools (status, tasks, food, sync, trends, networth, monthly)
-- [x] Multimodal food capture (Telegram photo of barcode / package / plate → Open Food Facts + Gemini → food log)
+- [x] Multimodal food capture (Signal photo of barcode / package / plate → Open Food Facts + Gemini → food log)
 - [x] Morning brief (proactive daily digest: calendar, open tasks, bills due, nutrition vs goals)
 - [x] User-created tasks and time-based reminders (not only email-derived)
 - [x] Queryable memory over journals / digests / personal references / tasks (local RAG)
@@ -38,7 +38,7 @@
 - [x] Calendar read/query UX (“what's today?”, conflicts)
 - [x] Proactive coaching on `/status`/`/trends` (advice, not just numbers)
 - [x] Spend alerts / category budgets
-- [x] Family multi-user Telegram UX
+- [x] Family multi-user Signal UX
 - [x] Fitness coach loop: `fitness_goals` + weekly `/plan` + exercise persistence + outcome-aware tips/brief
 - [x] Structured `exercise_log` schema (activity type, duration, active kcal, start/end) beyond free-text descriptions — wire into coach/plan progress without keyword heuristics
 - [ ] Meal planning ↔ grocery lists
