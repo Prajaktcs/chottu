@@ -35,7 +35,7 @@ pub struct HealthSyncReport {
 }
 
 impl HealthSyncReport {
-    /// Plain-text summary for Signal DMs (no Markdown markers).
+    /// Plain-text summary for Signal DMs (no `*`/`_` emphasis; backticks OK).
     pub fn signal_text(&self) -> String {
         let sleep_str = match self.sleep_hours {
             Some(h) => format!("{:.1} hours", h),
