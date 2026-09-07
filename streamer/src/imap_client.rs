@@ -1019,7 +1019,7 @@ async fn record_task_signal_message(
 ) -> Result<(), sqlx::Error> {
     let (kind, recipient_id) = signal_mapping_parts(recipient);
     sqlx::query(
-        "INSERT OR IGNORE INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
+        "INSERT INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
          VALUES (?, ?, ?, ?)",
     )
     .bind(task_id)

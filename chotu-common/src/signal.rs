@@ -301,13 +301,14 @@ async fn run_io_loop(
                         backoff_index = 0;
                         spawn_reader(reader, events.clone(), generation);
                         if subscription_requested {
+                            // Fire-and-forget: do not park a pending waiter. The oneshot
+                            // receiver would be dropped immediately, so a missing daemon
+                            // reply could leave orphan pending entries across reconnects.
+                            // dispatch_frame already ignores unknown response ids.
                             let request_id = next_id;
                             next_id = next_id.wrapping_add(1).max(1);
-                            let (waiter, _ignored) = oneshot::channel();
-                            pending.insert(request_id, waiter);
                             let current = writer.as_mut().expect("just connected");
                             if let Err(error) = write_request(current, request_id, "subscribeReceive", json!({})).await {
-                                pending.remove(&request_id);
                                 disconnect(
                                     &mut writer,
                                     &mut pending,

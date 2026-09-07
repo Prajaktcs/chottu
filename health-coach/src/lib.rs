@@ -210,10 +210,10 @@ async fn notify_member_signal(
         Ok(path) if !path.trim().is_empty() => path,
         _ => return,
     };
+    // Privacy: only the member's linked DM. Never fall back to SIGNAL_GROUP_ID /
+    // household fan-out — that would leak per-member syncs into the shared chat.
     let targets = if let Some(aci) = chotu_common::signal_aci_for_member(config, member_id) {
         vec![chotu_common::SignalRecipient::Direct { aci }]
-    } else if !chotu_common::has_any_signal_link(config) {
-        chotu_common::signal_delivery_targets(config)
     } else {
         Vec::new()
     };
