@@ -4714,7 +4714,7 @@ async fn sync_google_health_nutrition(
                         continue;
                     }
                 }
-                send_signal(&bot, chat_id, report.telegram_markdown())
+                send_signal(&bot, chat_id, report.signal_text())
                     .await?;
                 shown += 1;
             }

@@ -199,6 +199,9 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     ensure_modern_tasks_schema(&pool)
         .await
         .context("Failed to ensure modern tasks schema")?;
+    drop_tasks_telegram_message_id_if_present(&pool)
+        .await
+        .context("Failed to drop tasks.telegram_message_id")?;
 
     backfill_memory_chunk_task_owners(&pool)
         .await
@@ -528,6 +531,114 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     tx.commit().await?;
 
     println!("Database: Modern tasks schema rebuild completed.");
+    Ok(())
+}
+
+/// Remove leftover `tasks.telegram_message_id` after the Signal migration.
+///
+/// The SQL migration intentionally avoids `ALTER TABLE ... DROP COLUMN` (SQLite
+/// >= 3.35). Prefer DROP COLUMN when available; otherwise rebuild the modern
+/// tasks table without that column. Legacy schemas are left alone —
+/// [`ensure_modern_tasks_schema`] already rebuilds them without it.
+async fn drop_tasks_telegram_message_id_if_present(pool: &SqlitePool) -> Result<()> {
+    let has_tasks: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
+    if has_tasks.0 == 0 {
+        return Ok(());
+    }
+
+    let has_col: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='telegram_message_id'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
+    if has_col.0 == 0 {
+        return Ok(());
+    }
+
+    println!("Database: Dropping leftover tasks.telegram_message_id...");
+    if sqlx::query("ALTER TABLE tasks DROP COLUMN telegram_message_id;")
+        .execute(pool)
+        .await
+        .is_ok()
+    {
+        return Ok(());
+    }
+
+    let has_created_at: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or((0,));
+    if has_created_at.0 == 0 {
+        // Legacy shape still present; ensure_modern_tasks_schema owns the rebuild.
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DROP INDEX IF EXISTS idx_tasks_due_at;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE tasks RENAME TO tasks_drop_telegram;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE tasks (
+            id                  TEXT PRIMARY KEY,
+            created_at          DATETIME NOT NULL,
+            updated_at          DATETIME NOT NULL,
+            title               TEXT NOT NULL,
+            description         TEXT,
+            assigned_to         TEXT,
+            due_date            TEXT,
+            duration_minutes    INTEGER NOT NULL DEFAULT 30,
+            priority            TEXT NOT NULL DEFAULT 'medium',
+            status              TEXT NOT NULL DEFAULT 'open',
+            calendar_event_id   TEXT,
+            source              TEXT NOT NULL DEFAULT 'manual',
+            message_id          TEXT,
+            email_sender        TEXT,
+            email_subject       TEXT,
+            due_at              TEXT,
+            reminded_at         TEXT
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tasks (
+            id, created_at, updated_at, title, description, assigned_to, due_date,
+            duration_minutes, priority, status, calendar_event_id, source,
+            message_id, email_sender, email_subject, due_at, reminded_at
+         )
+         SELECT
+            id, created_at, updated_at, title, description, assigned_to, due_date,
+            duration_minutes, priority, status, calendar_event_id, source,
+            message_id, email_sender, email_subject, due_at, reminded_at
+         FROM tasks_drop_telegram;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP TABLE tasks_drop_telegram;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_message_id ON tasks(message_id);")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at);")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    println!("Database: Rebuilt tasks without telegram_message_id.");
     Ok(())
 }
 

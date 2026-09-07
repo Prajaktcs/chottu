@@ -118,7 +118,7 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 report.member_id, report.calories, report.steps
                             );
                             notify_member_signal(
-                                &report.telegram_markdown(),
+                                &report.signal_text(),
                                 &config,
                                 &report.member_id,
                             )
@@ -148,7 +148,7 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 report.member_id, report.steps, goal
                             );
                             notify_member_signal(
-                                &steps_nudge_markdown(report, goal),
+                                &steps_nudge_text(report, goal),
                                 &config,
                                 &report.member_id,
                             )
@@ -180,21 +180,21 @@ fn steps_goal_for_member(config: &chotu_common::AppConfig, member_id: &str) -> i
 }
 
 /// Compact private DM after the late sync — push toward the daily step goal.
-fn steps_nudge_markdown(report: &HealthSyncReport, goal: i32) -> String {
+fn steps_nudge_text(report: &HealthSyncReport, goal: i32) -> String {
     let steps = report.steps;
     let goal = goal.max(1);
     let pct = ((steps as f64 / goal as f64) * 100.0).round() as i32;
     if steps >= goal {
         format!(
-            "🚶 *Steps check* ({})\n\n\
+            "🚶 Steps check ({})\n\n\
              {} / {} steps ({:.0}%) — goal hit. Nice work finishing the day strong.",
             report.date, steps, goal, pct as f64
         )
     } else {
         let remaining = goal - steps;
         format!(
-            "🚶 *Steps check* ({})\n\n\
-             {} / {} steps ({:.0}%). *{} to go* before midnight — a short walk closes the gap.",
+            "🚶 Steps check ({})\n\n\
+             {} / {} steps ({:.0}%). {} to go before midnight — a short walk closes the gap.",
             report.date, steps, goal, pct as f64, remaining
         )
     }
@@ -269,15 +269,29 @@ mod steps_nudge_tests {
 
     #[test]
     fn nudge_when_under_goal() {
-        let md = steps_nudge_markdown(&report(8432), 10_000);
-        assert!(md.contains("8432 / 10000"));
-        assert!(md.contains("1568 to go"));
+        let text = steps_nudge_text(&report(8432), 10_000);
+        assert!(text.contains("8432 / 10000"));
+        assert!(text.contains("1568 to go"));
+        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
     }
 
     #[test]
     fn celebrate_when_goal_hit() {
-        let md = steps_nudge_markdown(&report(10_200), 10_000);
-        assert!(md.contains("goal hit"));
-        assert!(md.contains("10200 / 10000"));
+        let text = steps_nudge_text(&report(10_200), 10_000);
+        assert!(text.contains("goal hit"));
+        assert!(text.contains("10200 / 10000"));
+        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
+    }
+
+    #[test]
+    fn sync_report_is_plain_text() {
+        let mut r = report(5000);
+        r.manual_food_entries = 2;
+        let text = r.signal_text();
+        assert!(text.contains("Google Health Sync Complete"));
+        assert!(text.contains("Includes 2 `/food` entries"));
+        assert!(!text.contains("Telegram"));
+        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
+        assert!(!text.contains('_'), "Signal messages must not use Markdown italics: {text}");
     }
 }

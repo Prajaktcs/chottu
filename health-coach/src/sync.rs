@@ -30,12 +30,13 @@ pub struct HealthSyncReport {
     pub active_calories: i32,
     pub sleep_hours: Option<f64>,
     pub exercises: Vec<ExerciseSession>,
-    /// Number of Telegram `/food` rows merged on top of Google Health totals.
+    /// Number of Signal `/food` rows merged on top of Google Health totals.
     pub manual_food_entries: i64,
 }
 
 impl HealthSyncReport {
-    pub fn telegram_markdown(&self) -> String {
+    /// Plain-text summary for Signal DMs (no Markdown markers).
+    pub fn signal_text(&self) -> String {
         let sleep_str = match self.sleep_hours {
             Some(h) => format!("{:.1} hours", h),
             None => "No sleep log".to_string(),
@@ -53,7 +54,7 @@ impl HealthSyncReport {
 
         let manual_note = if self.manual_food_entries > 0 {
             format!(
-                "\n_Includes {} Telegram `/food` entr{}_",
+                "\nIncludes {} `/food` entr{}",
                 self.manual_food_entries,
                 if self.manual_food_entries == 1 {
                     "y"
@@ -66,15 +67,15 @@ impl HealthSyncReport {
         };
 
         format!(
-            "✅ *Google Health Sync Complete!*\n\n\
-             Logged metrics for *{}* on *{}*:{}\n\n\
-             *Activity & Sleep:*\n\
+            "✅ Google Health Sync Complete!\n\n\
+             Logged metrics for {} on {}:{}\n\n\
+             Activity & Sleep:\n\
              • Steps: {} steps\n\
              • Active Energy: {} kcal\n\
              • Sleep Duration: {}\n\n\
-             *Exercises:*\n\
+             Exercises:\n\
              {}\n\n\
-             *Nutrition:*\n\
+             Nutrition:\n\
              • Calories: {} kcal\n\
              • Protein: {:.1}g | Carbs: {:.1}g | Fats: {:.1}g\n\
              • Fiber: {:.1}g | Sugar: {:.1}g | Sodium: {:.0}mg",

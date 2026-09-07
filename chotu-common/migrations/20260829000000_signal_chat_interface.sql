@@ -1,5 +1,9 @@
 -- Replace Telegram reminder correlation with Signal recipient/timestamp mappings.
-ALTER TABLE tasks DROP COLUMN telegram_message_id;
+--
+-- Do not ALTER TABLE ... DROP COLUMN here: that needs SQLite >= 3.35 and fails hard
+-- on older libsqlite builds. `telegram_message_id` is removed in
+-- `chotu-common::database::drop_tasks_telegram_message_id_if_present` (DROP COLUMN
+-- with a rename+create+copy fallback) after migrations / modern-schema rebuild.
 
 CREATE TABLE task_signal_messages (
     task_id TEXT NOT NULL,
