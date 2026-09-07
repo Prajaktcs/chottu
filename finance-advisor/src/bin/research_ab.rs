@@ -153,7 +153,7 @@ fn parse_targets(args: Vec<String>) -> Result<String> {
 }
 
 fn load_philosophy() -> InvestmentPhilosophy {
-    let cfg = load_config(config_path());
+    let cfg = load_config(config_path()).expect("valid config.yaml");
     cfg.investment_philosophy
         .unwrap_or_else(InvestmentPhilosophy::default)
 }

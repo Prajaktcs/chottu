@@ -30,7 +30,9 @@ async fn main() -> Result<()> {
     let config_path =
         std::env::var("CHOTU_CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
     println!("Loading configuration from: {}", config_path);
-    let config = chotu_common::load_config(&config_path);
+    let config = chotu_common::load_config(&config_path)
+        .map_err(anyhow::Error::msg)
+        .context("Failed to load configuration")?;
     std::env::set_var("CHOTU_TIMEZONE", config.resolved_timezone_name());
     println!(
         "Agent timezone: {} (IANA tz database; instants in SQLite stay UTC)",

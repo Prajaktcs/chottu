@@ -172,6 +172,7 @@ async fn main() -> Result<()> {
     let args = Args::parse(env::args().skip(1).collect())?;
     let fixture = ResearchFixture::load(&args.fixtures)?;
     let philosophy = load_config(config_path())
+        .expect("valid config.yaml")
         .investment_philosophy
         .unwrap_or_else(InvestmentPhilosophy::default);
 

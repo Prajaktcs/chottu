@@ -882,70 +882,65 @@ impl AppConfig {
 }
 
 
-/// Loads application configuration from a file. If the file is missing or fails to parse,
-/// logs a warning and returns default configuration.
-pub fn load_config<P: AsRef<Path>>(path: P) -> AppConfig {
+/// Loads application configuration from a file.
+///
+/// Missing, unreadable, empty-family, or invalid YAML is an error — we never
+/// silently fall back to [`AppConfig::default`]. Legacy keys like
+/// `telegram_chat_id` fail under `deny_unknown_fields`; edit `config.yaml`
+/// rather than keeping soft compatibility.
+pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
     let path_ref = path.as_ref();
     if !path_ref.exists() {
-        println!(
-            "Configuration file {:?} not found. Using default family configuration.",
+        return Err(format!(
+            "Configuration file {:?} not found. Copy config.yaml.example and edit it.",
             path_ref
-        );
-        return AppConfig::default();
+        ));
     }
 
-    match std::fs::read_to_string(path_ref) {
-        Ok(content) => match serde_yaml::from_str::<AppConfig>(&content) {
-            Ok(config) => {
-                if config.family.members.is_empty() {
-                    println!("Configuration file {:?} has no family members. Using default family configuration.", path_ref);
-                    AppConfig::default()
-                } else {
-                    for member in &config.family.members {
-                        if let Some(fg) = member.fitness_goals.as_ref() {
-                            for w in fg.validation_warnings(&member.id) {
-                                eprintln!("Config warning: {}", w);
-                            }
-                        }
-                        for w in member.health_condition_warnings() {
-                            eprintln!("Config warning: {}", w);
-                        }
-                    }
-                    if let Some(cv) = config.core_values.as_ref() {
-                        for w in cv.validation_warnings() {
-                            eprintln!("Config warning: {}", w);
-                        }
-                    }
-                    for w in crate::schedule::timezone_validation_warnings(config.timezone.as_deref())
-                    {
-                        eprintln!("Config warning: {}", w);
-                    }
-                    if let Some(sched) = config.schedules.as_ref() {
-                        for w in sched.validation_warnings() {
-                            eprintln!("Config warning: {}", w);
-                        }
-                    }
-                    let tz_name = config.resolved_timezone_name();
-                    println!(
-                        "Successfully loaded configuration from {:?} (timezone {})",
-                        path_ref, tz_name
-                    );
-                    config
-                }
+    let content = std::fs::read_to_string(path_ref)
+        .map_err(|e| format!("Failed to read configuration file {:?}: {e}", path_ref))?;
+    let config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
+        format!(
+            "Failed to parse configuration file {:?}: {e}.              Remove legacy keys (e.g. telegram_chat_id) and match config.yaml.example.",
+            path_ref
+        )
+    })?;
+    if config.family.members.is_empty() {
+        return Err(format!(
+            "Configuration file {:?} has no family members.",
+            path_ref
+        ));
+    }
+
+    for member in &config.family.members {
+        if let Some(fg) = member.fitness_goals.as_ref() {
+            for w in fg.validation_warnings(&member.id) {
+                eprintln!("Config warning: {}", w);
             }
-            Err(e) => {
-                eprintln!("Failed to parse configuration file {:?}: {:?}. Using default family configuration.", path_ref, e);
-                AppConfig::default()
-            }
-        },
-        Err(e) => {
-            eprintln!(
-                "Failed to read configuration file {:?}: {:?}. Using default family configuration.",
-                path_ref, e
-            );
-            AppConfig::default()
+        }
+        for w in member.health_condition_warnings() {
+            eprintln!("Config warning: {}", w);
         }
     }
+    if let Some(cv) = config.core_values.as_ref() {
+        for w in cv.validation_warnings() {
+            eprintln!("Config warning: {}", w);
+        }
+    }
+    for w in crate::schedule::timezone_validation_warnings(config.timezone.as_deref()) {
+        eprintln!("Config warning: {}", w);
+    }
+    if let Some(sched) = config.schedules.as_ref() {
+        for w in sched.validation_warnings() {
+            eprintln!("Config warning: {}", w);
+        }
+    }
+    let tz_name = config.resolved_timezone_name();
+    println!(
+        "Successfully loaded configuration from {:?} (timezone {})",
+        path_ref, tz_name
+    );
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -1064,7 +1059,7 @@ target_allocation:
         let mut tmp_file = NamedTempFile::new().unwrap();
         write!(tmp_file, "{}", yaml_content).unwrap();
 
-        let loaded = load_config(tmp_file.path());
+        let loaded = load_config(tmp_file.path()).expect("valid config");
         assert_eq!(loaded.family.members.len(), 3);
         assert_eq!(loaded.family.members[0].id, "alex");
         assert_eq!(loaded.family.members[1].id, "jordan");
@@ -1146,7 +1141,7 @@ schedules:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", yaml).unwrap();
-        let loaded = load_config(tmp.path());
+        let loaded = load_config(tmp.path()).expect("valid config");
         assert_eq!(loaded.resolved_timezone_name(), "America/Toronto");
         let s = loaded.schedules.as_ref().unwrap();
         assert_eq!(s.morning_brief().unwrap().hour, 7);
@@ -1205,10 +1200,7 @@ family:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", bad_focus).unwrap();
-        // Invalid enum falls back to default config (parse failure).
-        let loaded = load_config(tmp.path());
-        assert_eq!(loaded.family.members[0].id, "alex");
-        assert!(loaded.family.members[0].fitness_goals.is_none());
+        assert!(load_config(tmp.path()).is_err());
 
         let bad_equip = r#"
 family:
@@ -1221,8 +1213,7 @@ family:
 "#;
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", bad_equip).unwrap();
-        let loaded2 = load_config(tmp2.path());
-        assert!(loaded2.family.members[0].fitness_goals.is_none());
+        assert!(load_config(tmp2.path()).is_err());
     }
 
     #[test]
@@ -1315,7 +1306,7 @@ family:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", yaml).unwrap();
-        let loaded = load_config(tmp.path());
+        let loaded = load_config(tmp.path()).expect("valid config");
         let cond = &loaded.family.members[0].health_conditions[0];
         assert!(cond.check_in);
         assert_eq!(cond.lag_window, [1, 3]);
@@ -1323,10 +1314,28 @@ family:
     }
 
     #[test]
-    fn test_load_missing_config_fallback() {
-        let loaded = load_config("non_existent_file.yaml");
-        assert_eq!(loaded.family.members.len(), 1);
-        assert_eq!(loaded.family.members[0].id, "alex");
+    fn test_load_missing_config_errors() {
+        let err = load_config("non_existent_file.yaml").unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn test_load_legacy_telegram_chat_id_errors() {
+        let legacy = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+      telegram_chat_id: 424242
+"#;
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", legacy).unwrap();
+        let err = load_config(tmp.path()).unwrap_err();
+        assert!(
+            err.contains("telegram_chat_id") || err.contains("Failed to parse"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1515,7 +1524,7 @@ family:
 "#;
         let mut tmp_file = NamedTempFile::new().unwrap();
         write!(tmp_file, "{}", yaml).unwrap();
-        let loaded = load_config(tmp_file.path());
+        let loaded = load_config(tmp_file.path()).expect("valid config");
         assert_eq!(loaded.family.members[0].signal_aci.as_deref(), Some("aci-alex"));
         let serialized = serde_yaml::to_string(&loaded).unwrap();
         assert!(serialized.contains("signal_aci: aci-alex"));

@@ -469,10 +469,7 @@ fn parse_receive(message: &Value) -> Result<Option<SignalInbound>, SignalError> 
         .and_then(Value::as_i64);
 
     let mut attachments = Vec::new();
-    if let Some(raw_attachments) = data_message.get("attachments") {
-        let Some(raw_attachments) = raw_attachments.as_array() else {
-            return Ok(None);
-        };
+    if let Some(raw_attachments) = data_message.get("attachments").and_then(Value::as_array) {
         for attachment in raw_attachments {
             attachments.push(SignalAttachment {
                 id: attachment
@@ -570,8 +567,27 @@ mod tests {
         serde_json::from_str(&line).unwrap()
     }
 
+    #[test]
+    fn non_array_attachments_do_not_drop_text() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"result": {"envelope": {
+                "sourceUuid": "aci-1",
+                "dataMessage": {
+                    "message": "hello",
+                    "attachments": "not-an-array"
+                }
+            }}}
+        });
+        let inbound = parse_receive(&message).unwrap().expect("text should survive");
+        assert_eq!(inbound.text.as_deref(), Some("hello"));
+        assert!(inbound.attachments.is_empty());
+    }
+
     #[tokio::test]
     async fn interleaves_receive_notification_and_matches_response() {
+
         let (_dir, listener, path) = socket().await;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
