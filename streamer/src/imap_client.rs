@@ -9,13 +9,17 @@ use chotu_common::{
 use futures::StreamExt;
 use native_tls::TlsConnector;
 use sqlx::{Sqlite, SqlitePool, Transaction};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 const SIGNAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 const SIGNAL_DELIVERY_LEASE_SECS: i64 = 30;
-const SIGNAL_DELIVERY_BATCH_SIZE: i64 = 25;
+/// Keep worst-case drain (batch * send timeout + connect) under the 300s IMAP
+/// IDLE keepalive so a silent Signal daemon cannot stall email processing.
+const SIGNAL_DELIVERY_BATCH_SIZE: i64 = 8;
+const SIGNAL_DRAIN_BUDGET: Duration = Duration::from_secs(90);
+const IMAP_IDLE_KEEPALIVE: Duration = Duration::from_secs(300);
 
 struct Xoauth2Authenticator {
     auth_string: String,
@@ -179,7 +183,7 @@ pub async fn start_streamer(pool: SqlitePool, llm: ChotuLlm, config: AppConfig) 
             }
 
             // Wait for events with a keepalive/timeout to prevent socket hanging
-            let (wait_fut, _stop_source) = idle.wait_with_timeout(Duration::from_secs(300));
+            let (wait_fut, _stop_source) = idle.wait_with_timeout(IMAP_IDLE_KEEPALIVE);
             match wait_fut.await {
                 Ok(IdleResponse::NewData(_resp)) => {
                     // Alert received from server
@@ -1326,7 +1330,11 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
         }
     };
 
+    let drain_deadline = Instant::now() + SIGNAL_DRAIN_BUDGET;
     for delivery in deliveries {
+        if Instant::now() >= drain_deadline {
+            break;
+        }
         if !claim_delivery(pool, &delivery).await? {
             continue;
         }
@@ -1514,6 +1522,20 @@ fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, 
 mod signal_mapping_tests {
     use super::*;
     use chotu_common::{init_db, SignalRecipient};
+
+    #[test]
+    fn signal_drain_worst_case_stays_under_imap_idle() {
+        let worst = SIGNAL_CONNECT_TIMEOUT
+            + SIGNAL_SEND_TIMEOUT * SIGNAL_DELIVERY_BATCH_SIZE as u32;
+        assert!(
+            worst < IMAP_IDLE_KEEPALIVE,
+            "batch drain {worst:?} must stay under IMAP IDLE {IMAP_IDLE_KEEPALIVE:?}"
+        );
+        assert!(
+            SIGNAL_DRAIN_BUDGET + SIGNAL_SEND_TIMEOUT < IMAP_IDLE_KEEPALIVE,
+            "drain budget plus one in-flight send must stay under IMAP IDLE"
+        );
+    }
 
     #[test]
     fn action_item_reminder_includes_id_and_commands() {
