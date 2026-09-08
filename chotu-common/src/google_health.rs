@@ -535,7 +535,9 @@ impl GoogleHealthClient {
     /// Fetches the steps count from the Google Health API for a specific date (format: YYYY-MM-DD).
     pub async fn fetch_steps_summary(&self, date: &str) -> Result<i32, anyhow::Error> {
         let access_token = self.access_token().await?;
-        let data = self.query_daily_rollup(&access_token, "steps", date).await?;
+        let data = self
+            .query_daily_rollup(&access_token, "steps", date)
+            .await?;
 
         let mut steps = 0;
         if let Some(points) = data.get("rollupDataPoints").and_then(|v| v.as_array()) {
@@ -565,7 +567,8 @@ impl GoogleHealthClient {
         if let Some(points) = data.get("rollupDataPoints").and_then(|v| v.as_array()) {
             if let Some(first_point) = points.first() {
                 if let Some(energy_obj) = first_point.get("activeEnergyBurned") {
-                    if let Some(val) = energy_obj.get("kcalSum").or_else(|| energy_obj.get("kcal")) {
+                    if let Some(val) = energy_obj.get("kcalSum").or_else(|| energy_obj.get("kcal"))
+                    {
                         if let Some(n) = val.as_f64() {
                             active_calories = n as i32;
                         } else if let Some(s) = val.as_str() {
@@ -587,14 +590,23 @@ impl GoogleHealthClient {
         if let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) {
             for point in points {
                 if let Some(sleep_obj) = point.get("sleep") {
-                    let start_str = sleep_obj.get("interval").and_then(|i| i.get("startTime")).and_then(|t| t.as_str())
+                    let start_str = sleep_obj
+                        .get("interval")
+                        .and_then(|i| i.get("startTime"))
+                        .and_then(|t| t.as_str())
                         .or_else(|| sleep_obj.get("startTime").and_then(|t| t.as_str()))
                         .or_else(|| point.get("startTime").and_then(|t| t.as_str()));
-                    let end_str = sleep_obj.get("interval").and_then(|i| i.get("endTime")).and_then(|t| t.as_str())
+                    let end_str = sleep_obj
+                        .get("interval")
+                        .and_then(|i| i.get("endTime"))
+                        .and_then(|t| t.as_str())
                         .or_else(|| sleep_obj.get("endTime").and_then(|t| t.as_str()))
                         .or_else(|| point.get("endTime").and_then(|t| t.as_str()));
                     if let (Some(s_str), Some(e_str)) = (start_str, end_str) {
-                        if let (Ok(s_dt), Ok(e_dt)) = (chrono::DateTime::parse_from_rfc3339(s_str), chrono::DateTime::parse_from_rfc3339(e_str)) {
+                        if let (Ok(s_dt), Ok(e_dt)) = (
+                            chrono::DateTime::parse_from_rfc3339(s_str),
+                            chrono::DateTime::parse_from_rfc3339(e_str),
+                        ) {
                             let dur = e_dt.signed_duration_since(s_dt);
                             total_duration_secs += dur.num_seconds() as f64;
                         }
@@ -612,7 +624,9 @@ impl GoogleHealthClient {
         date: &str,
     ) -> Result<Vec<ExerciseSession>, anyhow::Error> {
         let access_token = self.access_token().await?;
-        let data = self.query_reconcile(&access_token, "exercise", date).await?;
+        let data = self
+            .query_reconcile(&access_token, "exercise", date)
+            .await?;
         Ok(parse_exercise_data_points(&data))
     }
 
@@ -684,8 +698,7 @@ impl GoogleHealthClient {
         });
 
         let client = Client::new();
-        let url =
-            "https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoints";
+        let url = "https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoints";
         let response = client
             .post(url)
             .bearer_auth(&access_token)
@@ -694,7 +707,10 @@ impl GoogleHealthClient {
             .await?;
 
         let status = response.status();
-        let data = response.json::<serde_json::Value>().await.unwrap_or_default();
+        let data = response
+            .json::<serde_json::Value>()
+            .await
+            .unwrap_or_default();
         if !status.is_success() {
             return Err(anyhow::anyhow!(
                 "Google Health create nutrition-log failed: status {}, body: {}",
@@ -721,10 +737,7 @@ impl GoogleHealthClient {
     }
 
     /// Deletes one or more nutrition-log data points by full resource name.
-    pub async fn batch_delete_nutrition_logs(
-        &self,
-        names: &[String],
-    ) -> Result<(), anyhow::Error> {
+    pub async fn batch_delete_nutrition_logs(&self, names: &[String]) -> Result<(), anyhow::Error> {
         if names.is_empty() {
             return Ok(());
         }
@@ -814,7 +827,7 @@ mod tests {
         // Docs example: 74 mg sodium is logged as 0.074 grams.
         assert!((grams_to_mg(0.074) - 74.0).abs() < f64::EPSILON);
         assert!((grams_to_mg(0.018) - 18.0).abs() < f64::EPSILON); // iron
-        // Vitamin A ~900 mcg RDA ≈ 0.0009 g
+                                                                   // Vitamin A ~900 mcg RDA ≈ 0.0009 g
         assert!((grams_to_mcg(0.0009) - 900.0).abs() < f64::EPSILON);
         // Macro fats stay in grams (no conversion helper needed)
         assert!((grams_to_mg(1.0) - 1000.0).abs() < f64::EPSILON);
@@ -934,7 +947,8 @@ mod tests {
         if let Some(points) = data.get("rollupDataPoints").and_then(|v| v.as_array()) {
             if let Some(first_point) = points.first() {
                 if let Some(energy_obj) = first_point.get("activeEnergyBurned") {
-                    if let Some(val) = energy_obj.get("kcalSum").or_else(|| energy_obj.get("kcal")) {
+                    if let Some(val) = energy_obj.get("kcalSum").or_else(|| energy_obj.get("kcal"))
+                    {
                         if let Some(n) = val.as_f64() {
                             active_calories = n as i32;
                         } else if let Some(s) = val.as_str() {
@@ -966,14 +980,23 @@ mod tests {
         if let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) {
             for point in points {
                 if let Some(sleep_obj) = point.get("sleep") {
-                    let start_str = sleep_obj.get("interval").and_then(|i| i.get("startTime")).and_then(|t| t.as_str())
+                    let start_str = sleep_obj
+                        .get("interval")
+                        .and_then(|i| i.get("startTime"))
+                        .and_then(|t| t.as_str())
                         .or_else(|| sleep_obj.get("startTime").and_then(|t| t.as_str()))
                         .or_else(|| point.get("startTime").and_then(|t| t.as_str()));
-                    let end_str = sleep_obj.get("interval").and_then(|i| i.get("endTime")).and_then(|t| t.as_str())
+                    let end_str = sleep_obj
+                        .get("interval")
+                        .and_then(|i| i.get("endTime"))
+                        .and_then(|t| t.as_str())
                         .or_else(|| sleep_obj.get("endTime").and_then(|t| t.as_str()))
                         .or_else(|| point.get("endTime").and_then(|t| t.as_str()));
                     if let (Some(s_str), Some(e_str)) = (start_str, end_str) {
-                        if let (Ok(s_dt), Ok(e_dt)) = (chrono::DateTime::parse_from_rfc3339(s_str), chrono::DateTime::parse_from_rfc3339(e_str)) {
+                        if let (Ok(s_dt), Ok(e_dt)) = (
+                            chrono::DateTime::parse_from_rfc3339(s_str),
+                            chrono::DateTime::parse_from_rfc3339(e_str),
+                        ) {
                             let dur = e_dt.signed_duration_since(s_dt);
                             total_duration_secs += dur.num_seconds() as f64;
                         }
@@ -1096,9 +1119,7 @@ mod tests {
 
         // Construct via Local so the expected UTC instant and offset follow the
         // host timezone (UTC on CI, often America/New_York on laptops).
-        let local = Local
-            .with_ymd_and_hms(2026, 8, 2, 21, 49, 32)
-            .unwrap();
+        let local = Local.with_ymd_and_hms(2026, 8, 2, 21, 49, 32).unwrap();
         let utc = local.with_timezone(&chrono::Utc);
         let offset = utc_offset_duration_str(utc);
         assert_eq!(

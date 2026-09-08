@@ -79,13 +79,17 @@ pub async fn run(pool: SqlitePool, llm: ChotuLlm, config: chotu_common::AppConfi
                             println!("Result: [SUCCESS] Correctly identified as upcoming financial bill.");
                         }
                         EmailClassification::StatementDocument => {
-                            println!("Result: [SUCCESS] Correctly identified as statement document.");
+                            println!(
+                                "Result: [SUCCESS] Correctly identified as statement document."
+                            );
                         }
                         EmailClassification::Newsletter => {
                             println!("Result: [SUCCESS] Correctly identified as newsletter.");
                         }
                         EmailClassification::PersonalReference => {
-                            println!("Result: [SUCCESS] Correctly identified as personal reference.");
+                            println!(
+                                "Result: [SUCCESS] Correctly identified as personal reference."
+                            );
                         }
                     }
                 }

@@ -1,8 +1,8 @@
 //! Weekly training plan generation and SQLite persistence.
 
 use anyhow::{bail, Context, Result};
-use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use chotu_common::{AppConfig, ChotuLlm, FitnessGoals, NutritionGoals};
+use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -238,10 +238,7 @@ pub fn session_for_date<'a>(
     plan.days.get(offset as usize)
 }
 
-pub fn session_for_date_from_stored(
-    stored: &StoredWeeklyPlan,
-    date: NaiveDate,
-) -> Option<PlanDay> {
+pub fn session_for_date_from_stored(stored: &StoredWeeklyPlan, date: NaiveDate) -> Option<PlanDay> {
     let plan = parse_plan_json(&stored.plan_json).ok()?;
     session_for_date(&stored.week_start, &plan, date).cloned()
 }
@@ -261,7 +258,12 @@ pub fn build_plan_user_prompt(
     let mut lines = Vec::new();
     lines.push(format!("Member: {}", member_name));
     lines.push(format!("Week starting Monday: {}", week_start));
-    if let Some(intent) = fitness.intent.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(intent) = fitness
+        .intent
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         lines.push(format!("Outcome intent: {}", intent));
     }
     if let Some(td) = fitness
@@ -587,10 +589,7 @@ where
 pub fn activity_matches_plan_kind(plan: PlanDayKind, activity: ActivityKind) -> bool {
     match plan {
         PlanDayKind::Rest => false,
-        PlanDayKind::Strength => matches!(
-            activity,
-            ActivityKind::Strength | ActivityKind::Mixed
-        ),
+        PlanDayKind::Strength => matches!(activity, ActivityKind::Strength | ActivityKind::Mixed),
         PlanDayKind::Cardio => matches!(activity, ActivityKind::Cardio | ActivityKind::Mixed),
         PlanDayKind::Mixed => matches!(
             activity,

@@ -357,10 +357,7 @@ mod tests {
     #[test]
     fn keyword_latte_is_dairy_and_caffeine() {
         let tags = keyword_tags_for("grande latte");
-        assert_eq!(
-            tags,
-            vec!["dairy".to_string(), "caffeine".to_string()]
-        );
+        assert_eq!(tags, vec!["dairy".to_string(), "caffeine".to_string()]);
     }
 
     #[test]

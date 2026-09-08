@@ -109,7 +109,11 @@ pub struct GoogleCalendarClient {
 }
 
 impl GoogleCalendarClient {
-    pub fn new(client_id: impl Into<String>, client_secret: impl Into<String>, refresh_token: impl Into<String>) -> Self {
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        refresh_token: impl Into<String>,
+    ) -> Self {
         Self {
             client_id: client_id.into(),
             client_secret: client_secret.into(),
@@ -143,7 +147,8 @@ impl GoogleCalendarClient {
         let mut page_token: Option<String> = None;
 
         loop {
-            let mut req = self.http
+            let mut req = self
+                .http
                 .get("https://www.googleapis.com/calendar/v3/calendars/primary/events")
                 .bearer_auth(&access_token)
                 .query(&[
@@ -173,12 +178,13 @@ impl GoogleCalendarClient {
                 });
             }
 
-            let list: GoogleEventsListResponse = resp.json().await.map_err(|source| {
-                CalendarError::ResponseDecode {
-                    operation: "list-events",
-                    source,
-                }
-            })?;
+            let list: GoogleEventsListResponse =
+                resp.json()
+                    .await
+                    .map_err(|source| CalendarError::ResponseDecode {
+                        operation: "list-events",
+                        source,
+                    })?;
 
             if let Some(items) = list.items {
                 for item in items {
@@ -221,7 +227,8 @@ impl GoogleCalendarClient {
             },
         });
 
-        let resp = self.http
+        let resp = self
+            .http
             .post("https://www.googleapis.com/calendar/v3/calendars/primary/events")
             .bearer_auth(&access_token)
             .json(&body)
@@ -242,12 +249,13 @@ impl GoogleCalendarClient {
             });
         }
 
-        let created: serde_json::Value = resp.json().await.map_err(|source| {
-            CalendarError::ResponseDecode {
-                operation: "create-event",
-                source,
-            }
-        })?;
+        let created: serde_json::Value =
+            resp.json()
+                .await
+                .map_err(|source| CalendarError::ResponseDecode {
+                    operation: "create-event",
+                    source,
+                })?;
 
         created["id"]
             .as_str()
@@ -316,7 +324,8 @@ impl GoogleCalendarClient {
             event_id
         );
 
-        let resp = self.http
+        let resp = self
+            .http
             .delete(&url)
             .bearer_auth(&access_token)
             .send()
@@ -374,7 +383,9 @@ fn parse_google_event(item: GoogleEvent, member_name: &str) -> Option<CalendarEv
 fn parse_datetime(dt: &GoogleEventDateTime) -> Option<DateTime<Utc>> {
     if let Some(ref s) = dt.date_time {
         // RFC 3339 with offset
-        DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+        DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.with_timezone(&Utc))
     } else if let Some(ref d) = dt.date {
         // All-day event: "YYYY-MM-DD" — treat as midnight UTC
         let naive = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok()?;
@@ -392,7 +403,11 @@ pub fn build_calendar_client(member: &crate::family::FamilyMember) -> Option<Goo
     let client_id = std::env::var("CHOTU_OAUTH_CLIENT_ID").ok()?;
     let client_secret = std::env::var("CHOTU_OAUTH_CLIENT_SECRET").ok()?;
     let refresh_token = std::env::var(member.calendar_refresh_token_env_key()).ok()?;
-    Some(GoogleCalendarClient::new(client_id, client_secret, refresh_token))
+    Some(GoogleCalendarClient::new(
+        client_id,
+        client_secret,
+        refresh_token,
+    ))
 }
 
 /// IANA timezone used when creating calendar events.
@@ -469,8 +484,7 @@ pub async fn schedule_timed_block(
         None => today + Duration::days(1),
     };
 
-    let start_naive = target_date
-        .and_time(NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default());
+    let start_naive = target_date.and_time(NaiveTime::from_hms_opt(9, 0, 0).unwrap_or_default());
     let start = match tz.from_local_datetime(&start_naive) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
             dt.with_timezone(&Utc)
@@ -520,8 +534,16 @@ mod tests {
             summary: Some("Test".to_string()),
             description: None,
             location: None,
-            start: GoogleEventDateTime { date_time: None, date: None, time_zone: None },
-            end: GoogleEventDateTime { date_time: None, date: None, time_zone: None },
+            start: GoogleEventDateTime {
+                date_time: None,
+                date: None,
+                time_zone: None,
+            },
+            end: GoogleEventDateTime {
+                date_time: None,
+                date: None,
+                time_zone: None,
+            },
             attendees: None,
         };
         assert!(parse_google_event(item, "Alex").is_none());
@@ -530,15 +552,9 @@ mod tests {
     #[tokio::test]
     async fn test_schedule_timed_block_rejects_invalid_date_before_request() {
         let client = GoogleCalendarClient::new("client", "secret", "refresh");
-        let error = schedule_timed_block(
-            &client,
-            "Test event",
-            None,
-            Some("not-a-date"),
-            30,
-        )
-        .await
-        .unwrap_err();
+        let error = schedule_timed_block(&client, "Test event", None, Some("not-a-date"), 30)
+            .await
+            .unwrap_err();
 
         assert!(matches!(
             error,

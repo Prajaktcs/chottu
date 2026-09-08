@@ -10,8 +10,7 @@
 use anyhow::{Context, Result};
 use chotu_common::{config_path, load_config, InvestmentPhilosophy};
 use finance_advisor::{
-    ScoreReport, ScoredCandidate, StageDraft, StockResearcher, UniverseEntry,
-    DEFAULT_JUDGE_MODEL,
+    ScoreReport, ScoredCandidate, StageDraft, StockResearcher, UniverseEntry, DEFAULT_JUDGE_MODEL,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::env;
@@ -213,11 +212,7 @@ fn sanitize_slug(model_id: &str) -> String {
 }
 
 fn short_label(model_id: &str) -> String {
-    model_id
-        .rsplit('/')
-        .next()
-        .unwrap_or(model_id)
-        .to_string()
+    model_id.rsplit('/').next().unwrap_or(model_id).to_string()
 }
 
 fn parse_scores(drafts: &[StageDraft]) -> Vec<(String, Vec<ScoredCandidate>)> {
@@ -293,10 +288,7 @@ fn build_summary(
     md.push_str(&format!(
         "- **Seed targets:** `{targets}`\n- **Judge (both arms):** `{DEFAULT_JUDGE_MODEL}`\n"
     ));
-    md.push_str(&format!(
-        "- **Philosophy:** {}\n",
-        philosophy.description
-    ));
+    md.push_str(&format!("- **Philosophy:** {}\n", philosophy.description));
     md.push_str(
         "- **Note:** Single-pass seeded run; LLM variance means this is directional, not definitive.\n\n",
     );

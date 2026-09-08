@@ -198,19 +198,20 @@ impl MemoryIndex {
         force: bool,
     ) -> Result<ReindexStats, MemoryError> {
         // Fail fast if the embedding model is missing — avoid per-chunk 404 spam.
-        self.embed_one("chotu memory probe")
-            .await
-            .map_err(|e| {
-                MemoryError::Embed(format!(
-                    "{e}. Pull it with: ollama pull {}",
-                    self.embed_model
-                ))
-            })?;
+        self.embed_one("chotu memory probe").await.map_err(|e| {
+            MemoryError::Embed(format!(
+                "{e}. Pull it with: ollama pull {}",
+                self.embed_model
+            ))
+        })?;
 
         let mut stats = ReindexStats::default();
         let mut seen: HashSet<(String, String)> = HashSet::new();
 
-        match self.index_personal_references(pool, force, &mut seen, &mut stats).await {
+        match self
+            .index_personal_references(pool, force, &mut seen, &mut stats)
+            .await
+        {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("Memory reindex: personal_references failed: {e}");
@@ -236,11 +237,10 @@ impl MemoryIndex {
         }
 
         // Drop orphaned chunks.
-        let existing: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT id, source_type, source_id FROM memory_chunks",
-        )
-        .fetch_all(pool)
-        .await?;
+        let existing: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT id, source_type, source_id FROM memory_chunks")
+                .fetch_all(pool)
+                .await?;
         for (id, st, sid) in existing {
             if !seen.contains(&(st, sid)) {
                 sqlx::query("DELETE FROM memory_chunks WHERE id = ?")
@@ -261,11 +261,10 @@ impl MemoryIndex {
         seen: &mut HashSet<(String, String)>,
         stats: &mut ReindexStats,
     ) -> Result<(), MemoryError> {
-        let rows: Vec<(String, String, Option<String>, String, Option<String>)> = sqlx::query_as(
-            "SELECT id, title, url, notes, timestamp FROM personal_references",
-        )
-        .fetch_all(pool)
-        .await?;
+        let rows: Vec<(String, String, Option<String>, String, Option<String>)> =
+            sqlx::query_as("SELECT id, title, url, notes, timestamp FROM personal_references")
+                .fetch_all(pool)
+                .await?;
 
         for (id, title, url, notes, timestamp) in rows {
             let body = format_personal_ref_body(&title, url.as_deref(), &notes);
@@ -707,8 +706,9 @@ pub fn memory_chunk_in_scope(
     match for_member_id {
         None => true,
         Some(mid) => match source_type {
-            SourceType::Journal => owner_member_id
-                .is_some_and(|owner| owner.eq_ignore_ascii_case(mid)),
+            SourceType::Journal => {
+                owner_member_id.is_some_and(|owner| owner.eq_ignore_ascii_case(mid))
+            }
             SourceType::Task => owner_member_id
                 .map(|owner| owner.eq_ignore_ascii_case(mid))
                 .unwrap_or(true),
@@ -1124,7 +1124,12 @@ mod tests {
     fn test_chunk_digest_sections() {
         let md = "# Daily Newsletter Digest - 2026-06-28\n\n## Rust Weekly\n- **Sender**: a@b.com\n- **Preview**: lots of cool rust crates and compiler news this week\n\n---\n\n## Finimize\n- Preview: markets moved on inflation data and rate expectations today\n";
         let chunks = chunk_digest("Readings/digest-2026-06-28.md", md, "2026-06-28");
-        assert!(chunks.len() >= 2, "got {} chunks: {:?}", chunks.len(), chunks.iter().map(|c| &c.title).collect::<Vec<_>>());
+        assert!(
+            chunks.len() >= 2,
+            "got {} chunks: {:?}",
+            chunks.len(),
+            chunks.iter().map(|c| &c.title).collect::<Vec<_>>()
+        );
         assert!(chunks[0].title.contains("Rust Weekly"));
     }
 
@@ -1218,12 +1223,8 @@ mod tests {
 
     #[test]
     fn parse_journal_owner_unescapes_yaml_value() {
-        let md =
-            "---\nmember: \"alex: #1\\\\home\\\"\"\n---\n## Response\nhi\n";
-        assert_eq!(
-            parse_journal_owner(md).as_deref(),
-            Some("alex: #1\\home\"")
-        );
+        let md = "---\nmember: \"alex: #1\\\\home\\\"\"\n---\n## Response\nhi\n";
+        assert_eq!(parse_journal_owner(md).as_deref(), Some("alex: #1\\home\""));
     }
 
     #[test]
@@ -1295,17 +1296,9 @@ mod tests {
         insert_chunk(&pool, "task", "unassigned-task", None).await;
         insert_chunk(&pool, "journal", "hh-journal", None).await;
         insert_chunk(&pool, "digest", "owned-digest", Some("alex")).await;
-        insert_chunk(
-            &pool,
-            "personal_reference",
-            "owned-reference",
-            Some("alex"),
-        )
-        .await;
+        insert_chunk(&pool, "personal_reference", "owned-reference", Some("alex")).await;
 
-        let alex = fetch_scoped_memory_rows(&pool, Some("alex"))
-            .await
-            .unwrap();
+        let alex = fetch_scoped_memory_rows(&pool, Some("alex")).await.unwrap();
         let ids: Vec<&str> = alex.iter().map(|r| r.1.as_str()).collect();
         assert!(ids.contains(&"alex-task"));
         assert!(ids.contains(&"unassigned-task"));
@@ -1314,9 +1307,7 @@ mod tests {
         assert!(!ids.contains(&"owned-digest"));
         assert!(!ids.contains(&"owned-reference"));
 
-        let alex_upper = fetch_scoped_memory_rows(&pool, Some("ALEX"))
-            .await
-            .unwrap();
+        let alex_upper = fetch_scoped_memory_rows(&pool, Some("ALEX")).await.unwrap();
         let upper_ids: Vec<&str> = alex_upper.iter().map(|r| r.1.as_str()).collect();
         assert!(upper_ids.contains(&"alex-task"));
         assert!(!upper_ids.contains(&"jordan-task"));

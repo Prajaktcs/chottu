@@ -7,6 +7,12 @@ default:
 # Create config.yaml and template .env file if they do not exist
 setup:
     #!/usr/bin/env bash
+    if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git config --local core.hooksPath .githooks
+        echo "Git hooks: .githooks (pre-commit → just lint, pre-push → just test)"
+    else
+        echo "Skipping git hooks install (not inside a git worktree)."
+    fi
     if [ ! -f config.yaml ]; then
         echo "Creating config.yaml from config.yaml.example..."
         cp config.yaml.example config.yaml
@@ -62,9 +68,25 @@ run: setup
 build:
     cargo build --workspace
 
-# Run unit tests across all crates
+# Format check + clippy (warnings allowed until -D is clean). Used by pre-commit.
+lint:
+    cargo fmt --all -- --check
+    cargo clippy --workspace --all-targets --locked
+
+# Run unit tests across all crates (matches CI). Used by pre-push.
 test:
-    cargo test --workspace
+    cargo test --workspace --locked --all-targets
+
+# Point this clone at .githooks/ (pre-commit lint, pre-push tests)
+hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "just hooks: not inside a git worktree; cannot install hooks." >&2
+        exit 1
+    fi
+    git config --local core.hooksPath .githooks
+    echo "Installed git hooks from .githooks (pre-commit → just lint, pre-push → just test)"
 
 # Clean cargo build artifacts
 clean:

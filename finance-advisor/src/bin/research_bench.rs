@@ -369,9 +369,9 @@ async fn run_arm(
 fn find_draft<'a>(drafts: &'a [StageDraft], model_id: &str) -> Option<&'a StageDraft> {
     drafts.iter().find(|d| d.model_id == model_id).or_else(|| {
         let short = model_id.rsplit('/').next().unwrap_or(model_id);
-        drafts.iter().find(|d| {
-            d.model_id == short || d.model_id.rsplit('/').next() == Some(short)
-        })
+        drafts
+            .iter()
+            .find(|d| d.model_id == short || d.model_id.rsplit('/').next() == Some(short))
     })
 }
 

@@ -172,7 +172,9 @@ impl FinnhubClient {
         // Empty object `{}` when symbol is unknown.
         let name = body.name.filter(|s| !s.trim().is_empty());
         let ticker = body.ticker.filter(|s| !s.trim().is_empty());
-        let market_cap_m = body.market_capitalization.filter(|m| m.is_finite() && *m > 0.0);
+        let market_cap_m = body
+            .market_capitalization
+            .filter(|m| m.is_finite() && *m > 0.0);
 
         let (Some(name), Some(resolved), Some(market_cap_m)) = (name, ticker, market_cap_m) else {
             return Err(FinnhubError::NotFound(symbol.to_string()));
