@@ -3,20 +3,20 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use sqlx::SqlitePool;
-use tokio::sync::RwLock;
+use tokio::sync::{mpsc, RwLock, Semaphore};
 
 use chotu_common::{
     answer_memory_query, build_calendar_client, clear_budget_override, complete_all_open_tasks,
-    compose_calendar_agenda, compute_budget_progress, config_path, current_budget_month,
-    default_member_id, display_category, ensure_food_mutation_allowed, exchange_google_code,
+    compose_calendar_agenda, compute_budget_progress, current_budget_month, default_member_id,
+    display_category, ensure_food_mutation_allowed, exchange_google_code,
     fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
     has_signal_delivery, is_signal_conversation_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_signal_aci,
     effective_food_time, parse_due_phrase_tz, pending_budget_alerts, resolve_food_log_timing,
     assign_food_tags, delete_food_log_tags, delete_food_log_tags_for_member_day,
     insert_food_log_tags, reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
-    save_health_refresh_token, schedule_at, set_budget_override, set_member_signal_aci,
-    spawn_background_reindex, split_task_add_args, start_redirect_listener,
+    save_health_refresh_token, schedule_at, set_budget_override, spawn_background_reindex,
+    split_task_add_args, start_redirect_listener,
     signal_aci_for_member, signal_delivery_targets, AppConfig, AssignedFoodTags,
     CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient,
     InvestmentPhilosophy, MemoryIndex, SignalClient, SignalError, SignalInbound, SignalRecipient,
@@ -30,7 +30,7 @@ type ChatId = SignalRecipient;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Help, Food(String), Status, Plan(String), Brief, Cal(String), Trends(String),
-    Tasks(String), Task(String), Memory(String), Reflect, Chat, Link(String), Whoami,
+    Tasks(String), Task(String), Memory(String), Reflect, Chat, Whoami,
     Research(String), Sync, Login(String), Clearfood(String), Adjustfood(String),
     Undofood(String), Networth, Monthly(String), Budget(String),
 }
@@ -54,8 +54,7 @@ These commands are supported:
 /memory <question> | /memory reindex
 /reflect — evening reflection.
 /chat — show this Signal conversation.
-/link <member_id> — link this direct conversation.
-/whoami — show the linked family member.
+/whoami — show the configured family member for this direct conversation.
 /research [companies] — stock research.
 /sync — sync today's health metrics.
 /login <health <member_id>|gmail|calendar <member_id>> or /login code <...>
@@ -89,7 +88,6 @@ fn parse_command(input: &str) -> Option<Command> {
         "memory" => Some(Command::Memory(args)),
         "reflect" => Some(Command::Reflect),
         "chat" => Some(Command::Chat),
-        "link" => Some(Command::Link(args)),
         "whoami" => Some(Command::Whoami),
         "research" => Some(Command::Research(args)),
         "sync" => Some(Command::Sync),
@@ -104,8 +102,94 @@ fn parse_command(input: &str) -> Option<Command> {
     }
 }
 
-fn conversation_allowed(config: &AppConfig, chat_id: &ChatId, sender_aci: &str) -> bool {
-    is_signal_conversation_allowed(config, sender_aci, chat_id.group_id())
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CallerScope {
+    LinkedDm { member_id: String },
+    HouseholdGroup,
+}
+
+impl CallerScope {
+    fn member_id(&self) -> Option<&str> {
+        match self {
+            Self::LinkedDm { member_id } => Some(member_id),
+            Self::HouseholdGroup => None,
+        }
+    }
+
+    fn allows_task_assignee(&self, assigned_to: Option<&str>) -> bool {
+        match self {
+            Self::LinkedDm { member_id } => assigned_to
+                .is_none_or(|assignee| member_id.eq_ignore_ascii_case(assignee)),
+            Self::HouseholdGroup => true,
+        }
+    }
+}
+
+fn caller_scope(config: &AppConfig, chat_id: &ChatId, sender_aci: &str) -> Option<CallerScope> {
+    if !is_signal_conversation_allowed(config, sender_aci, chat_id.group_id()) {
+        return None;
+    }
+    match chat_id {
+        SignalRecipient::Direct { .. } => member_for_signal_aci(config, sender_aci).map(|member| {
+            CallerScope::LinkedDm {
+                member_id: member.id.clone(),
+            }
+        }),
+        SignalRecipient::Group { .. } => Some(CallerScope::HouseholdGroup),
+    }
+}
+
+fn oauth_member_target(scope: &CallerScope, requested: &str) -> Result<String, &'static str> {
+    match scope {
+        CallerScope::HouseholdGroup => Err("OAuth setup is only available in an authorized direct conversation."),
+        CallerScope::LinkedDm { member_id }
+            if requested.trim().is_empty() || member_id.eq_ignore_ascii_case(requested.trim()) =>
+        {
+            Ok(member_id.clone())
+        }
+        CallerScope::LinkedDm { .. } => {
+            Err("OAuth setup in a direct conversation can only target your own member account.")
+        }
+    }
+}
+
+fn resolve_task_target(
+    scope: &CallerScope,
+    requested: Option<String>,
+    config: &AppConfig,
+) -> Result<Option<String>, &'static str> {
+    match scope {
+        CallerScope::LinkedDm { member_id } => match requested {
+            Some(target) if !scope.allows_task_assignee(Some(&target)) => {
+                Err("Tasks in a direct conversation can only be added or assigned to you.")
+            }
+            _ => Ok(Some(member_id.clone())),
+        },
+        CallerScope::HouseholdGroup => Ok(requested.or_else(|| {
+            config.family.members.first().map(|member| member.id.clone())
+        })),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InboundRoute {
+    Image,
+    Command(Command),
+    Message,
+}
+
+fn classify_inbound(inbound: &SignalInbound) -> InboundRoute {
+    if inbound
+        .attachments
+        .iter()
+        .any(|attachment| attachment.content_type.starts_with("image/"))
+    {
+        InboundRoute::Image
+    } else if let Some(command) = parse_command(inbound.text.as_deref().unwrap_or_default()) {
+        InboundRoute::Command(command)
+    } else {
+        InboundRoute::Message
+    }
 }
 
 fn task_complete_snooze_help(short_id: &str) -> String {
@@ -123,11 +207,15 @@ async fn send_signal(
 #[derive(Debug, Clone)]
 pub enum ConversationState {
     Idle,
-    WaitingForReflection { date: String, prompt: String },
+    WaitingForReflection {
+        date: String,
+        prompt: String,
+        member_id: Option<String>,
+    },
 }
 
 type StateMap = Arc<RwLock<HashMap<ChatId, ConversationState>>>;
-type SharedConfig = Arc<RwLock<AppConfig>>;
+type SharedConfig = Arc<AppConfig>;
 
 /// Send a household message to every linked member DM plus optional SIGNAL_GROUP_ID.
 async fn send_household(bot: &Bot, config: &AppConfig, text: impl Into<String>) -> bool {
@@ -250,21 +338,57 @@ async fn push_scheduled_brief(
     send_markdown_retry(bot, chat_id, report, SCHEDULED_SIGNAL_ATTEMPTS, "scheduled morning brief").await
 }
 
-async fn reject_unlinked_chat(bot: &Bot, chat_id: &ChatId) -> Result<(), SignalError> {
+async fn reject_unauthorized_chat(bot: &Bot, chat_id: &ChatId) -> Result<(), SignalError> {
     send_signal(
         bot,
         chat_id,
         format!(
-            "This conversation is not linked to a family member.\n\
-DM Chotu and run `/link <member_id>` (this conversation: `{chat_id}`)."
+            "This Signal conversation (`{chat_id}`) is not authorized. Ask the operator to \
+             configure `signal_aci` or `SIGNAL_GROUP_ID` with this id, then restart Chotu."
         ),
     )
     .await?;
     Ok(())
 }
 
-fn command_bypasses_allowlist(cmd: &Command) -> bool {
-    matches!(cmd, Command::Chat | Command::Link(_))
+const MAX_CONCURRENT_INBOUND_HANDLERS: usize = 16;
+
+#[derive(Clone)]
+struct InboundHandlerContext {
+    bot: Bot,
+    pool: SqlitePool,
+    llm: ChotuLlm,
+    gemini_client: GeminiClient,
+    researcher: StockResearcher,
+    states: StateMap,
+    config: SharedConfig,
+}
+
+async fn run_conversation_worker(
+    mut receiver: mpsc::UnboundedReceiver<(SignalInbound, CallerScope)>,
+    context: InboundHandlerContext,
+    concurrency: Arc<Semaphore>,
+) {
+    while let Some((inbound, scope)) = receiver.recv().await {
+        let Ok(_permit) = concurrency.clone().acquire_owned().await else {
+            return;
+        };
+        if let Err(error) = handle_inbound(
+            context.bot.clone(),
+            inbound,
+            context.pool.clone(),
+            context.llm.clone(),
+            context.gemini_client.clone(),
+            context.researcher.clone(),
+            context.states.clone(),
+            context.config.clone(),
+            scope,
+        )
+        .await
+        {
+            eprintln!("Signal: inbound handler failed: {:?}", error);
+        }
+    }
 }
 
 pub async fn start_signal_client(
@@ -296,14 +420,14 @@ pub async fn start_signal_client(
             None => format!("{label} off"),
         };
         println!(
-            "Signal: timezone {} (IANA). {} · {} · {} (sends when linked chats or SIGNAL_GROUP_ID exist).",
+            "Signal: timezone {} (IANA). {} · {} · {} (sends when configured member DMs or SIGNAL_GROUP_ID exist).",
             config.resolved_timezone_name(),
             describe("brief", config.schedule_clock(chotu_common::AgentSchedules::morning_brief)),
             describe("portfolio", config.schedule_clock(chotu_common::AgentSchedules::portfolio)),
             describe("reflection", config.schedule_clock(chotu_common::AgentSchedules::reflection)),
         );
     }
-    let shared_config: SharedConfig = Arc::new(RwLock::new(config));
+    let shared_config: SharedConfig = Arc::new(config);
 
     let sched_bot = bot.clone();
     let sched_pool = pool.clone();
@@ -315,7 +439,7 @@ pub async fn start_signal_client(
         let mut last_portfolio = String::new();
         let mut last_reflect = String::new();
         loop {
-            let cfg = sched_config.read().await.clone();
+            let cfg = sched_config.as_ref();
             let now = cfg.now_in_tz();
             let date_str = now.format("%Y-%m-%d").to_string();
             let targets = signal_delivery_targets(&cfg);
@@ -364,13 +488,16 @@ pub async fn start_signal_client(
                     println!("Signal: scheduled evening reflection ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
                     let mut any_ok = false;
                     for cid in &targets {
+                        let scope = caller_scope(cfg, cid, cid.lookup_aci())
+                            .expect("scheduled reflection targets are authorized");
                         if handle_reflect_trigger(
                             &sched_bot,
                             cid,
                             &sched_pool,
                             &sched_llm,
                             sched_states.clone(),
-                            &cfg,
+                            cfg,
+                            &scope,
                             SCHEDULED_SIGNAL_ATTEMPTS,
                         )
                         .await
@@ -393,11 +520,11 @@ pub async fn start_signal_client(
     let remind_pool = pool.clone();
     let remind_config = shared_config.clone();
     tokio::spawn(async move {
-        println!("Signal: Task reminder poller running (delivers when linked chats or SIGNAL_GROUP_ID exist).");
+        println!("Signal: Task reminder poller running (delivers when configured member DMs or SIGNAL_GROUP_ID exist).");
         loop {
-            let cfg = remind_config.read().await.clone();
-            if has_signal_delivery(&cfg) {
-                if let Err(e) = poll_due_task_reminders(&remind_bot, &remind_pool, &cfg).await {
+            let cfg = remind_config.as_ref();
+            if has_signal_delivery(cfg) {
+                if let Err(e) = poll_due_task_reminders(&remind_bot, &remind_pool, cfg).await {
                     eprintln!("Signal: task reminder poll failed: {:?}", e);
                 }
             }
@@ -409,11 +536,11 @@ pub async fn start_signal_client(
     let budget_pool = pool.clone();
     let budget_config = shared_config.clone();
     tokio::spawn(async move {
-        println!("Signal: Spend budget alert poller running (delivers when linked chats or SIGNAL_GROUP_ID exist).");
+        println!("Signal: Spend budget alert poller running (delivers when configured member DMs or SIGNAL_GROUP_ID exist).");
         loop {
-            let cfg = budget_config.read().await.clone();
-            if has_signal_delivery(&cfg) {
-                if let Err(e) = poll_spend_budget_alerts(&budget_bot, &budget_pool, &cfg).await {
+            let cfg = budget_config.as_ref();
+            if has_signal_delivery(cfg) {
+                if let Err(e) = poll_spend_budget_alerts(&budget_bot, &budget_pool, cfg).await {
                     eprintln!("Signal: spend budget alert poll failed: {:?}", e);
                 }
             }
@@ -429,22 +556,50 @@ pub async fn start_signal_client(
         .await
         .context("failed to subscribe to signal-cli receive notifications")?;
     println!("Signal: connected on {socket}, receiving…");
+    let context = InboundHandlerContext {
+        bot,
+        pool,
+        llm,
+        gemini_client,
+        researcher,
+        states: conversation_states,
+        config: shared_config,
+    };
+    let concurrency = Arc::new(Semaphore::new(MAX_CONCURRENT_INBOUND_HANDLERS));
+    let mut conversations: HashMap<
+        ChatId,
+        mpsc::UnboundedSender<(SignalInbound, CallerScope)>,
+    > = HashMap::new();
+
     loop {
         match inbound.recv().await {
             Ok(message) => {
-                if let Err(e) = handle_inbound(
-                    bot.clone(),
-                    message,
-                    pool.clone(),
-                    llm.clone(),
-                    gemini_client.clone(),
-                    researcher.clone(),
-                    conversation_states.clone(),
-                    shared_config.clone(),
-                )
-                .await
-                {
-                    eprintln!("Signal: inbound handler failed: {:?}", e);
+                let conversation = message.recipient.clone();
+                let Some(scope) = caller_scope(
+                    context.config.as_ref(),
+                    &conversation,
+                    &message.sender_aci,
+                ) else {
+                    if let Ok(permit) = concurrency.clone().try_acquire_owned() {
+                        let bot = context.bot.clone();
+                        tokio::spawn(async move {
+                            let _permit = permit;
+                            let _ = reject_unauthorized_chat(&bot, &conversation).await;
+                        });
+                    }
+                    continue;
+                };
+                let sender = conversations.entry(conversation).or_insert_with(|| {
+                    let (sender, receiver) = mpsc::unbounded_channel();
+                    tokio::spawn(run_conversation_worker(
+                        receiver,
+                        context.clone(),
+                        concurrency.clone(),
+                    ));
+                    sender
+                });
+                if sender.send((message, scope)).is_err() {
+                    eprintln!("Signal: conversation worker stopped unexpectedly");
                 }
             }
             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -466,15 +621,10 @@ async fn handle_inbound(
     researcher: StockResearcher,
     states: StateMap,
     shared_config: SharedConfig,
+    scope: CallerScope,
 ) -> Result<(), SignalError> {
     let chat_id = inbound.recipient.clone();
     let sender_aci = inbound.sender_aci.clone();
-    let config = shared_config.read().await.clone();
-
-    if inbound.sender_aci.is_empty() {
-        send_signal(&bot, &chat_id, "I can only accept Signal messages that include a sender ACI.").await?;
-        return Ok(());
-    }
 
     let unsupported = inbound.attachments.iter().find(|attachment| {
         !attachment.content_type.starts_with("image/") || attachment.id.is_empty()
@@ -489,30 +639,38 @@ async fn handle_inbound(
         return Ok(());
     }
 
-    let text = inbound.text.clone().unwrap_or_default();
-    if let Some(cmd) = parse_command(&text) {
-        if !command_bypasses_allowlist(&cmd) && !conversation_allowed(&config, &chat_id, &sender_aci) {
-            return reject_unlinked_chat(&bot, &chat_id).await;
+    match classify_inbound(&inbound) {
+        InboundRoute::Image | InboundRoute::Message => {
+            handle_message(
+                bot,
+                chat_id,
+                inbound,
+                pool,
+                llm,
+                gemini_client,
+                states,
+                shared_config,
+                scope,
+            )
+            .await
         }
-        return handle_command(
-            bot,
-            chat_id,
-            sender_aci,
-            cmd,
-            pool,
-            llm,
-            gemini_client,
-            researcher,
-            states,
-            shared_config,
-        )
-        .await;
+        InboundRoute::Command(command) => {
+            handle_command(
+                bot,
+                chat_id,
+                sender_aci,
+                command,
+                pool,
+                llm,
+                gemini_client,
+                researcher,
+                states,
+                shared_config,
+                scope,
+            )
+            .await
+        }
     }
-
-    if !conversation_allowed(&config, &chat_id, &sender_aci) {
-        return reject_unlinked_chat(&bot, &chat_id).await;
-    }
-    handle_message(bot, chat_id, sender_aci, inbound, pool, llm, gemini_client, states, shared_config).await
 }
 
 
@@ -528,13 +686,14 @@ async fn handle_command(
     researcher: StockResearcher,
     states: StateMap,
     shared_config: SharedConfig,
+    scope: CallerScope,
 ) -> Result<(), SignalError> {
     println!("Signal: Received command from {} in {}", sender_aci, chat_id);
     {
         let mut s = states.write().await;
         s.insert(chat_id.clone(), ConversationState::Idle);
     }
-    let config = shared_config.read().await.clone();
+    let config = shared_config.as_ref();
     match cmd {
         Command::Help => { send_signal(&bot, &chat_id, HELP_TEXT).await?; }
         Command::Food(args) => { handle_food_log(&bot, &chat_id, args, &pool, &llm, &gemini_client, &config).await?; }
@@ -543,14 +702,13 @@ async fn handle_command(
         Command::Brief => { handle_brief(&bot, &chat_id, &pool, &config).await?; }
         Command::Cal(args) => { handle_cal(&bot, &chat_id, args, &config).await?; }
         Command::Trends(args) => { handle_trends(&bot, &chat_id, args, &pool, &config, &llm).await?; }
-        Command::Tasks(args) | Command::Task(args) => { handle_tasks(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Tasks(args) | Command::Task(args) => { handle_tasks(&bot, &chat_id, args, &pool, config, &scope).await?; }
         Command::Memory(args) => { handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?; }
-        Command::Reflect => { handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, &config, 1).await?; }
+        Command::Reflect => { handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1).await?; }
         Command::Chat => {
             send_signal(&bot, &chat_id, format!("Current Signal conversation: {chat_id}")).await?;
         }
-        Command::Link(args) => { handle_link(&bot, &chat_id, &sender_aci, args, &shared_config).await?; }
-        Command::Whoami => { handle_whoami(&bot, &chat_id, &sender_aci, &config).await?; }
+        Command::Whoami => { handle_whoami(&bot, &chat_id, &scope, config).await?; }
         Command::Research(args) => {
             let targets = if args.trim().is_empty() { None } else { Some(args.as_str()) };
             if let Err(e) = run_and_log_stock_research(&bot, &chat_id, &pool, &researcher, config.investment_philosophy.as_ref(), targets).await {
@@ -565,40 +723,52 @@ async fn handle_command(
             }
         }
         Command::Login(args) => {
-            let args_trimmed = args.trim();
-            if args_trimmed.to_lowercase().starts_with("code") {
-                let rest = args_trimmed[4..].trim();
-                if let Err(e) = handle_manual_code(&bot, &chat_id, rest, &config).await {
-                    eprintln!("Signal: manual code exchange failed: {:?}", e);
-                    let _ = send_signal(&bot, &chat_id, format!("Manual code exchange failed: {}", e)).await;
-                }
+            if matches!(scope, CallerScope::HouseholdGroup) {
+                send_signal(&bot, &chat_id, "OAuth setup is only available in an authorized direct conversation.").await?;
             } else {
-                let lower = args_trimmed.to_lowercase();
-                let mut parts = lower.split_whitespace();
-                let service = parts.next().unwrap_or("");
-                if service == "fitbit" || service == "health" {
-                    let original_member = args_trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
-                    if let Err(e) = handle_login_google_health(&bot, &chat_id, &original_member, &config).await {
-                        eprintln!("Signal: Google Health login initialization failed: {:?}", e);
-                        let _ = send_signal(&bot, &chat_id, format!("Google Health login failed: {}", e)).await;
-                    }
-                } else if service == "gmail" || service == "google" {
-                    if let Err(e) = handle_login_google(&bot, &chat_id).await {
-                        eprintln!("Signal: Google/Gmail login initialization failed: {:?}", e);
-                        let _ = send_signal(&bot, &chat_id, format!("Google/Gmail login failed: {}", e)).await;
-                    }
-                } else if service == "calendar" {
-                    let original_member = args_trimmed.split_whitespace().nth(1).unwrap_or("").to_string();
-                    if let Err(e) = handle_login_calendar(&bot, &chat_id, &original_member, &config).await {
-                        eprintln!("Signal: Calendar login initialization failed: {:?}", e);
-                        let _ = send_signal(&bot, &chat_id, format!("Calendar login failed: {}", e)).await;
+                let args_trimmed = args.trim();
+                if args_trimmed.to_lowercase().starts_with("code") {
+                    let rest = args_trimmed[4..].trim();
+                    if let Err(e) = handle_manual_code(&bot, &chat_id, rest, config, &scope).await {
+                        eprintln!("Signal: manual code exchange failed: {:?}", e);
+                        let _ = send_signal(&bot, &chat_id, format!("Manual code exchange failed: {}", e)).await;
                     }
                 } else {
-                    let _ = send_signal(
-                        &bot,
-                        &chat_id,
-                        "Invalid service. Usage: `/login health <member_id>`, `/login gmail`, `/login calendar <member_id>`, or `/login code ...`",
-                    ).await;
+                    let service = args_trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                    let requested_member = args_trimmed.split_whitespace().nth(1).unwrap_or("");
+                    if service == "fitbit" || service == "health" {
+                        match oauth_member_target(&scope, requested_member) {
+                            Ok(member_id) => {
+                                if let Err(e) = handle_login_google_health(&bot, &chat_id, &member_id, config).await {
+                                    eprintln!("Signal: Google Health login initialization failed: {:?}", e);
+                                    let _ = send_signal(&bot, &chat_id, format!("Google Health login failed: {}", e)).await;
+                                }
+                            }
+                            Err(message) => { send_signal(&bot, &chat_id, message).await?; }
+                        }
+                    } else if service == "gmail" || service == "google" {
+                        // Gmail uses one operator/global token, but mutation is restricted to an authorized DM.
+                        if let Err(e) = handle_login_google(&bot, &chat_id).await {
+                            eprintln!("Signal: Google/Gmail login initialization failed: {:?}", e);
+                            let _ = send_signal(&bot, &chat_id, format!("Google/Gmail login failed: {}", e)).await;
+                        }
+                    } else if service == "calendar" {
+                        match oauth_member_target(&scope, requested_member) {
+                            Ok(member_id) => {
+                                if let Err(e) = handle_login_calendar(&bot, &chat_id, &member_id, config).await {
+                                    eprintln!("Signal: Calendar login initialization failed: {:?}", e);
+                                    let _ = send_signal(&bot, &chat_id, format!("Calendar login failed: {}", e)).await;
+                                }
+                            }
+                            Err(message) => { send_signal(&bot, &chat_id, message).await?; }
+                        }
+                    } else {
+                        let _ = send_signal(
+                            &bot,
+                            &chat_id,
+                            "Invalid service. Usage: `/login health [your_member_id]`, `/login gmail`, `/login calendar [your_member_id]`, or `/login code ...`",
+                        ).await;
+                    }
                 }
             }
         }
@@ -612,73 +782,29 @@ async fn handle_command(
     Ok(())
 }
 
-async fn handle_link(
-    bot: &Bot,
-    chat_id: &ChatId,
-    sender_aci: &str,
-    args: String,
-    shared_config: &SharedConfig,
-) -> Result<(), SignalError> {
-    if !matches!(chat_id, SignalRecipient::Direct { .. }) {
-        send_signal(bot, chat_id, "⚠️ `/link` only works in a direct Signal conversation (not groups).").await?;
-        return Ok(());
-    }
-    let member_tok = args.trim();
-    if member_tok.is_empty() {
-        let config = shared_config.read().await;
-        let members = config.family.members.iter().map(|m| format!("- `{}` ({})", m.id, m.name)).collect::<Vec<_>>().join("\n");
-        send_signal(bot, chat_id, format!("⚠️ Usage: `/link <member_id>`\n\nConfigured members:\n{members}")).await?;
-        return Ok(());
-    }
-    let path = config_path();
-    match set_member_signal_aci(&path, member_tok, sender_aci) {
-        Ok(updated) => {
-            let member = updated.family.members.iter().find(|m| m.id.eq_ignore_ascii_case(member_tok)).cloned();
-            {
-                let mut cfg = shared_config.write().await;
-                *cfg = updated;
-            }
-            if let Some(m) = member {
-                send_signal(
-                    bot,
-                    chat_id,
-                    format!(
-                        "✅ Linked this conversation (`{chat_id}`) to {} (`{}`).\nFood/tasks without a member id now default to you. Use `/whoami` anytime.",
-                        m.name, m.id
-                    ),
-                ).await?;
-            }
-        }
-        Err(e) => {
-            send_signal(bot, chat_id, format!("❌ Failed to link conversation: {e}")).await?;
-        }
-    }
-    Ok(())
-}
-
 async fn handle_whoami(
     bot: &Bot,
     chat_id: &ChatId,
-    sender_aci: &str,
+    scope: &CallerScope,
     config: &AppConfig,
 ) -> Result<(), SignalError> {
-    match member_for_signal_aci(config, sender_aci) {
-        Some(m) => {
-            send_signal(&bot, chat_id, format!(
-                    "You are linked as *{}* (`{}`).\nChat id: `{}`",
-                    (m.name),
-                    m.id,
-                    chat_id
-                ),)
+    match scope {
+        CallerScope::LinkedDm { member_id } => {
+            let member = config
+                .family
+                .members
+                .iter()
+                .find(|member| member.id.eq_ignore_ascii_case(member_id))
+                .expect("linked caller scope is derived from configured family members");
+            send_signal(
+                bot,
+                chat_id,
+                format!("You are configured as *{}* (`{}`).", member.name, member.id),
+            )
             .await?;
         }
-        None => {
-            send_signal(&bot, chat_id, format!(
-                    "This chat (`{}`) is not linked to a family member.\n\
-Run `/link <member_id>` to claim it.",
-                    chat_id
-                ),)
-            .await?;
+        CallerScope::HouseholdGroup => {
+            send_signal(bot, chat_id, "This is the configured household Signal group.").await?;
         }
     }
     Ok(())
@@ -695,14 +821,7 @@ async fn handle_food_log(
 ) -> Result<(), SignalError> {
     let args = args.trim();
     if args.is_empty() {
-        let members_list = config
-            .family
-            .members
-            .iter()
-            .map(|m| format!("- {} ({})", m.id, m.name))
-            .collect::<Vec<String>>()
-            .join("\n");
-        send_signal(&bot, chat_id, format!("Please provide a description, e.g. /food [member_id] <description>\n\nConfigured family members:\n{}", members_list)).await?;
+        send_signal(bot, chat_id, "Please provide a description, e.g. `/food breakfast oats`.").await?;
         return Ok(());
     }
 
@@ -1662,6 +1781,7 @@ async fn handle_tasks(
     args: String,
     pool: &SqlitePool,
     config: &AppConfig,
+    scope: &CallerScope,
 ) -> Result<(), SignalError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     let first = tokens.first().copied().unwrap_or("");
@@ -1678,16 +1798,16 @@ async fn handle_tasks(
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            return add_manual_task(bot, chat_id, pool, config, &rest).await;
+            return add_manual_task(bot, chat_id, pool, config, scope, &rest).await;
         }
         "complete" => {
             return match second.map(|s| s.to_lowercase()) {
                 Some(ref s) if s == "all" => {
                     let confirm = third.is_some_and(|t| t.eq_ignore_ascii_case("confirm"));
-                    mark_all_tasks_complete(bot, chat_id, pool, config, confirm).await
+                    mark_all_tasks_complete(bot, chat_id, pool, config, scope, confirm).await
                 }
                 Some(ref id) if id.len() >= 4 => {
-                    mark_task_complete(bot, chat_id, pool, config, id).await
+                    mark_task_complete(bot, chat_id, pool, config, scope, id).await
                 }
                 _ => {
                     send_signal(&bot, chat_id, "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all` \
@@ -1699,10 +1819,10 @@ async fn handle_tasks(
         }
         "done" if second.is_some_and(|s| s.eq_ignore_ascii_case("all")) => {
             let confirm = third.is_some_and(|t| t.eq_ignore_ascii_case("confirm"));
-            return mark_all_tasks_complete(bot, chat_id, pool, config, confirm).await;
+            return mark_all_tasks_complete(bot, chat_id, pool, config, scope, confirm).await;
         }
         "done" if second.is_some_and(looks_like_task_id_prefix) => {
-            return mark_task_complete(bot, chat_id, pool, config, second.unwrap()).await;
+            return mark_task_complete(bot, chat_id, pool, config, scope, second.unwrap()).await;
         }
         "snooze" => {
             return match second {
@@ -1711,7 +1831,7 @@ async fn handle_tasks(
                         .and_then(|t| t.parse::<i64>().ok())
                         .unwrap_or(1)
                         .clamp(1, 90);
-                    snooze_task(bot, chat_id, pool, config, id, days).await
+                    snooze_task(bot, chat_id, pool, config, scope, id, days).await
                 }
                 _ => {
                     send_signal(&bot, chat_id, "⚠️ Usage: `/tasks snooze <id> [days]` (default 1 day)",)
@@ -1730,20 +1850,21 @@ async fn handle_tasks(
                         .find(|m| m.id.eq_ignore_ascii_case(member_tok))
                         .map(|m| m.id.clone());
                     match member_id {
-                        Some(mid) => reassign_task(bot, chat_id, pool, id, &mid).await,
-                        None => {
-                            let members = config
-                                .family
-                                .members
-                                .iter()
-                                .map(|m| m.id.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            send_signal(&bot, chat_id, format!(
-                                    "⚠️ Unknown member `{}`. Configured: {}",
-                                    member_tok, members
-                                ),)
+                        Some(mid) if scope.allows_task_assignee(Some(&mid)) => {
+                            reassign_task(bot, chat_id, pool, scope, id, &mid).await
+                        }
+                        Some(_) => {
+                            send_signal(
+                                bot,
+                                chat_id,
+                                "Tasks in a direct conversation can only be added or assigned to you.",
+                            )
                             .await?;
+                            Ok(())
+                        }
+                        None => {
+                            send_signal(bot, chat_id, format!("⚠️ Unknown member `{member_tok}`."))
+                                .await?;
                             Ok(())
                         }
                     }
@@ -1756,7 +1877,7 @@ async fn handle_tasks(
             };
         }
         "open" | "unsnooze" if second.is_some_and(looks_like_task_id_prefix) => {
-            return reopen_task(bot, chat_id, pool, second.unwrap()).await;
+            return reopen_task(bot, chat_id, pool, scope, second.unwrap()).await;
         }
         _ => {}
     }
@@ -1765,7 +1886,7 @@ async fn handle_tasks(
     // args aren't a plain list filter (status / member / status+member).
     let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
     if looks_like_task_add_query(&tokens, &member_ids) {
-        return add_manual_task(bot, chat_id, pool, config, args.trim()).await;
+        return add_manual_task(bot, chat_id, pool, config, scope, args.trim()).await;
     }
 
     let mut status_filter = "open";
@@ -1792,6 +1913,22 @@ async fn handle_tasks(
         if let Some(tok) = second {
             member_filter = resolve_member(tok);
         }
+    }
+
+    if let CallerScope::LinkedDm { member_id } = scope {
+        if member_filter
+            .as_deref()
+            .is_some_and(|requested| !member_id.eq_ignore_ascii_case(requested))
+        {
+            send_signal(
+                bot,
+                chat_id,
+                "Task lists in a direct conversation can only show your tasks and unassigned tasks.",
+            )
+            .await?;
+            return Ok(());
+        }
+        member_filter = Some(member_id.clone());
     }
 
     let (status_clause, label) = match status_filter {
@@ -1897,20 +2034,30 @@ fn looks_like_task_id_prefix(s: &str) -> bool {
     s.len() >= 4 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
-/// Resolve a unique task by id prefix. Sends Telegram errors on 0/ambiguous matches.
+/// Resolve a unique task by id prefix within the caller scope.
 async fn find_task_by_prefix(
     bot: &Bot,
     chat_id: &ChatId,
     pool: &SqlitePool,
+    scope: &CallerScope,
     id_prefix: &str,
 ) -> Result<Option<(String, String, String)>, SignalError> {
     let pattern = format!("{}%", id_prefix);
-    let matches: Vec<(String, String, String)> = match sqlx::query_as(
-        "SELECT id, title, status FROM tasks WHERE id LIKE ? COLLATE NOCASE LIMIT 5",
-    )
-    .bind(&pattern)
-    .fetch_all(pool)
-    .await
+    let mut query = sqlx::QueryBuilder::new(
+        "SELECT id, title, status FROM tasks WHERE id LIKE ",
+    );
+    query.push_bind(&pattern).push(" COLLATE NOCASE");
+    if let CallerScope::LinkedDm { member_id } = scope {
+        query
+            .push(" AND (assigned_to = ")
+            .push_bind(member_id)
+            .push(" OR assigned_to IS NULL)");
+    }
+    query.push(" LIMIT 5");
+    let matches: Vec<(String, String, String)> = match query
+        .build_query_as()
+        .fetch_all(pool)
+        .await
     {
         Ok(r) => r,
         Err(e) => {
@@ -1954,6 +2101,7 @@ async fn add_manual_task(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    scope: &CallerScope,
     args: &str,
 ) -> Result<(), SignalError> {
     let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
@@ -1964,7 +2112,13 @@ async fn add_manual_task(
         return Ok(());
     };
 
-    let member_id = member_id.or_else(|| Some(default_member_id(config, chat_id.lookup_aci()).to_string()));
+    let member_id = match resolve_task_target(scope, member_id, config) {
+        Ok(member_id) => member_id,
+        Err(message) => {
+            send_signal(bot, chat_id, message).await?;
+            return Ok(());
+        }
+    };
     create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await
 }
 
@@ -2128,6 +2282,15 @@ async fn create_manual_task(
     Ok(())
 }
 
+fn task_reminder_targets(config: &AppConfig, assigned_to: Option<&str>) -> Vec<ChatId> {
+    match assigned_to {
+        Some(member_id) => signal_aci_for_member(config, member_id)
+            .map(|aci| vec![SignalRecipient::Direct { aci }])
+            .unwrap_or_default(),
+        None => signal_delivery_targets(config),
+    }
+}
+
 async fn poll_due_task_reminders(
     bot: &Bot,
     pool: &SqlitePool,
@@ -2187,24 +2350,45 @@ async fn poll_due_task_reminders(
             when,
             task_complete_snooze_help(&short_id)
         );
-        let targets: Vec<ChatId> = match assigned_to.as_deref() {
-            Some(mid) => match signal_aci_for_member(config, mid) {
-                Some(aci) => vec![SignalRecipient::Direct { aci }],
-                None => signal_delivery_targets(config),
-            },
-            None => signal_delivery_targets(config),
-        };
+        let targets = task_reminder_targets(config, assigned_to.as_deref());
 
-        let mut send_ok = false;
+        let mut send_ok = !targets.is_empty();
         for cid in &targets {
-            if let Err(e) = send_signal(bot, cid, msg.clone()).await
-            {
-                eprintln!(
-                    "Signal: failed to send task reminder {} to {}: {:?}",
-                    id, cid, e
-                );
-            } else {
-                send_ok = true;
+            match send_signal(bot, cid, msg.clone()).await {
+                Err(error) => {
+                    send_ok = false;
+                    eprintln!(
+                        "Signal: failed to send task reminder {} to {}: {:?}",
+                        id, cid, error
+                    );
+                }
+                Ok(message_timestamp) => {
+                    let (recipient_kind, recipient_id) = match cid {
+                        SignalRecipient::Direct { aci } => ("direct", aci.as_str()),
+                        SignalRecipient::Group { group_id } => ("group", group_id.as_str()),
+                    };
+                    match sqlx::query(
+                        "INSERT OR IGNORE INTO task_signal_messages \
+                         (task_id, recipient_kind, recipient_id, message_timestamp) \
+                         VALUES (?, ?, ?, ?)",
+                    )
+                    .bind(&id)
+                    .bind(recipient_kind)
+                    .bind(recipient_id)
+                    .bind(message_timestamp)
+                    .execute(pool)
+                    .await
+                    {
+                        Ok(_) => {}
+                        Err(error) => {
+                            send_ok = false;
+                            eprintln!(
+                                "Signal: failed to persist reminder correlation for {} to {}: {:?}",
+                                id, cid, error
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -2243,15 +2427,25 @@ enum TaskMutateOutcome {
 async fn load_task_title_status(
     pool: &SqlitePool,
     task_id: &str,
+    scope: &CallerScope,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
-    sqlx::query_as::<_, (String, String)>("SELECT title, status FROM tasks WHERE id = ?")
-        .bind(task_id)
-        .fetch_optional(pool)
-        .await
+    let mut query = sqlx::QueryBuilder::new("SELECT title, status FROM tasks WHERE id = ");
+    query.push_bind(task_id);
+    if let CallerScope::LinkedDm { member_id } = scope {
+        query
+            .push(" AND (assigned_to = ")
+            .push_bind(member_id)
+            .push(" OR assigned_to IS NULL)");
+    }
+    query.build_query_as().fetch_optional(pool).await
 }
 
-async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutcome {
-    let row = match load_task_title_status(pool, task_id).await {
+async fn complete_task_by_id(
+    pool: &SqlitePool,
+    task_id: &str,
+    scope: &CallerScope,
+) -> TaskMutateOutcome {
+    let row = match load_task_title_status(pool, task_id, scope).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to load task {task_id}: {e:?}");
@@ -2265,16 +2459,24 @@ async fn complete_task_by_id(pool: &SqlitePool, task_id: &str) -> TaskMutateOutc
         return TaskMutateOutcome::Done { title, already: true };
     }
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(task_id)
-        .execute(pool)
-        .await
-    {
-        eprintln!("Failed to mark task done: {e:?}");
-        return TaskMutateOutcome::DbError;
+    let mut update = sqlx::QueryBuilder::new("UPDATE tasks SET status = 'done', updated_at = ");
+    update.push_bind(&now).push(" WHERE id = ").push_bind(task_id);
+    if let CallerScope::LinkedDm { member_id } = scope {
+        update
+            .push(" AND (assigned_to = ")
+            .push_bind(member_id)
+            .push(" OR assigned_to IS NULL)");
     }
-    TaskMutateOutcome::Done { title, already: false }
+    match update.build().execute(pool).await {
+        Ok(result) if result.rows_affected() == 1 => {
+            TaskMutateOutcome::Done { title, already: false }
+        }
+        Ok(_) => TaskMutateOutcome::NotFound,
+        Err(error) => {
+            eprintln!("Failed to mark task done: {error:?}");
+            TaskMutateOutcome::DbError
+        }
+    }
 }
 
 async fn snooze_task_by_id(
@@ -2282,8 +2484,9 @@ async fn snooze_task_by_id(
     task_id: &str,
     days: i64,
     config: &AppConfig,
+    scope: &CallerScope,
 ) -> TaskMutateOutcome {
-    let row = match load_task_title_status(pool, task_id).await {
+    let row = match load_task_title_status(pool, task_id, scope).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to load task {task_id}: {e:?}");
@@ -2298,20 +2501,31 @@ async fn snooze_task_by_id(
         .to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let due_at = parse_due_phrase_tz(&due, config.resolved_tz()).map(|p| p.due_at);
-    if let Err(e) = sqlx::query(
-        "UPDATE tasks SET status = 'snoozed', due_date = ?, due_at = ?, reminded_at = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(&due)
-    .bind(due_at.as_deref())
-    .bind(&now)
-    .bind(task_id)
-    .execute(pool)
-    .await
-    {
-        eprintln!("Failed to snooze task: {e:?}");
-        return TaskMutateOutcome::DbError;
+    let mut update = sqlx::QueryBuilder::new(
+        "UPDATE tasks SET status = 'snoozed', due_date = ",
+    );
+    update
+        .push_bind(&due)
+        .push(", due_at = ")
+        .push_bind(due_at.as_deref())
+        .push(", reminded_at = NULL, updated_at = ")
+        .push_bind(&now)
+        .push(" WHERE id = ")
+        .push_bind(task_id);
+    if let CallerScope::LinkedDm { member_id } = scope {
+        update
+            .push(" AND (assigned_to = ")
+            .push_bind(member_id)
+            .push(" OR assigned_to IS NULL)");
     }
-    TaskMutateOutcome::Snoozed { title, due }
+    match update.build().execute(pool).await {
+        Ok(result) if result.rows_affected() == 1 => TaskMutateOutcome::Snoozed { title, due },
+        Ok(_) => TaskMutateOutcome::NotFound,
+        Err(error) => {
+            eprintln!("Failed to snooze task: {error:?}");
+            TaskMutateOutcome::DbError
+        }
+    }
 }
 
 async fn mark_task_complete(
@@ -2319,13 +2533,14 @@ async fn mark_task_complete(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    scope: &CallerScope,
     id_prefix: &str,
 ) -> Result<(), SignalError> {
-    let Some((id, _title, _status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, _title, _status)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
         return Ok(());
     };
 
-            match complete_task_by_id(pool, &id).await {
+            match complete_task_by_id(pool, &id, scope).await {
         TaskMutateOutcome::Done { title, already } => {
             let msg = if already {
                 format!("ℹ️ Task already done: _{}_", (title))
@@ -2360,13 +2575,13 @@ async fn mark_all_tasks_complete(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    scope: &CallerScope,
     confirm: bool,
 ) -> Result<(), SignalError> {
-    let linked_member = member_for_signal_aci(config, chat_id.lookup_aci());
-    let assignee_filter = linked_member.map(|m| m.id.as_str());
+    let assignee_filter = scope.member_id();
 
     // Household wipe requires an explicit confirm step.
-    if linked_member.is_none() && !confirm {
+    if matches!(scope, CallerScope::HouseholdGroup) && !confirm {
         let rows = match list_completable_open_tasks(pool, None).await {
             Ok(r) => r,
             Err(e) => {
@@ -2418,7 +2633,7 @@ async fn mark_all_tasks_complete(
     };
 
     if rows.is_empty() {
-        let empty_msg = if linked_member.is_some() {
+        let empty_msg = if assignee_filter.is_some() {
             "✅ No open or snoozed tasks of yours (or unassigned) to complete."
         } else {
             "✅ No open or snoozed tasks to complete."
@@ -2441,7 +2656,7 @@ async fn mark_all_tasks_complete(
     }
 
     let count = rows.len();
-    let mut msg = if linked_member.is_some() {
+    let mut msg = if assignee_filter.is_some() {
         format!(
             "✅ Marked *{}* of your open/snoozed tasks (and unassigned) done:\n",
             count
@@ -2478,14 +2693,15 @@ async fn snooze_task(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    scope: &CallerScope,
     id_prefix: &str,
     days: i64,
 ) -> Result<(), SignalError> {
-    let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
         return Ok(());
     };
 
-    match snooze_task_by_id(pool, &id, days, config).await {
+    match snooze_task_by_id(pool, &id, days, config, scope).await {
         TaskMutateOutcome::Snoozed { title, due } => {
             let calendar_note = sync_calendar_after_snooze(pool, config, &id, &due).await;
             let mut msg = format!(
@@ -2703,26 +2919,39 @@ async fn reassign_task(
     bot: &Bot,
     chat_id: &ChatId,
     pool: &SqlitePool,
+    scope: &CallerScope,
     id_prefix: &str,
     member_id: &str,
 ) -> Result<(), SignalError> {
-    let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
         return Ok(());
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) =
-        sqlx::query("UPDATE tasks SET assigned_to = ?, updated_at = ? WHERE id = ?")
-            .bind(member_id)
-            .bind(&now)
-            .bind(&id)
-            .execute(pool)
-            .await
-    {
-        eprintln!("Failed to reassign task: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error reassigning task.")
-            .await?;
-        return Ok(());
+    let mut update = sqlx::QueryBuilder::new("UPDATE tasks SET assigned_to = ");
+    update
+        .push_bind(member_id)
+        .push(", updated_at = ")
+        .push_bind(&now)
+        .push(" WHERE id = ")
+        .push_bind(&id);
+    if let CallerScope::LinkedDm { member_id } = scope {
+        update
+            .push(" AND (assigned_to = ")
+            .push_bind(member_id)
+            .push(" OR assigned_to IS NULL)");
+    }
+    match update.build().execute(pool).await {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            send_signal(bot, chat_id, "⚠️ Task not found in your scope.").await?;
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("Failed to reassign task: {error:?}");
+            send_signal(bot, chat_id, "❌ Database error reassigning task.").await?;
+            return Ok(());
+        }
     }
 
     send_signal(&bot, chat_id, format!(
@@ -2740,9 +2969,10 @@ async fn reopen_task(
     bot: &Bot,
     chat_id: &ChatId,
     pool: &SqlitePool,
+    scope: &CallerScope,
     id_prefix: &str,
 ) -> Result<(), SignalError> {
-    let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, id_prefix).await? else {
+    let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
         return Ok(());
     };
 
@@ -2753,16 +2983,25 @@ async fn reopen_task(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query("UPDATE tasks SET status = 'open', updated_at = ? WHERE id = ?")
-        .bind(&now)
-        .bind(&id)
-        .execute(pool)
-        .await
-    {
-        eprintln!("Failed to reopen task: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error reopening task.")
-            .await?;
-        return Ok(());
+    let mut update = sqlx::QueryBuilder::new("UPDATE tasks SET status = 'open', updated_at = ");
+    update.push_bind(&now).push(" WHERE id = ").push_bind(&id);
+    if let CallerScope::LinkedDm { member_id } = scope {
+        update
+            .push(" AND (assigned_to = ")
+            .push_bind(member_id)
+            .push(" OR assigned_to IS NULL)");
+    }
+    match update.build().execute(pool).await {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            send_signal(bot, chat_id, "⚠️ Task not found in your scope.").await?;
+            return Ok(());
+        }
+        Err(error) => {
+            eprintln!("Failed to reopen task: {error:?}");
+            send_signal(bot, chat_id, "❌ Database error reopening task.").await?;
+            return Ok(());
+        }
     }
 
     send_signal(&bot, chat_id, format!("📂 Reopened: _{}_", (title)),)
@@ -4035,6 +4274,7 @@ async fn handle_reflect_trigger(
     llm: &ChotuLlm,
     states: StateMap,
     config: &AppConfig,
+    scope: &CallerScope,
     prompt_attempts: u32,
 ) -> Result<(), SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -4047,7 +4287,7 @@ async fn handle_reflect_trigger(
         ping?;
     }
 
-    let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
+    let (txs, mut healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
         Ok(data) => data,
         Err(e) => {
             eprintln!("Reflect prompt query error: {:?}", e);
@@ -4062,6 +4302,7 @@ async fn handle_reflect_trigger(
             return Ok(());
         }
     };
+    crate::reflection::filter_health_for_member(&mut healths, scope.member_id());
 
     match crate::reflection::generate_reflection_prompt(
         llm,
@@ -4095,6 +4336,7 @@ async fn handle_reflect_trigger(
                 ConversationState::WaitingForReflection {
                     date: date_str,
                     prompt,
+                    member_id: scope.member_id().map(str::to_string),
                 },
             );
         }
@@ -4117,17 +4359,17 @@ async fn handle_reflect_trigger(
 async fn handle_message(
     bot: Bot,
     chat_id: ChatId,
-    sender_aci: String,
     inbound: SignalInbound,
     pool: SqlitePool,
     llm: ChotuLlm,
     gemini_client: GeminiClient,
     states: StateMap,
     shared_config: SharedConfig,
+    scope: CallerScope,
 ) -> Result<(), SignalError> {
     let text = inbound.text.clone().unwrap_or_default();
-    println!("Signal: Received message from {} in {}. Content: {:?}", sender_aci, chat_id, text);
-    let config = shared_config.read().await.clone();
+    println!("Signal: Received message in {}", chat_id);
+    let config = shared_config.as_ref();
 
     if let Some(quote_timestamp) = inbound.quote_timestamp {
         let reply_text = text.trim().to_lowercase();
@@ -4139,22 +4381,51 @@ async fn handle_message(
                 SignalRecipient::Direct { aci } => ("direct", aci.as_str()),
                 SignalRecipient::Group { group_id } => ("group", group_id.as_str()),
             };
-            let task_opt: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+            let mut query = sqlx::QueryBuilder::new(
                 "SELECT t.title, t.email_sender, t.email_subject, t.id \
                  FROM tasks t \
                  JOIN task_signal_messages m ON m.task_id = t.id \
-                 WHERE m.recipient_kind = ? AND m.recipient_id = ? AND m.message_timestamp = ?"
-            )
-            .bind(kind)
-            .bind(recipient_id)
-            .bind(quote_timestamp)
-            .fetch_optional(&pool)
-            .await
-            .ok()
-            .flatten();
+                 WHERE m.recipient_kind = ",
+            );
+            query
+                .push_bind(kind)
+                .push(" AND m.recipient_id = ")
+                .push_bind(recipient_id)
+                .push(" AND m.message_timestamp = ")
+                .push_bind(quote_timestamp);
+            if let CallerScope::LinkedDm { member_id } = &scope {
+                query
+                    .push(" AND (t.assigned_to = ")
+                    .push_bind(member_id)
+                    .push(" OR t.assigned_to IS NULL)");
+            }
+            let task_opt: Option<(String, Option<String>, Option<String>, Option<String>)> = query
+                .build_query_as()
+                .fetch_optional(&pool)
+                .await
+                .ok()
+                .flatten();
             if let Some((title, email_sender, email_subject, task_id)) = task_opt {
+                let mut update = sqlx::QueryBuilder::new(
+                    "UPDATE tasks SET status = 'ignored' WHERE id = ",
+                );
+                update.push_bind(&task_id);
+                if let CallerScope::LinkedDm { member_id } = &scope {
+                    update
+                        .push(" AND (assigned_to = ")
+                        .push_bind(member_id)
+                        .push(" OR assigned_to IS NULL)");
+                }
+                let updated = update
+                    .build()
+                    .execute(&pool)
+                    .await
+                    .is_ok_and(|result| result.rows_affected() == 1);
+                if !updated {
+                    send_signal(&bot, &chat_id, "That task is no longer available in your scope.").await?;
+                    return Ok(());
+                }
                 println!("Signal: Marking task as ignored and recording feedback for task: {}", title);
-                sqlx::query("UPDATE tasks SET status = 'ignored' WHERE id = ?").bind(&task_id).execute(&pool).await.ok();
                 let feedback_id = uuid::Uuid::new_v4().to_string();
                 let sender = email_sender.unwrap_or_else(|| "Unknown".to_string());
                 let subject = email_subject.unwrap_or_else(|| "No Subject".to_string());
@@ -4179,7 +4450,11 @@ async fn handle_message(
         s.get(&chat_id).cloned()
     };
 
-    if let Some(ConversationState::WaitingForReflection { date, prompt }) = active_state {
+    if let Some(ConversationState::WaitingForReflection {
+        date,
+        prompt,
+        member_id,
+    }) = active_state {
         if inbound.attachments.iter().any(|a| a.content_type.starts_with("image/")) {
             handle_food_photo(&bot, &chat_id, &inbound, &pool, &llm, &gemini_client, &config).await?;
             send_signal(&bot, &chat_id, "Evening reflection is still open — type your journal reply, or send a command to cancel.").await?;
@@ -4191,7 +4466,7 @@ async fn handle_message(
             return Ok(());
         }
         send_signal(&bot, &chat_id, "Saving reflection entry to your local journal...").await?;
-        let (txs, healths) = match crate::reflection::get_daily_data(&pool, &date, &config).await {
+        let (txs, mut healths) = match crate::reflection::get_daily_data(&pool, &date, config).await {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Failed to query daily data during save: {:?}", e);
@@ -4199,13 +4474,14 @@ async fn handle_message(
                 return Ok(());
             }
         };
+        crate::reflection::filter_health_for_member(&mut healths, member_id.as_deref());
         match crate::reflection::save_reflection(
             &date,
             &prompt,
             response_text,
             &txs,
             &healths,
-            member_for_signal_aci(&config, chat_id.lookup_aci()).map(|m| m.id.as_str()),
+            member_id.as_deref(),
         ).await {
             Ok(filepath) => {
                 {
@@ -4227,7 +4503,7 @@ async fn handle_message(
     } else if inbound.attachments.iter().any(|a| a.content_type.starts_with("image/")) {
         handle_food_photo(&bot, &chat_id, &inbound, &pool, &llm, &gemini_client, &config).await?;
     } else {
-        dispatch_free_text_intent(&bot, &chat_id, &text, &pool, &llm, &gemini_client, &config).await?;
+        dispatch_free_text_intent(&bot, &chat_id, &text, &pool, &llm, &gemini_client, config, &scope).await?;
     }
     Ok(())
 }
@@ -4355,6 +4631,7 @@ async fn dispatch_free_text_intent(
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
+    scope: &CallerScope,
 ) -> Result<(), SignalError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -4399,10 +4676,7 @@ async fn dispatch_free_text_intent(
         }
     };
 
-    println!(
-        "Signal: free-text intent={:?} reason={}",
-        classification.intent, classification.reason
-    );
+    println!("Signal: classified free-text intent={:?}", classification.intent);
 
     match classification.into_user_intent() {
         UserIntent::Status => handle_status(bot, chat_id, pool, config, llm).await?,
@@ -4423,16 +4697,21 @@ async fn dispatch_free_text_intent(
             handle_trends(bot, chat_id, args, pool, config, llm).await?;
         }
         UserIntent::Tasks { filter } => {
-            handle_tasks(bot, chat_id, filter, pool, config).await?;
+            handle_tasks(bot, chat_id, filter, pool, config, scope).await?;
         }
         UserIntent::TaskAdd {
             member_id,
             title,
             due_raw,
         } => {
-            let member_id =
-                member_id.or_else(|| Some(default_member_id(config, chat_id.lookup_aci()).to_string()));
-            create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
+            match resolve_task_target(scope, member_id, config) {
+                Ok(member_id) => {
+                    create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
+                }
+                Err(message) => {
+                    send_signal(bot, chat_id, message).await?;
+                }
+            }
         }
         UserIntent::Memory { query } => {
             handle_memory(bot, chat_id, query, pool, config, llm, gemini_client).await?;
@@ -4790,23 +5069,7 @@ async fn handle_login_calendar(
     config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
     if member_id.is_empty() {
-        let members: Vec<String> = config
-            .family
-            .members
-            .iter()
-            .filter(|m| m.calendar.is_some())
-            .map(|m| format!("`{}` ({})", m.id, m.name))
-            .collect();
-        let list = if members.is_empty() {
-            "_No members have a calendar block in config.yaml_".to_string()
-        } else {
-            members.join(", ")
-        };
-        send_signal(&bot, chat_id, format!(
-                "⚠️ Usage: `/login calendar <member_id>`\n\nConfigured calendar members: {}",
-                list
-            ),)
-        .await?;
+        send_signal(bot, chat_id, "⚠️ Usage: `/login calendar [your_member_id]`").await?;
         return Ok(());
     }
 
@@ -4955,18 +5218,8 @@ async fn handle_login_google_health(
     {
         Some(m) => m,
         None => {
-            let members: Vec<String> = config
-                .family
-                .members
-                .iter()
-                .map(|m| format!("`{}` ({})", m.id, m.name))
-                .collect();
-            send_signal(&bot, chat_id, format!(
-                    "❌ Unknown member `{}`.\n\nConfigured family members: {}",
-                    member_id,
-                    members.join(", ")
-                ),)
-            .await?;
+            send_signal(bot, chat_id, format!("❌ Unknown member `{member_id}`."))
+                .await?;
             return Ok(());
         }
     };
@@ -5233,7 +5486,17 @@ async fn handle_manual_code(
     chat_id: &ChatId,
     args: &str,
     config: &AppConfig,
+    scope: &CallerScope,
 ) -> Result<(), anyhow::Error> {
+    if matches!(scope, CallerScope::HouseholdGroup) {
+        send_signal(
+            bot,
+            chat_id,
+            "OAuth setup is only available in an authorized direct conversation.",
+        )
+        .await?;
+        return Ok(());
+    }
     let mut parts = args.split_whitespace();
     let service = match parts.next() {
         Some(s) => s.to_lowercase(),
@@ -5268,32 +5531,27 @@ async fn handle_manual_code(
             }
         }
     } else if service == "fitbit" || service == "health" {
-        let first = match parts.next() {
-            Some(c) => c.to_string(),
+        let requested_member = match parts.next() {
+            Some(member) => member,
             None => {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <member_id> <code_or_url>`",)
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <your_member_id> <code_or_url>`",)
                 .await?;
                 return Ok(());
             }
         };
-        let second = parts.next().map(|s| s.to_string());
-
-        let (member_id, code_raw) = match second.as_deref() {
-            Some(code) => (first, code.to_string()),
+        let code_raw = match parts.next() {
+            Some(code) => code.to_string(),
             None => {
-                // Back-compat: `/login code health <code>` → primary member
-                if config.family.members.iter().any(|m| m.id == first) {
-                    send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <member_id> <code_or_url>`",)
-                    .await?;
-                    return Ok(());
-                }
-                let primary = config
-                    .family
-                    .members
-                    .first()
-                    .map(|m| m.id.clone())
-                    .unwrap_or_else(|| "alex".to_string());
-                (primary, first)
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <your_member_id> <code_or_url>`",)
+                .await?;
+                return Ok(());
+            }
+        };
+        let member_id = match oauth_member_target(scope, requested_member) {
+            Ok(member_id) => member_id,
+            Err(message) => {
+                send_signal(bot, chat_id, message).await?;
+                return Ok(());
             }
         };
 
@@ -5346,11 +5604,18 @@ async fn handle_manual_code(
             }
         }
     } else if service == "calendar" {
-        let member_id = match parts.next() {
-            Some(m) => m.to_string(),
+        let requested_member = match parts.next() {
+            Some(member) => member,
             None => {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",)
+                send_signal(&bot, chat_id, "⚠️ Usage: `/login code calendar <your_member_id> <code_or_url>`",)
                 .await?;
+                return Ok(());
+            }
+        };
+        let member_id = match oauth_member_target(scope, requested_member) {
+            Ok(member_id) => member_id,
+            Err(message) => {
+                send_signal(bot, chat_id, message).await?;
                 return Ok(());
             }
         };
@@ -5526,6 +5791,74 @@ mod tests {
             quote_timestamp: None,
             attachments: vec![],
         }
+    }
+
+    #[test]
+    fn runtime_link_command_is_removed() {
+        assert!(parse_command("/link alex").is_none());
+    }
+
+    #[test]
+    fn linked_dm_task_targets_are_self_only() {
+        let mut config = AppConfig::default();
+        config.family.members[0].signal_aci = Some("aci-alex".to_string());
+        let dm = CallerScope::LinkedDm {
+            member_id: "alex".to_string(),
+        };
+        let group = CallerScope::HouseholdGroup;
+
+        assert_eq!(
+            resolve_task_target(&dm, None, &config).unwrap().as_deref(),
+            Some("alex")
+        );
+        assert_eq!(
+            resolve_task_target(&dm, Some("ALEX".to_string()), &config)
+                .unwrap()
+                .as_deref(),
+            Some("alex")
+        );
+        assert!(resolve_task_target(&dm, Some("jordan".to_string()), &config).is_err());
+        assert!(dm.allows_task_assignee(None));
+        assert!(dm.allows_task_assignee(Some("alex")));
+        assert!(!dm.allows_task_assignee(Some("jordan")));
+        assert!(group.allows_task_assignee(Some("jordan")));
+        assert_eq!(
+            task_reminder_targets(&config, Some("alex")),
+            vec![SignalRecipient::Direct {
+                aci: "aci-alex".to_string()
+            }]
+        );
+        assert!(task_reminder_targets(&config, Some("jordan")).is_empty());
+        assert_eq!(
+            resolve_task_target(&group, Some("jordan".to_string()), &config)
+                .unwrap()
+                .as_deref(),
+            Some("jordan")
+        );
+    }
+
+    #[test]
+    fn oauth_target_policy_is_dm_self_only() {
+        let dm = CallerScope::LinkedDm {
+            member_id: "alex".to_string(),
+        };
+        assert_eq!(oauth_member_target(&dm, "").unwrap(), "alex");
+        assert_eq!(oauth_member_target(&dm, "ALEX").unwrap(), "alex");
+        assert!(oauth_member_target(&dm, "jordan").is_err());
+        assert!(oauth_member_target(&CallerScope::HouseholdGroup, "alex").is_err());
+    }
+
+    #[test]
+    fn captioned_food_image_routes_before_command_dispatch() {
+        let mut inbound = inbound_direct("aci-alex", "/food oats");
+        inbound.attachments.push(chotu_common::SignalAttachment {
+            id: "attachment-1".to_string(),
+            content_type: "image/jpeg".to_string(),
+            size: Some(42),
+            caption: Some("/food oats".to_string()),
+        });
+
+        assert_eq!(classify_inbound(&inbound), InboundRoute::Image);
     }
 
     #[test]

@@ -5,7 +5,7 @@ Chotu’s chat transport is now **Signal via `signal-cli`** (Unix-socket JSON-RP
 ## You keep
 
 - Slash commands and free-text intents (`/food`, `/status`, `/tasks`, `/brief`, `/memory`, `/budget`, …)
-- Linked personal DMs + optional household group (`SIGNAL_GROUP_ID`)
+- Operator-configured personal DMs (`family.members[].signal_aci`) + optional household group (`SIGNAL_GROUP_ID`)
 - Food photos (barcode / package / plate → Gemini + Open Food Facts)
 - Task create / list / complete / snooze / reassign (as **typed commands**)
 - Due reminders, email-inferred tasks, morning brief / evening reflection fan-out
@@ -49,7 +49,8 @@ Telegram was “create bot → paste token.” Signal needs:
 - `signal-cli` linked as a secondary device
 - Long-running daemon with `--receive-mode=manual --socket …`
 - `SIGNAL_CLI_SOCKET` (and optional `SIGNAL_GROUP_ID`)
-- `/link` in a **1:1 DM** to write each member’s ACI (groups rejected for `/link`)
+- Each allowed member ACI configured in `config.yaml` before startup; changes require restart
+- Exact group-id authorization: a linked sender does not authorize any other group
 
 ### 6. Reminder correlation model
 

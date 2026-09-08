@@ -17,7 +17,7 @@ This document is the runtime map for **Project Chotu** plus the Rust standards f
 
 **Finance Advisor** (`finance-advisor`) is a library used by the bot (`/research`, `/networth`, `/monthly`, budgets). It is not a fifth spawned daemon. **chotu-evals** is a separate crate for golden-set classifier checks. Shared code lives in **chotu-common** (DB/migrations, family config, OAuth, LLM clients, calendar, memory RAG, quotes, Finnhub/Yahoo, food timing).
 
-Agents persist through SQLite (and files under `CHOTU_BRAIN_DIR` / `~/chotu_brain`). In-process work uses cloned `SqlitePool` + `AppConfig` (the Signal client holds config behind `tokio::sync::RwLock` so `/link` can rewrite YAML).
+Agents persist through SQLite (and files under `CHOTU_BRAIN_DIR` / `~/chotu_brain`). In-process work uses cloned `SqlitePool` plus an immutable `Arc<AppConfig>`; Signal authorization config is loaded once and changes require restart.
 
 ```text
 Signal / IMAP / drop folder / Google APIs
@@ -56,9 +56,10 @@ Health Coach scheduled sync still runs if Gemini is missing (omega-3 / triglycer
 ## Family isolation & Signal
 
 - Roster, `nutrition_goals`, `fitness_goals`, `core_values`, `spend_budgets`, and investment philosophy live in **gitignored** `config.yaml`.
-- Each adult DMs Chotu and `/link <member_id>` (writes `signal_aci`). Once any member is linked, unknown conversations are rejected (`/chat` and `/link` still work for setup).
-- Linked personal DMs see **only that member’s** health, training plan, coach tips, trends, and (for `/brief`) calendar/tasks/nutrition slice. Food mutations from a linked DM are **self-only**.
-- The optional `SIGNAL_GROUP_ID` household group is the family-wide surface. Proactive fan-out: morning brief, evening reflection, portfolio overview (times from `config.yaml` `schedules`; blank = off), budget 80%/100% alerts, research reports — to linked DMs plus the configured group.
+- The operator sets each allowed direct sender ACI as `family.members[].signal_aci` before startup. Direct messages require an exact member ACI; groups require the exact `SIGNAL_GROUP_ID` regardless of sender. There is no open bootstrap or runtime identity mutation.
+- Linked personal DMs see **only that member’s** health, training plan, coach tips, trends, reflection health/persistence, and (for `/brief`) calendar/tasks/nutrition slice. Food, task, and per-member OAuth mutations are self-only; task lists also include unassigned tasks. OAuth mutation is forbidden in groups.
+- The optional `SIGNAL_GROUP_ID` household group is the family-wide surface. Proactive fan-out: morning brief, evening reflection, portfolio overview (times from `config.yaml` `schedules`; blank = off), budget 80%/100% alerts, research reports — to configured member DMs plus the configured group.
+- The receive loop drains notifications into per-conversation queues. One worker serializes each conversation (preserving reflection/task state order), while a global semaphore bounds concurrent handlers so one slow model/API call cannot block other chats.
 
 ---
 
@@ -92,7 +93,7 @@ Health Coach scheduled sync still runs if Gemini is missing (omega-3 / triglycer
 
 ## 2. Asynchronous Tokio & Concurrency Patterns
 
-- **Task Decoupling**: Each agent runs as an independent Tokio task. They communicate via the database (persistent state) or cloned handles (`SqlitePool`, `Bot`, `RwLock<AppConfig>`), not a custom IPC bus.
+- **Task Decoupling**: Each agent runs as an independent Tokio task. They communicate via the database (persistent state) or cloned handles (`SqlitePool`, `Bot`, `Arc<AppConfig>`), not a custom IPC bus.
 - **Non-Blocking Execution**: Never call blocking OS operations (like `std::fs` or `std::thread::sleep`) inside an async context. Instead, use their Tokio equivalents (`tokio::fs` or `tokio::time::sleep`). If a blocking call is unavoidable (e.g. standard CSV parsing), wrap it in `tokio::task::spawn_blocking`.
 - **Locking Minimization**:
   - Prefer Tokio channels (`tokio::sync::mpsc` or `broadcast`) over sharing state via `Arc<Mutex<T>>`.

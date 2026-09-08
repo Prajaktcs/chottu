@@ -16,7 +16,9 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 | Optional household group | `SIGNAL_GROUP_ID` | Base64 group id from `signal-cli -a "$SIGNAL_ACCOUNT" listGroups` |
 | Gemini | `GEMINI_API_KEY` | **Required for `just run`** (Signal coordinator won’t start without it) |
 | Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
-| Family roster | `config.yaml` → `family.members` | At least one adult `id` for `/link` |
+| Authorized direct messages | `config.yaml` → `family.members[].signal_aci` | Required for each member DM; restart after changes |
+
+Direct/group authorization is context-specific and configuration is static for the process lifetime. A linked sender in the wrong group is rejected.
 
 Start the daemon before `just run`:
 
@@ -25,7 +27,7 @@ signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" daemon \
   --receive-mode=manual --socket "$SIGNAL_CLI_SOCKET"
 ```
 
-One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`finishLink`). That is separate from Chotu `/link`. Keep the daemon data directory private and upgrade signal-cli at least every 90 days.
+One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`finishLink`). Chotu has no runtime identity-linking command. Configure each member ACI in `config.yaml` before startup, keep the daemon data directory private, and upgrade signal-cli at least every 90 days.
 
 `just run` exits immediately if `SIGNAL_CLI_SOCKET` is missing/not a socket or `GEMINI_API_KEY` is missing, so the supervisor (Signal, Health Coach, Streamer, Janitor) never starts.
 
@@ -136,16 +138,16 @@ Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 | Gmail refresh token | Streamer skips IMAP until `/login gmail` |
 | Health refresh token | `/sync` / coach have nothing to pull for that member |
 | Calendar refresh token | Tasks/bills/travel won’t auto-schedule for that member |
-| No `/link` yet | Food/tasks need explicit member ids; unknown chats accepted until first link |
+| No member `signal_aci` | Direct messages are rejected; the exact configured `SIGNAL_GROUP_ID` remains authorized |
 
 ---
 
 ## Setup order (practical)
 
 1. Rust + Ollama models + `just setup` (+ `just prereqs` to pull models)
-2. Link signal-cli as a secondary device, start the documented daemon, set `SIGNAL_CLI_SOCKET` **and** `GEMINI_API_KEY` → `just run` → DM Chotu → `/link` → optional `SIGNAL_GROUP_ID`
-3. Edit `config.yaml` members → each adult `/link <id>`
-4. Google OAuth clients → `/login health …`, `/login gmail`, `/login calendar …`
+2. Link signal-cli as a secondary device and start the documented daemon
+3. Set each allowed member's `signal_aci` in `config.yaml`; optionally set `SIGNAL_GROUP_ID`; set `SIGNAL_CLI_SOCKET` and `GEMINI_API_KEY`; then `just run`
+4. Google OAuth clients → run `/login health …`, `/login gmail`, or `/login calendar …` from an authorized DM (Health/Calendar are self-only; groups cannot mutate OAuth)
 5. Optionally set `OLLAMA_MODEL=qwen3.5:9b` (and pull that model) for better triage
 6. Add OpenRouter (+ Finnhub) when you want `/research`
 

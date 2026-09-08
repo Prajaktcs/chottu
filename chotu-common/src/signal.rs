@@ -18,6 +18,8 @@ use tokio::{
 };
 
 const RECEIVE_BUFFER: usize = 64;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const RESPONSE_TIMEOUT_GRACE: Duration = Duration::from_secs(1);
 const RECONNECT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(1),
     Duration::from_secs(2),
@@ -34,6 +36,8 @@ pub enum SignalError {
     Eof,
     #[error("signal client is reconnecting")]
     Reconnecting,
+    #[error("signal request timed out")]
+    Timeout,
     #[error("malformed UTF-8 JSON-RPC frame: {0}")]
     Utf8(String),
     #[error("malformed JSON-RPC frame: {0}")]
@@ -108,14 +112,21 @@ pub struct SignalClient {
 struct SignalInner {
     commands: mpsc::UnboundedSender<Command>,
     inbound: broadcast::Sender<SignalInbound>,
+    request_timeout: Duration,
 }
 
 enum Command {
     Request {
         method: &'static str,
         params: Value,
+        deadline: Instant,
         response: oneshot::Sender<Result<Value, SignalError>>,
     },
+}
+
+struct PendingRequest {
+    deadline: Instant,
+    response: oneshot::Sender<Result<Value, SignalError>>,
 }
 
 enum ReaderEvent {
@@ -125,6 +136,13 @@ enum ReaderEvent {
 
 impl SignalClient {
     pub async fn connect(socket_path: impl AsRef<Path>) -> Result<Self, SignalError> {
+        Self::connect_with_timeout(socket_path, REQUEST_TIMEOUT).await
+    }
+
+    async fn connect_with_timeout(
+        socket_path: impl AsRef<Path>,
+        request_timeout: Duration,
+    ) -> Result<Self, SignalError> {
         let socket_path = socket_path.as_ref().to_path_buf();
         let stream = UnixStream::connect(&socket_path)
             .await
@@ -135,6 +153,7 @@ impl SignalClient {
             inner: Arc::new(SignalInner {
                 commands,
                 inbound,
+                request_timeout,
             }),
         };
         tokio::spawn(run_io_loop(
@@ -142,6 +161,7 @@ impl SignalClient {
             stream,
             command_rx,
             client.inner.inbound.clone(),
+            request_timeout,
         ));
         Ok(client)
     }
@@ -200,15 +220,20 @@ impl SignalClient {
 
     async fn request(&self, method: &'static str, params: Value) -> Result<Value, SignalError> {
         let (response_tx, response_rx) = oneshot::channel();
+        let deadline = Instant::now() + self.inner.request_timeout;
         self.inner
             .commands
             .send(Command::Request {
                 method,
                 params,
+                deadline,
                 response: response_tx,
             })
             .map_err(|_| SignalError::Eof)?;
-        response_rx.await.map_err(|_| SignalError::Eof)?
+        tokio::time::timeout_at(deadline + RESPONSE_TIMEOUT_GRACE, response_rx)
+            .await
+            .map_err(|_| SignalError::Timeout)?
+            .map_err(|_| SignalError::Eof)?
     }
 }
 
@@ -217,6 +242,7 @@ async fn run_io_loop(
     initial_stream: UnixStream,
     mut commands: mpsc::UnboundedReceiver<Command>,
     inbound: broadcast::Sender<SignalInbound>,
+    request_timeout: Duration,
 ) {
     let (initial_reader, initial_writer) = initial_stream.into_split();
     let (events, mut event_rx) = mpsc::unbounded_channel();
@@ -224,16 +250,17 @@ async fn run_io_loop(
     let mut generation = 0_u64;
     spawn_reader(initial_reader, events.clone(), generation);
 
-    let mut pending: HashMap<u64, oneshot::Sender<Result<Value, SignalError>>> = HashMap::new();
+    let mut pending: HashMap<u64, PendingRequest> = HashMap::new();
     let mut next_id = 1_u64;
     let mut subscription_requested = false;
     let mut reconnect_deadline: Option<Instant> = None;
     let mut backoff_index = 0_usize;
 
     loop {
+        let pending_deadline = pending.values().map(|request| request.deadline).min();
         tokio::select! {
             command = commands.recv() => {
-                let Some(Command::Request { method, params, response }) = command else {
+                let Some(Command::Request { method, params, deadline, response }) = command else {
                     return;
                 };
                 if method == "subscribeReceive" {
@@ -242,18 +269,26 @@ async fn run_io_loop(
                 if let Some(current) = writer.as_mut() {
                     let request_id = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
-                    pending.insert(request_id, response);
-                    if let Err(error) = write_request(current, request_id, method, params).await {
-                        if let Some(waiter) = pending.remove(&request_id) {
-                            let _ = waiter.send(Err(SignalError::Io(error)));
-                        }
-                        disconnect(
+                    pending.insert(request_id, PendingRequest { deadline, response });
+                    match tokio::time::timeout_at(
+                        deadline,
+                        write_request(current, request_id, method, params),
+                    ).await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => disconnect(
                             &mut writer,
                             &mut pending,
                             &mut reconnect_deadline,
                             &mut backoff_index,
-                            SignalError::Eof,
-                        );
+                            SignalError::Io(error),
+                        ),
+                        Err(_) => disconnect(
+                            &mut writer,
+                            &mut pending,
+                            &mut reconnect_deadline,
+                            &mut backoff_index,
+                            SignalError::Timeout,
+                        ),
                     }
                 } else {
                     let _ = response.send(Err(SignalError::Reconnecting));
@@ -308,14 +343,25 @@ async fn run_io_loop(
                             let request_id = next_id;
                             next_id = next_id.wrapping_add(1).max(1);
                             let current = writer.as_mut().expect("just connected");
-                            if let Err(error) = write_request(current, request_id, "subscribeReceive", json!({})).await {
-                                disconnect(
+                            match tokio::time::timeout(
+                                request_timeout,
+                                write_request(current, request_id, "subscribeReceive", json!({})),
+                            ).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => disconnect(
                                     &mut writer,
                                     &mut pending,
                                     &mut reconnect_deadline,
                                     &mut backoff_index,
                                     SignalError::Io(error),
-                                );
+                                ),
+                                Err(_) => disconnect(
+                                    &mut writer,
+                                    &mut pending,
+                                    &mut reconnect_deadline,
+                                    &mut backoff_index,
+                                    SignalError::Timeout,
+                                ),
                             }
                         }
                     }
@@ -324,6 +370,17 @@ async fn run_io_loop(
                         backoff_index = (backoff_index + 1).min(RECONNECT_BACKOFF.len() - 1);
                     }
                 }
+            }
+            _ = tokio::time::sleep_until(
+                pending_deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400)),
+            ), if pending_deadline.is_some() => {
+                disconnect(
+                    &mut writer,
+                    &mut pending,
+                    &mut reconnect_deadline,
+                    &mut backoff_index,
+                    SignalError::Timeout,
+                );
             }
         }
 
@@ -390,7 +447,7 @@ async fn write_request(
 
 fn dispatch_frame(
     frame: &[u8],
-    pending: &mut HashMap<u64, oneshot::Sender<Result<Value, SignalError>>>,
+    pending: &mut HashMap<u64, PendingRequest>,
     inbound: &broadcast::Sender<SignalInbound>,
 ) -> Result<(), SignalError> {
     let frame = str::from_utf8(frame)
@@ -410,9 +467,10 @@ fn dispatch_frame(
         .get("id")
         .and_then(Value::as_u64)
         .ok_or_else(|| SignalError::Protocol("response did not contain an integer id".into()))?;
-    let Some(waiter) = pending.remove(&id) else {
+    let Some(pending_request) = pending.remove(&id) else {
         return Ok(());
     };
+    let waiter = pending_request.response;
     if let Some(error) = message.get("error") {
         let code = error.get("code").and_then(Value::as_i64);
         let message = error
@@ -471,12 +529,15 @@ fn parse_receive(message: &Value) -> Result<Option<SignalInbound>, SignalError> 
     let mut attachments = Vec::new();
     if let Some(raw_attachments) = data_message.get("attachments").and_then(Value::as_array) {
         for attachment in raw_attachments {
+            let Some(id) = attachment
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            else {
+                continue;
+            };
             attachments.push(SignalAttachment {
-                id: attachment
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
+                id: id.to_string(),
                 content_type: attachment
                     .get("contentType")
                     .and_then(Value::as_str)
@@ -512,14 +573,14 @@ fn timestamp_from_result(result: &Value) -> Result<i64, SignalError> {
 
 fn disconnect(
     writer: &mut Option<OwnedWriteHalf>,
-    pending: &mut HashMap<u64, oneshot::Sender<Result<Value, SignalError>>>,
+    pending: &mut HashMap<u64, PendingRequest>,
     reconnect_deadline: &mut Option<Instant>,
     backoff_index: &mut usize,
     error: SignalError,
 ) {
     *writer = None;
-    for (_, waiter) in pending.drain() {
-        let _ = waiter.send(Err(error_for_pending(&error)));
+    for (_, request) in pending.drain() {
+        let _ = request.response.send(Err(error_for_pending(&error)));
     }
     *reconnect_deadline = Some(Instant::now() + RECONNECT_BACKOFF[*backoff_index]);
     *backoff_index = (*backoff_index + 1).min(RECONNECT_BACKOFF.len() - 1);
@@ -530,6 +591,7 @@ fn error_for_pending(error: &SignalError) -> SignalError {
         SignalError::Io(error) => SignalError::Io(io::Error::new(error.kind(), error.to_string())),
         SignalError::Eof => SignalError::Eof,
         SignalError::Reconnecting => SignalError::Reconnecting,
+        SignalError::Timeout => SignalError::Timeout,
         SignalError::Utf8(error) => SignalError::Utf8(error.clone()),
         SignalError::Json(error) => SignalError::Json(error.clone()),
         SignalError::Rpc {
@@ -583,6 +645,132 @@ mod tests {
         let inbound = parse_receive(&message).unwrap().expect("text should survive");
         assert_eq!(inbound.text.as_deref(), Some("hello"));
         assert!(inbound.attachments.is_empty());
+    }
+
+    #[test]
+    fn invalid_attachment_ids_are_filtered_without_dropping_valid_content() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"result": {"envelope": {
+                "sourceUuid": "aci-1",
+                "dataMessage": {
+                    "message": "hello",
+                    "attachments": [
+                        {"contentType": "image/png"},
+                        {"id": "", "contentType": "image/jpeg"},
+                        {"id": "valid", "contentType": "text/plain", "size": 3}
+                    ]
+                }
+            }}}
+        });
+
+        let inbound = parse_receive(&message).unwrap().expect("text should survive");
+        assert_eq!(inbound.text.as_deref(), Some("hello"));
+        assert_eq!(
+            inbound.attachments,
+            vec![SignalAttachment {
+                id: "valid".into(),
+                content_type: "text/plain".into(),
+                size: Some(3),
+                caption: None,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_peer_times_out_and_next_request_recovers_after_reconnect() {
+        let (_dir, listener, path) = socket().await;
+        let (reconnected_tx, reconnected_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (first_stream, _) = listener.accept().await.unwrap();
+            let (first_read, mut first_write) = first_stream.into_split();
+            let mut first_reader = BufReader::new(first_read);
+            let first_request = request(&mut first_reader).await;
+            assert_eq!(first_request["method"], "send");
+
+            let (second_stream, _) = listener.accept().await.unwrap();
+            let (second_read, mut second_write) = second_stream.into_split();
+            let mut second_reader = BufReader::new(second_read);
+            reconnected_tx.send(()).unwrap();
+
+            first_write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"jsonrpc":"2.0","id":first_request["id"],"result":{"timestamp":99}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+
+            let second_request = request(&mut second_reader).await;
+            assert_eq!(second_request["method"], "send");
+            assert_ne!(second_request["id"], first_request["id"]);
+            second_write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"jsonrpc":"2.0","id":second_request["id"],"result":{"timestamp":17}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = SignalClient::connect_with_timeout(&path, Duration::from_millis(40))
+            .await
+            .unwrap();
+        let error = client
+            .send_text(&SignalRecipient::Direct { aci: "aci".into() }, "first")
+            .await
+            .unwrap_err();
+        assert!(matches!(error, SignalError::Timeout));
+
+        reconnected_rx.await.unwrap();
+        let timestamp = client
+            .send_text(&SignalRecipient::Direct { aci: "aci".into() }, "second")
+            .await
+            .unwrap();
+        assert_eq!(timestamp, 17);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_preserves_write_io_error_for_pending_requests() {
+        let (first_tx, first_rx) = oneshot::channel();
+        let (second_tx, second_rx) = oneshot::channel();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut pending = HashMap::from([
+            (1, PendingRequest { deadline, response: first_tx }),
+            (2, PendingRequest { deadline, response: second_tx }),
+        ]);
+        let mut writer = None;
+        let mut reconnect_deadline = None;
+        let mut backoff_index = 0;
+
+        disconnect(
+            &mut writer,
+            &mut pending,
+            &mut reconnect_deadline,
+            &mut backoff_index,
+            SignalError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "request write failed",
+            )),
+        );
+
+        assert!(pending.is_empty());
+        for response in [first_rx, second_rx] {
+            let error = response.await.unwrap().unwrap_err();
+            let SignalError::Io(error) = error else {
+                panic!("expected socket I/O error, got {error:?}");
+            };
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(error.to_string(), "request write failed");
+        }
     }
 
     #[tokio::test]

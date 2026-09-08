@@ -359,8 +359,8 @@ pub struct FamilyMember {
     /// Optional chronic conditions (empty = none). Watchlists live in the DB.
     #[serde(default)]
     pub health_conditions: Vec<HealthCondition>,
-    /// Signal ACI for this member's linked direct conversation.
-    /// Set via `/link <member_id>` or manually in config.yaml.
+    /// Signal ACI authorized for this member's direct conversation.
+    /// Operator-configured in config.yaml; changes take effect after restart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signal_aci: Option<String>,
 }
@@ -677,19 +677,22 @@ pub fn has_any_signal_link(config: &AppConfig) -> bool {
         .any(|member| member.signal_aci.is_some())
 }
 
-/// Before the first `/link`, direct conversations remain open so setup can proceed.
-/// Afterwards, only a linked ACI or the configured household group is accepted.
+/// Authorize Signal conversations according to their context.
+///
+/// Direct messages require a configured member ACI. Group messages require the
+/// exact configured household group id, regardless of the sender ACI.
 pub fn is_signal_conversation_allowed(
     config: &AppConfig,
     sender_aci: &str,
     group_id: Option<&str>,
 ) -> bool {
-    !has_any_signal_link(config)
-        || member_for_signal_aci(config, sender_aci).is_some()
-        || matches!(
-            (group_id, env_signal_group_id()),
-            (Some(inbound), Some(configured)) if inbound == configured
-        )
+    match group_id {
+        Some(inbound) => matches!(
+            env_signal_group_id(),
+            Some(configured) if inbound == configured
+        ),
+        None => member_for_signal_aci(config, sender_aci).is_some(),
+    }
 }
 
 /// Signal ACI linked to `member_id`, if any.
@@ -764,7 +767,7 @@ pub fn set_member_signal_aci<P: AsRef<Path>>(
         if existing != aci {
             return Err(format!(
                 "Member `{member_id}` is already linked to Signal ACI `{existing}`. \
-                 Clear that member's `signal_aci` in config.yaml, then retry `/link`."
+                 Update that member's `signal_aci` in config.yaml, then restart Chotu."
             ));
         }
         return Ok(config);
@@ -1430,10 +1433,10 @@ family:
     }
 
     #[test]
-    fn test_allowlist_open_until_first_link() {
+    fn test_direct_messages_require_configured_aci() {
         let open = AppConfig::default();
         assert!(!has_any_signal_link(&open));
-        assert!(is_signal_conversation_allowed(&open, "aci-unknown", None));
+        assert!(!is_signal_conversation_allowed(&open, "aci-unknown", None));
 
         let linked = two_member_config();
         assert!(has_any_signal_link(&linked));
@@ -1452,9 +1455,19 @@ family:
                 "aci-unknown",
                 Some("household-group")
             ));
+            assert!(is_signal_conversation_allowed(
+                &linked,
+                "",
+                Some("household-group")
+            ));
             assert!(!is_signal_conversation_allowed(
                 &linked,
                 "aci-unknown",
+                Some("other-group")
+            ));
+            assert!(!is_signal_conversation_allowed(
+                &linked,
+                "aci-alex",
                 Some("other-group")
             ));
             assert_eq!(

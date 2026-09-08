@@ -3,7 +3,7 @@ family:
     - id: alex
       name: Alex
       role: adult
-      # Optional: Signal ACI for this member (or use /link alex in a direct chat)
+      # Signal ACI authorized for this member DM. Set before startup; restart after changes.
       # signal_aci: 00000000-0000-0000-0000-000000000001
       calendar:
         provider: google
@@ -64,12 +64,12 @@ family:
 #   CALENDAR_REFRESH_TOKEN_ALEX=...
 #   CALENDAR_REFRESH_TOKEN_JORDAN=...
 #
-# Per-member Signal DMs: each adult DMs Chotu and runs `/link <member_id>`.
-# That writes `signal_aci` here. `/link` will not overwrite a member already
-# linked to a different ACI — clear `signal_aci` first to move. Household
-# pushes (brief, budgets, stock, reflection) fan out to all linked chats;
-# `SIGNAL_GROUP_ID` is the optional household group. Once any member is
-# linked, unknown conversations are rejected.
+# Per-member Signal DMs: operator-configure each allowed ACI as `signal_aci`
+# before startup. There is no runtime identity mutation command; restart Chotu
+# after any ACI change. Direct messages require an exact configured ACI.
+# `SIGNAL_GROUP_ID` is the optional household group and authorizes only that
+# exact group, regardless of sender linkage. Household pushes fan out to all
+# configured member DMs plus that group.
 #
 # IANA tz database name (https://www.iana.org/time-zones), e.g. America/Toronto.
 # The agent uses this for civil clocks (schedules, "3pm", calendar 09:00 blocks).
