@@ -1188,15 +1188,12 @@ fn resolve_delivery_recipient(
         "group" => Some(chotu_common::SignalRecipient::Group {
             group_id: delivery.target_id.clone(),
         }),
+        // Durable logical target: wait until this member has a configured ACI.
+        // Do not fall back to SIGNAL_GROUP_ID here — that group may have been
+        // added after enqueue and would leak an assigned reminder into the
+        // household chat.
         "member" => chotu_common::signal_aci_for_member(config, &delivery.target_id)
-            .map(|aci| chotu_common::SignalRecipient::Direct { aci })
-            .or_else(|| {
-                chotu_common::signal_delivery_targets(config)
-                    .into_iter()
-                    .find(|recipient| {
-                        matches!(recipient, chotu_common::SignalRecipient::Group { .. })
-                    })
-            }),
+            .map(|aci| chotu_common::SignalRecipient::Direct { aci }),
         _ => None,
     }
 }
@@ -1346,7 +1343,7 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
                     pool,
                     &delivery,
                     attempts,
-                    "assigned member has no linked Signal DM or household group",
+                    "assigned member has no configured Signal ACI",
                 )
                 .await?;
                 continue;
@@ -1687,6 +1684,48 @@ mod signal_mapping_tests {
                 .into_iter()
                 .map(ReminderTarget::from_recipient)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn member_targets_wait_for_aci_and_never_fall_back_to_group() {
+        let mut config = AppConfig::default();
+        config.family.members[0].id = "unlinked".into();
+        config.family.members[0].signal_aci = None;
+        let delivery = PendingDelivery {
+            task_id: "task-member".into(),
+            target_kind: "member".into(),
+            target_id: "unlinked".into(),
+            attempts: 0,
+            title: "renew insurance".into(),
+        };
+
+        assert_eq!(
+            resolve_delivery_recipient(&delivery, &config),
+            None,
+            "member target must stay pending while the ACI is missing"
+        );
+
+        config.family.members[0].signal_aci = Some("unlinked-aci".into());
+        assert_eq!(
+            resolve_delivery_recipient(&delivery, &config),
+            Some(SignalRecipient::Direct {
+                aci: "unlinked-aci".into(),
+            })
+        );
+
+        assert_eq!(
+            resolve_delivery_recipient(
+                &PendingDelivery {
+                    target_kind: "group".into(),
+                    target_id: "household".into(),
+                    ..delivery
+                },
+                &config
+            ),
+            Some(SignalRecipient::Group {
+                group_id: "household".into(),
+            })
         );
     }
 
