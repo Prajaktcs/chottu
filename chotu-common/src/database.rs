@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -809,24 +812,38 @@ mod tests {
         let options = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
             .unwrap()
             .create_if_missing(true);
-        let pool = SqlitePool::connect_with(options).await.unwrap();
+        // One connection so later PRAGMA/ALTER pairs cannot disagree after
+        // rebuilds the way a multi-connection pool can on Linux CI.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
         let migrator = sqlx::migrate!();
 
         migrator.run_to(20260607000100, &pool).await.unwrap();
         drop_tasks_message_id_if_present(&pool).await.unwrap();
         migrator.run_to(20260824000003, &pool).await.unwrap();
         ensure_modern_tasks_schema(&pool).await.unwrap();
-        let telegram_column: (i32,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'telegram_message_id'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if telegram_column.0 == 0 {
-            sqlx::query("ALTER TABLE tasks ADD COLUMN telegram_message_id INTEGER")
-                .execute(&pool)
-                .await
-                .unwrap();
+        let columns: Vec<(i32, String)> = sqlx::query_as("PRAGMA table_info(tasks)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        if !columns
+            .iter()
+            .any(|(_, name)| name == "telegram_message_id")
+        {
+            if let Err(error) =
+                sqlx::query("ALTER TABLE tasks ADD COLUMN telegram_message_id INTEGER")
+                    .execute(&pool)
+                    .await
+            {
+                let message = error.to_string();
+                assert!(
+                    message.contains("duplicate column name"),
+                    "adding telegram_message_id: {error}"
+                );
+            }
         }
 
         sqlx::query(
