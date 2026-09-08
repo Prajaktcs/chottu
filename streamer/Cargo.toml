@@ -16,4 +16,6 @@ chrono = { workspace = true }
 futures = { workspace = true }
 dotenvy = { workspace = true }
 mailparse = { workspace = true }
-teloxide = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -3,7 +3,7 @@ use chotu_common::ChotuLlm;
 
 mod brief;
 mod reflection;
-mod telegram;
+mod signal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -11,31 +11,22 @@ async fn main() -> Result<()> {
 
     println!("=== Booting Project Chotu Supervisor ===");
 
-    // Run non-blocking startup OAuth checks in the background
-    tokio::spawn(async move {
-        if let Err(e) = perform_startup_oauth_checks().await {
-            eprintln!("Error in startup OAuth checks: {:?}", e);
-        }
-    });
-
-    // 1. Setup database pool
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "chotu.db".to_string());
-    println!("Initializing SQLite connection pool at: {}", db_path);
-    let pool = chotu_common::init_db(&db_path)
-        .await
-        .context("Failed to initialize SQLite database pool")?;
-    println!("Database migrations checked and executed.");
-
-    // 1.5 Load configuration file (config.yaml)
     let config_path =
         std::env::var("CHOTU_CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
-    println!("Loading configuration from: {}", config_path);
-    let config = chotu_common::load_config(&config_path);
+    let (config, pool) = load_config_then_init_db(&config_path, &db_path).await?;
     std::env::set_var("CHOTU_TIMEZONE", config.resolved_timezone_name());
     println!(
         "Agent timezone: {} (IANA tz database; instants in SQLite stay UTC)",
         config.resolved_timezone_name()
     );
+
+    // Run non-blocking startup OAuth checks only after configuration and storage are valid.
+    tokio::spawn(async move {
+        if let Err(e) = perform_startup_oauth_checks().await {
+            eprintln!("Error in startup OAuth checks: {:?}", e);
+        }
+    });
 
     // 2. Setup LLM client
     let host = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost".to_string());
@@ -101,11 +92,11 @@ async fn main() -> Result<()> {
             .await?;
         println!("Coordinator Agent verified DB connection: {}", row.0);
 
-        println!("Coordinator Agent: starting Telegram Bot update loop...");
+        println!("Coordinator Agent: starting Signal client...");
         let gemini_key = std::env::var("GEMINI_API_KEY")
             .context("GEMINI_API_KEY environment variable is required")?;
 
-        telegram::start_telegram_bot(
+        signal::start_signal_client(
             coordinator_pool,
             coordinator_llm,
             gemini_key,
@@ -137,6 +128,58 @@ async fn main() -> Result<()> {
 
     println!("Graceful shutdown complete.");
     Ok(())
+}
+
+async fn load_config_then_init_db(
+    config_path: &str,
+    db_path: &str,
+) -> Result<(chotu_common::AppConfig, sqlx::SqlitePool)> {
+    println!("Loading configuration from: {}", config_path);
+    let config = chotu_common::load_config(config_path)
+        .map_err(anyhow::Error::msg)
+        .context("Failed to load configuration")?;
+
+    println!("Initializing SQLite connection pool at: {}", db_path);
+    let pool = chotu_common::init_db(db_path)
+        .await
+        .context("Failed to initialize SQLite database pool")?;
+    println!("Database migrations checked and executed.");
+
+    Ok((config, pool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invalid_legacy_config_is_rejected_before_database_creation() {
+        let dir = std::env::temp_dir().join(format!("chotu-startup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let config_path = dir.join("config.yaml");
+        let db_path = dir.join("must-not-be-created.db");
+        std::fs::write(
+            &config_path,
+            "family:\n  members:\n    - id: alex\n      name: Alex\n      role: adult\n      calendar: null\n      telegram_chat_id: legacy-chat\n",
+        )
+        .unwrap();
+
+        let result =
+            load_config_then_init_db(config_path.to_str().unwrap(), db_path.to_str().unwrap())
+                .await;
+
+        let error = result.expect_err("legacy configuration must fail hard");
+        assert!(
+            error.to_string().contains("Failed to load configuration"),
+            "unexpected error: {error:#}"
+        );
+        assert!(
+            !db_path.exists(),
+            "database must not be created before configuration validates"
+        );
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 async fn perform_startup_oauth_checks() -> Result<()> {
@@ -190,7 +233,7 @@ async fn perform_startup_oauth_checks() -> Result<()> {
                     .await
                     {
                         Ok(tokens) => {
-                            // Startup flow is primary-only; Telegram `/login health <id>`
+                            // Startup flow is primary-only; Signal `/login health <id>`
                             // is the multi-member path.
                             save_google_health_refresh_token(&tokens.refresh_token)?;
                             println!("\n================================================================");

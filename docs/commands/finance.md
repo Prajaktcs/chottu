@@ -13,7 +13,7 @@ Ledger rows come from email triage (Streamer) and `~/chotu_drop/` imports (Janit
 /monthly 2026-07
 ```
 
-Spend summary for the month in your `config.yaml` base currency. Includes budget progress when `spend_budgets` (or Telegram overrides) exist.
+Spend summary for the month in your `config.yaml` base currency. Includes budget progress when `spend_budgets` (or `/budget set` overrides) exist.
 
 Plain text: `monthly spend`.
 
@@ -25,9 +25,9 @@ Plain text: `monthly spend`.
 | :--- | :--- |
 | `/budget` | This month’s category progress |
 | `/budget set Food 800` | Override / set a category cap |
-| `/budget clear Entertainment` | Remove a Telegram override |
+| `/budget clear Entertainment` | Remove a `/budget set` override |
 
-YAML `spend_budgets` are the baseline; Telegram sets merge on top. Mid-month alerts at **80%** and **100%** fan out to linked DMs (+ optional `TELEGRAM_CHAT_ID`).
+YAML `spend_budgets` are the baseline; `/budget set` overrides merge on top. Mid-month alerts at **80%** and **100%** fan out to linked DMs (+ optional `SIGNAL_GROUP_ID`).
 
 Plain text: `how's food budget`.
 

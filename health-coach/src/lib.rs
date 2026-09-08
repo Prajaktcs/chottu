@@ -117,8 +117,8 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Evening sync complete for {} — {} kcal, {} steps",
                                 report.member_id, report.calories, report.steps
                             );
-                            notify_member_telegram(
-                                &report.telegram_markdown(),
+                            notify_member_signal(
+                                &report.signal_text(),
                                 &config,
                                 &report.member_id,
                             )
@@ -147,8 +147,8 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Late sync complete for {} — {}/{} steps",
                                 report.member_id, report.steps, goal
                             );
-                            notify_member_telegram(
-                                &steps_nudge_markdown(report, goal),
+                            notify_member_signal(
+                                &steps_nudge_text(report, goal),
                                 &config,
                                 &report.member_id,
                             )
@@ -180,62 +180,57 @@ fn steps_goal_for_member(config: &chotu_common::AppConfig, member_id: &str) -> i
 }
 
 /// Compact private DM after the late sync — push toward the daily step goal.
-fn steps_nudge_markdown(report: &HealthSyncReport, goal: i32) -> String {
+fn steps_nudge_text(report: &HealthSyncReport, goal: i32) -> String {
     let steps = report.steps;
     let goal = goal.max(1);
     let pct = ((steps as f64 / goal as f64) * 100.0).round() as i32;
     if steps >= goal {
         format!(
-            "🚶 *Steps check* ({})\n\n\
+            "🚶 Steps check ({})\n\n\
              {} / {} steps ({:.0}%) — goal hit. Nice work finishing the day strong.",
             report.date, steps, goal, pct as f64
         )
     } else {
         let remaining = goal - steps;
         format!(
-            "🚶 *Steps check* ({})\n\n\
-             {} / {} steps ({:.0}%). *{} to go* before midnight — a short walk closes the gap.",
+            "🚶 Steps check ({})\n\n\
+             {} / {} steps ({:.0}%). {} to go before midnight — a short walk closes the gap.",
             report.date, steps, goal, pct as f64, remaining
         )
     }
 }
 
 /// Deliver a member's health sync only to their linked DM (never other adults' chats).
-async fn notify_member_telegram(
+async fn notify_member_signal(
     message: &str,
     config: &chotu_common::AppConfig,
     member_id: &str,
 ) {
-    let Ok(token) =
-        std::env::var("TELEGRAM_BOT_TOKEN").or_else(|_| std::env::var("TELOXIDE_TOKEN"))
-    else {
-        return;
+    let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
+        Ok(path) if !path.trim().is_empty() => path,
+        _ => return,
     };
-    let targets: Vec<i64> =
-        if let Some(cid) = chotu_common::telegram_chat_for_member(config, member_id) {
-            vec![cid]
-        } else if !chotu_common::has_any_telegram_link(config) {
-            // Pre-/link single-user setups: optional TELEGRAM_CHAT_ID fallback.
-            chotu_common::telegram_delivery_targets(config)
-        } else {
-            // Other members are linked; do not broadcast this person's metrics into their DMs.
-            Vec::new()
-        };
+    // Privacy: only the member's linked DM. Never fall back to SIGNAL_GROUP_ID /
+    // household fan-out — that would leak per-member syncs into the shared chat.
+    let targets = if let Some(aci) = chotu_common::signal_aci_for_member(config, member_id) {
+        vec![chotu_common::SignalRecipient::Direct { aci }]
+    } else {
+        Vec::new()
+    };
     if targets.is_empty() {
         return;
     }
-    let bot = teloxide::Bot::new(token);
-    use teloxide::prelude::*;
-    for cid in targets {
-        #[allow(deprecated)]
-        if let Err(e) = bot
-            .send_message(teloxide::types::ChatId(cid), message)
-            .parse_mode(teloxide::types::ParseMode::Markdown)
-            .await
-        {
+    let client = match chotu_common::SignalClient::connect(&socket).await {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!("Health Coach: SIGNAL_CLI_SOCKET is unreachable ({socket}): {error:?}");
+            return;
+        }
+    };
+    for recipient in targets {
+        if let Err(error) = client.send_text(&recipient, message).await {
             eprintln!(
-                "Health Coach: failed to push sync notification to {}: {:?}",
-                cid, e
+                "Health Coach: failed to push sync notification to {recipient}: {error:?}"
             );
         }
     }
@@ -274,15 +269,29 @@ mod steps_nudge_tests {
 
     #[test]
     fn nudge_when_under_goal() {
-        let md = steps_nudge_markdown(&report(8432), 10_000);
-        assert!(md.contains("8432 / 10000"));
-        assert!(md.contains("1568 to go"));
+        let text = steps_nudge_text(&report(8432), 10_000);
+        assert!(text.contains("8432 / 10000"));
+        assert!(text.contains("1568 to go"));
+        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
     }
 
     #[test]
     fn celebrate_when_goal_hit() {
-        let md = steps_nudge_markdown(&report(10_200), 10_000);
-        assert!(md.contains("goal hit"));
-        assert!(md.contains("10200 / 10000"));
+        let text = steps_nudge_text(&report(10_200), 10_000);
+        assert!(text.contains("goal hit"));
+        assert!(text.contains("10200 / 10000"));
+        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
+    }
+
+    #[test]
+    fn sync_report_is_plain_text() {
+        let mut r = report(5000);
+        r.manual_food_entries = 2;
+        let text = r.signal_text();
+        assert!(text.contains("Google Health Sync Complete"));
+        assert!(text.contains("Includes 2 `/food` entries"));
+        assert!(!text.contains("Telegram"));
+        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
+        assert!(!text.contains('_'), "Signal messages must not use Markdown italics: {text}");
     }
 }

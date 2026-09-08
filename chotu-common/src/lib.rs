@@ -17,6 +17,7 @@ pub mod quotes;
 pub mod yahoo_profile;
 pub mod spend_budget;
 pub mod schedule;
+pub mod signal;
 
 pub use database::{
     complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
@@ -35,15 +36,16 @@ pub use food_tags::{
     keyword_tags_for, sanitize_food_tags, AssignedFoodTags, FOOD_TAG_VOCABULARY,
 };
 pub use family::{
-    config_path, default_member_id, ensure_food_mutation_allowed, has_any_telegram_link,
-    has_telegram_delivery, health_refresh_token_env_key, is_telegram_chat_allowed, load_config,
-    member_for_telegram_chat, resolve_health_refresh_token, set_member_telegram_chat_id,
-    telegram_chat_for_member, telegram_delivery_targets, AppConfig, FamilyMember, FamilySection,
-    InvestmentPhilosophy, CoreValue, CoreValues, TargetAllocation, AllocationBucket, BucketHolding,
-    SpendBudgets,
-    fetch_exchange_rates, CalendarConfig, FitnessEquipment, FitnessFocus, FitnessGoals,
-    FitnessWeeklyTargets, HealthCondition, NutritionGoals,
+    config_path, default_member_id, ensure_food_mutation_allowed, fetch_exchange_rates,
+    has_any_signal_link, has_signal_delivery, health_refresh_token_env_key,
+    is_signal_conversation_allowed, load_config, member_for_signal_aci,
+    resolve_health_refresh_token, set_member_signal_aci, signal_aci_for_member,
+    signal_delivery_targets, AllocationBucket, AppConfig, BucketHolding, CalendarConfig,
+    CoreValue, CoreValues, FamilyMember, FamilySection, FitnessEquipment, FitnessFocus,
+    FitnessGoals, FitnessWeeklyTargets, HealthCondition, InvestmentPhilosophy, NutritionGoals,
+    SpendBudgets, TargetAllocation,
 };
+pub use signal::{SignalAttachment, SignalClient, SignalError, SignalInbound, SignalRecipient};
 pub use schedule::{
     now_in_tz, parse_hhmm, parse_iana_timezone, resolve_timezone_name, resolve_tz, AgentSchedules,
     ClockTime, DEFAULT_TIMEZONE,

@@ -217,6 +217,49 @@ fn strip_think_blocks(text: &str) -> String {
     output.trim().to_string()
 }
 
+/// Keep only the linked member's health records for a private reflection.
+/// `None` is the configured household group and retains household-wide data.
+pub fn filter_health_for_member(
+    healths: &mut Vec<HealthFamilySummary>,
+    member_id: Option<&str>,
+) {
+    if let Some(member_id) = member_id {
+        healths.retain(|health| health.family_member_id.eq_ignore_ascii_case(member_id));
+    }
+}
+
+fn encoded_member_component(member_id: &str) -> String {
+    let mut encoded = String::with_capacity(member_id.len());
+    for byte in member_id.trim().bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn reflection_file_path(brain_path: &PathBuf, date: &str, member_id: Option<&str>) -> Result<PathBuf> {
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+        return Err(anyhow::anyhow!(
+            "Invalid date format for reflection save: {}",
+            date
+        ));
+    }
+    let file_name = match member_id.filter(|member| !member.trim().is_empty()) {
+        Some(member) => format!("{}--{}.md", date, encoded_member_component(member)),
+        None => format!("{}.md", date),
+    };
+    Ok(brain_path
+        .join("Journal")
+        .join(parts[0])
+        .join(parts[1])
+        .join(file_name))
+}
+
 pub async fn save_reflection(
     date: &str,
     prompt: &str,
@@ -233,23 +276,14 @@ pub async fn save_reflection(
     let home = std::env::var("HOME").unwrap_or_else(|_| "/Users/user".to_string());
     let brain_path = PathBuf::from(brain_dir_str.replace("~", &home));
 
-    // Construct target path: Journal/YYYY/MM/YYYY-MM-DD.md
-    let parts: Vec<&str> = date.split('-').collect();
-    if parts.len() != 3 {
-        return Err(anyhow::anyhow!(
-            "Invalid date format for reflection save: {}",
-            date
-        ));
-    }
-    let year = parts[0];
-    let month = parts[1];
-
-    let target_dir = brain_path.join("Journal").join(year).join(month);
-    tokio::fs::create_dir_all(&target_dir)
+    // Direct-message journals include the member id so same-day entries cannot collide.
+    let file_path = reflection_file_path(&brain_path, date, member_id)?;
+    let target_dir = file_path
+        .parent()
+        .expect("reflection file path always has a parent");
+    tokio::fs::create_dir_all(target_dir)
         .await
         .context("Failed to create target reflection journal directory")?;
-
-    let file_path = target_dir.join(format!("{}.md", date));
 
     // Format the YAML frontmatter
     let mut content = String::new();
@@ -370,5 +404,67 @@ mod tests {
     fn yaml_double_quote_escapes_member_id_metacharacters() {
         let escaped = escape_yaml_double_quoted("alex: #1\\home\"");
         assert_eq!(escaped, "alex: #1\\\\home\\\"");
+    }
+
+
+    fn health_summary(member_id: &str) -> HealthFamilySummary {
+        HealthFamilySummary {
+            date: "2026-09-07".to_string(),
+            family_member_id: member_id.to_string(),
+            total_calories_ingested: 0,
+            protein_grams: 0.0,
+            carbs_grams: 0.0,
+            fats_grams: 0.0,
+            step_count: 0,
+            active_calories_burned: 0,
+            sleep_hours: None,
+            perceived_energy: None,
+            omega_3_dha_mg: 0.0,
+            cholesterol_mg: 0.0,
+            saturated_fat_g: 0.0,
+            unsaturated_fat_g: 0.0,
+            triglycerides_mg: 0.0,
+            iron_mg: 0.0,
+            vitamin_b_mg: 0.0,
+            vitamin_c_mg: 0.0,
+            sugar_g: 0.0,
+            fiber_g: 0.0,
+            sodium_mg: 0.0,
+            potassium_mg: 0.0,
+            calcium_mg: 0.0,
+            magnesium_mg: 0.0,
+            zinc_mg: 0.0,
+            vitamin_a_mcg: 0.0,
+            vitamin_d_mcg: 0.0,
+            vitamin_e_mg: 0.0,
+            vitamin_k_mcg: 0.0,
+            caffeine_mg: 0.0,
+            trans_fat_g: 0.0,
+        }
+    }
+
+    #[test]
+    fn linked_reflection_filters_health_to_member() {
+        let mut healths = vec![health_summary("alex"), health_summary("jordan")];
+        filter_health_for_member(&mut healths, Some("JORDAN"));
+        assert_eq!(healths.len(), 1);
+        assert_eq!(healths[0].family_member_id, "jordan");
+
+        let mut household = vec![health_summary("alex"), health_summary("jordan")];
+        filter_health_for_member(&mut household, None);
+        assert_eq!(household.len(), 2);
+    }
+
+    #[test]
+    fn linked_reflections_use_member_distinct_paths() {
+        let brain = PathBuf::from("/tmp/chotu-brain");
+        let alex = reflection_file_path(&brain, "2026-09-07", Some("alex")).unwrap();
+        let jordan = reflection_file_path(&brain, "2026-09-07", Some("jordan")).unwrap();
+        let household = reflection_file_path(&brain, "2026-09-07", None).unwrap();
+
+        assert_ne!(alex, jordan);
+        assert!(alex.ends_with("Journal/2026/09/2026-09-07--alex.md"));
+        assert!(jordan.ends_with("Journal/2026/09/2026-09-07--jordan.md"));
+        assert!(household.ends_with("Journal/2026/09/2026-09-07.md"));
     }
 }

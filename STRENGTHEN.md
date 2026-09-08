@@ -140,7 +140,7 @@ Not prioritized, but known thin spots:
 | ------ | ----- |
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
-| Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 ANN/pruning (full-table scan in household chat); household `TELEGRAM_CHAT_ID` still gets family-wide nutrition when unlinked |
+| Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 ANN/pruning (full-table scan in household chat); household `SIGNAL_GROUP_ID` still gets family-wide nutrition when unlinked |
 
 ## Suggested order
 

@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -31,7 +34,7 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     )
     .fetch_one(&pool)
     .await
-    .unwrap_or((0,));
+    .context("Failed to probe for the tasks table before migrations")?;
 
     let mut migrated_tasks = false;
 
@@ -41,7 +44,7 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
         )
         .fetch_one(&pool)
         .await
-        .unwrap_or((0,));
+        .context("Failed to probe the tasks schema before migrations")?;
 
         if has_created_at.0 == 0 {
             println!("Database: Pre-migration - Renaming tasks to tasks_old and preparing new tasks table...");
@@ -75,68 +78,6 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
         }
     }
 
-    if table_exists.0 > 0 {
-        // If the new tasks table was previously created with message_id in a failed run,
-        // but the migration 20260620000001 has NOT run yet, we drop the column so the migration can apply.
-        let has_message_id: (i32,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='message_id'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap_or((0,));
-
-        let migration_applied: (i32,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 20260620000001",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap_or((0,));
-
-        if has_message_id.0 > 0 && migration_applied.0 == 0 {
-            println!("Database: Clean up duplicate message_id column for migration compatibility...");
-            if sqlx::query("ALTER TABLE tasks DROP COLUMN message_id;")
-                .execute(&pool)
-                .await
-                .is_err()
-            {
-                let mut tx = pool.begin().await?;
-                let _ = sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
-                    .execute(&mut *tx)
-                    .await;
-                let _ = sqlx::query("ALTER TABLE tasks RENAME TO tasks_temp;")
-                    .execute(&mut *tx)
-                    .await;
-                let _ = sqlx::query(
-                    "CREATE TABLE tasks (
-                        id                TEXT PRIMARY KEY,
-                        created_at        DATETIME NOT NULL,
-                        updated_at        DATETIME NOT NULL,
-                        title             TEXT NOT NULL,
-                        description       TEXT,
-                        assigned_to       TEXT,
-                        due_date          TEXT,
-                        duration_minutes  INTEGER NOT NULL DEFAULT 30,
-                        priority          TEXT NOT NULL DEFAULT 'medium',
-                        status            TEXT NOT NULL DEFAULT 'open',
-                        calendar_event_id TEXT,
-                        source            TEXT NOT NULL DEFAULT 'manual'
-                    );",
-                )
-                .execute(&mut *tx)
-                .await;
-                let _ = sqlx::query(
-                    "INSERT INTO tasks (id, created_at, updated_at, title, description, assigned_to, due_date, duration_minutes, priority, status, calendar_event_id, source) \
-                     SELECT id, created_at, updated_at, title, description, assigned_to, due_date, duration_minutes, priority, status, calendar_event_id, source \
-                     FROM tasks_temp;",
-                )
-                .execute(&mut *tx)
-                .await;
-                let _ = sqlx::query("DROP TABLE tasks_temp;").execute(&mut *tx).await;
-                tx.commit().await?;
-            }
-        }
-    }
-
     run_migrations_resolving_tasks_message_id(&pool)
         .await
         .context("Failed to run database migrations")?;
@@ -149,7 +90,7 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
         )
         .fetch_one(&pool)
         .await
-        .unwrap_or((0,));
+        .context("Failed to probe for the pre-migration tasks table")?;
 
         if has_tasks_old.0 > 0 {
             println!("Database: Post-migration - Migrating tasks data and clean up tasks_old...");
@@ -160,7 +101,7 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
             )
             .fetch_one(&mut *tx)
             .await
-            .unwrap_or((0,));
+            .context("Failed to probe the pre-migration tasks columns")?;
 
             if has_message_id.0 > 0 {
                 sqlx::query(
@@ -199,6 +140,9 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     ensure_modern_tasks_schema(&pool)
         .await
         .context("Failed to ensure modern tasks schema")?;
+    drop_tasks_telegram_message_id_if_present(&pool)
+        .await
+        .context("Failed to drop tasks.telegram_message_id")?;
 
     backfill_memory_chunk_task_owners(&pool)
         .await
@@ -220,6 +164,10 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
 async fn run_migrations_resolving_tasks_message_id(pool: &SqlitePool) -> Result<()> {
     let migrator = sqlx::migrate!();
 
+    // A failed older startup may have created the modern table before sqlx
+    // recorded either message_id migration. Clear that partial state first.
+    drop_tasks_message_id_if_present(pool).await?;
+
     // Stop after the first message_id ADD so we can drop it before the duplicate.
     migrator
         .run_to(20260607000100, pool)
@@ -236,13 +184,33 @@ async fn run_migrations_resolving_tasks_message_id(pool: &SqlitePool) -> Result<
     Ok(())
 }
 
+async fn migration_is_applied(pool: &SqlitePool, version: i64) -> Result<bool> {
+    let migrations_table_exists: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await
+    .context("Failed to probe for the sqlx migrations table")?;
+    if migrations_table_exists.0 == 0 {
+        return Ok(false);
+    }
+
+    let applied: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
+            .bind(version)
+            .fetch_one(pool)
+            .await
+            .with_context(|| format!("Failed to probe sqlx migration {version}"))?;
+    Ok(applied.0 > 0)
+}
+
 async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
     let has_tasks: (i32,) = sqlx::query_as(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
     )
     .fetch_one(pool)
     .await
-    .unwrap_or((0,));
+    .context("Failed to probe for tasks before resolving message_id migrations")?;
     if has_tasks.0 == 0 {
         return Ok(());
     }
@@ -252,25 +220,20 @@ async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
     )
     .fetch_one(pool)
     .await
-    .unwrap_or((0,));
+    .context("Failed to probe tasks.message_id")?;
     if has_message_id.0 == 0 {
         return Ok(());
     }
 
-    let migration_applied: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 20260620000001",
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
-    if migration_applied.0 > 0 {
+    if migration_is_applied(pool, 20260620000001).await? {
         return Ok(());
     }
 
     println!("Database: Dropping tasks.message_id before migration 20260620000001...");
-    let _ = sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
+    sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
         .execute(pool)
-        .await;
+        .await
+        .context("Failed to drop idx_tasks_message_id")?;
 
     if sqlx::query("ALTER TABLE tasks DROP COLUMN message_id;")
         .execute(pool)
@@ -285,8 +248,7 @@ async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
         "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
     )
     .fetch_one(pool)
-    .await
-    .unwrap_or((0,));
+    .await?;
 
     let mut tx = pool.begin().await?;
     if has_created_at.0 > 0 {
@@ -364,7 +326,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     )
     .fetch_one(pool)
     .await
-    .unwrap_or((0,));
+    .context("Failed to probe for tasks before modern-schema repair")?;
 
     if table_exists.0 == 0 {
         return Ok(());
@@ -375,7 +337,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     )
     .fetch_one(pool)
     .await
-    .unwrap_or((0,));
+    .context("Failed to probe tasks.created_at before modern-schema repair")?;
 
     if has_created_at.0 > 0 {
         return Ok(());
@@ -398,7 +360,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         .await?;
 
     // Final runtime schema (base + later ALTER columns). Migrations already ran,
-    // so this must include message_id / telegram fields / due_at / reminded_at.
+    // so this must include message_id, email metadata, due_at, and reminded_at.
     sqlx::query(
         "CREATE TABLE tasks (
             id                  TEXT PRIMARY KEY,
@@ -414,7 +376,6 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             calendar_event_id   TEXT,
             source              TEXT NOT NULL DEFAULT 'manual',
             message_id          TEXT,
-            telegram_message_id INTEGER,
             email_sender        TEXT,
             email_subject       TEXT,
             due_at              TEXT,
@@ -480,8 +441,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         "INSERT INTO tasks (
             id, created_at, updated_at, title, description, assigned_to, due_date,
             duration_minutes, priority, status, calendar_event_id, source,
-            message_id, telegram_message_id, email_sender, email_subject,
-            due_at, reminded_at
+            message_id, email_sender, email_subject, due_at, reminded_at
          )
          SELECT
             id,
@@ -497,7 +457,6 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             {calendar_event_id},
             {source},
             {message_id},
-            {telegram_message_id},
             {email_sender},
             {email_subject},
             {due_at},
@@ -515,7 +474,6 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         calendar_event_id = col("calendar_event_id", "NULL"),
         source = col("source", "'manual'"),
         message_id = col("message_id", "NULL"),
-        telegram_message_id = col("telegram_message_id", "NULL"),
         email_sender = col("email_sender", "NULL"),
         email_subject = col("email_subject", "NULL"),
         due_at = col("due_at", "NULL"),
@@ -532,6 +490,118 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
     tx.commit().await?;
 
     println!("Database: Modern tasks schema rebuild completed.");
+    Ok(())
+}
+
+/// Remove leftover `tasks.telegram_message_id` after the Signal migration.
+///
+/// The SQL migration intentionally avoids `ALTER TABLE ... DROP COLUMN` (SQLite
+/// >= 3.35). Prefer DROP COLUMN when available; otherwise rebuild the modern
+/// tasks table without that column. The fallback recreates only repository-managed
+/// columns and indexes; custom schema objects on `tasks` are unsupported.
+async fn drop_tasks_telegram_message_id_if_present(pool: &SqlitePool) -> Result<()> {
+    drop_tasks_telegram_message_id(pool, true).await
+}
+
+async fn drop_tasks_telegram_message_id(
+    pool: &SqlitePool,
+    attempt_drop_column: bool,
+) -> Result<()> {
+    let has_tasks: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_tasks.0 == 0 {
+        return Ok(());
+    }
+
+    let has_col: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='telegram_message_id'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_col.0 == 0 {
+        return Ok(());
+    }
+
+    if attempt_drop_column
+        && sqlx::query("ALTER TABLE tasks DROP COLUMN telegram_message_id;")
+            .execute(pool)
+            .await
+            .is_ok()
+    {
+        return Ok(());
+    }
+
+    let has_created_at: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_created_at.0 == 0 {
+        // Legacy shape still present; ensure_modern_tasks_schema owns the rebuild.
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DROP INDEX IF EXISTS idx_tasks_due_at;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("ALTER TABLE tasks RENAME TO tasks_drop_telegram;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "CREATE TABLE tasks (
+            id                  TEXT PRIMARY KEY,
+            created_at          DATETIME NOT NULL,
+            updated_at          DATETIME NOT NULL,
+            title               TEXT NOT NULL,
+            description         TEXT,
+            assigned_to         TEXT,
+            due_date            TEXT,
+            duration_minutes    INTEGER NOT NULL DEFAULT 30,
+            priority            TEXT NOT NULL DEFAULT 'medium',
+            status              TEXT NOT NULL DEFAULT 'open',
+            calendar_event_id   TEXT,
+            source              TEXT NOT NULL DEFAULT 'manual',
+            message_id          TEXT,
+            email_sender        TEXT,
+            email_subject       TEXT,
+            due_at              TEXT,
+            reminded_at         TEXT
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tasks (
+            id, created_at, updated_at, title, description, assigned_to, due_date,
+            duration_minutes, priority, status, calendar_event_id, source,
+            message_id, email_sender, email_subject, due_at, reminded_at
+         )
+         SELECT
+            id, created_at, updated_at, title, description, assigned_to, due_date,
+            duration_minutes, priority, status, calendar_event_id, source,
+            message_id, email_sender, email_subject, due_at, reminded_at
+         FROM tasks_drop_telegram;",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DROP TABLE tasks_drop_telegram;")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_message_id ON tasks(message_id);")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_tasks_due_at ON tasks(due_at);")
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    println!("Database: Rebuilt tasks without telegram_message_id.");
     Ok(())
 }
 
@@ -695,6 +765,200 @@ mod tests {
         .expect("insert task");
     }
 
+    #[derive(Debug, PartialEq, sqlx::FromRow)]
+    struct RetainedTask {
+        id: String,
+        created_at: String,
+        updated_at: String,
+        title: String,
+        description: Option<String>,
+        assigned_to: Option<String>,
+        due_date: Option<String>,
+        duration_minutes: i64,
+        priority: String,
+        status: String,
+        calendar_event_id: Option<String>,
+        source: String,
+        message_id: Option<String>,
+        email_sender: Option<String>,
+        email_subject: Option<String>,
+        due_at: Option<String>,
+        reminded_at: Option<String>,
+    }
+
+    fn expected_retained_task() -> RetainedTask {
+        RetainedTask {
+            id: "task-main".to_string(),
+            created_at: "2026-08-20T10:00:00Z".to_string(),
+            updated_at: "2026-08-21T11:30:00Z".to_string(),
+            title: "Renew home insurance".to_string(),
+            description: Some("Compare coverage before renewal".to_string()),
+            assigned_to: Some("alex".to_string()),
+            due_date: Some("2026-09-15".to_string()),
+            duration_minutes: 75,
+            priority: "high".to_string(),
+            status: "snoozed".to_string(),
+            calendar_event_id: Some("calendar-event-7".to_string()),
+            source: "email".to_string(),
+            message_id: Some("email-message-42".to_string()),
+            email_sender: Some("broker@example.com".to_string()),
+            email_subject: Some("Policy renewal".to_string()),
+            due_at: Some("2026-09-15T13:00:00Z".to_string()),
+            reminded_at: Some("2026-09-14T13:00:00Z".to_string()),
+        }
+    }
+
+    async fn create_populated_current_main_db(db_path: &str) -> SqlitePool {
+        let options = SqliteConnectOptions::from_str(&format!("sqlite://{db_path}"))
+            .unwrap()
+            .create_if_missing(true);
+        // One connection so later PRAGMA/ALTER pairs cannot disagree after
+        // rebuilds the way a multi-connection pool can on Linux CI.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let migrator = sqlx::migrate!();
+
+        migrator.run_to(20260607000100, &pool).await.unwrap();
+        drop_tasks_message_id_if_present(&pool).await.unwrap();
+        migrator.run_to(20260824000003, &pool).await.unwrap();
+        ensure_modern_tasks_schema(&pool).await.unwrap();
+        let columns: Vec<(i32, String)> = sqlx::query_as("PRAGMA table_info(tasks)")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        if !columns
+            .iter()
+            .any(|(_, name)| name == "telegram_message_id")
+        {
+            if let Err(error) =
+                sqlx::query("ALTER TABLE tasks ADD COLUMN telegram_message_id INTEGER")
+                    .execute(&pool)
+                    .await
+            {
+                let message = error.to_string();
+                assert!(
+                    message.contains("duplicate column name"),
+                    "adding telegram_message_id: {error}"
+                );
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO tasks (
+                id, created_at, updated_at, title, description, assigned_to, due_date,
+                duration_minutes, priority, status, calendar_event_id, source, message_id,
+                email_sender, email_subject, due_at, reminded_at, telegram_message_id
+             ) VALUES (
+                'task-main', '2026-08-20T10:00:00Z', '2026-08-21T11:30:00Z',
+                'Renew home insurance', 'Compare coverage before renewal', 'alex', '2026-09-15',
+                75, 'high', 'snoozed', 'calendar-event-7', 'email', 'email-message-42',
+                'broker@example.com', 'Policy renewal', '2026-09-15T13:00:00Z',
+                '2026-09-14T13:00:00Z', 987654321
+             )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        pool
+    }
+
+    async fn assert_retained_task_and_managed_schema(pool: &SqlitePool) {
+        let task: RetainedTask = sqlx::query_as(
+            "SELECT id, created_at, updated_at, title, description, assigned_to, due_date,
+                    duration_minutes, priority, status, calendar_event_id, source, message_id,
+                    email_sender, email_subject, due_at, reminded_at
+             FROM tasks WHERE id = 'task-main'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(task, expected_retained_task());
+
+        let columns: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM pragma_table_info('tasks') ORDER BY name")
+                .fetch_all(pool)
+                .await
+                .unwrap();
+        let columns: std::collections::HashSet<_> =
+            columns.into_iter().map(|(name,)| name).collect();
+        let expected: std::collections::HashSet<_> = [
+            "id", "created_at", "updated_at", "title", "description", "assigned_to",
+            "due_date", "duration_minutes", "priority", "status", "calendar_event_id",
+            "source", "message_id", "email_sender", "email_subject", "due_at", "reminded_at",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        assert_eq!(columns, expected);
+
+        let indexes: Vec<(String,)> = sqlx::query_as(
+            "SELECT name FROM sqlite_master
+             WHERE type = 'index' AND tbl_name = 'tasks' AND sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            indexes,
+            vec![
+                ("idx_tasks_due_at".to_string(),),
+                ("idx_tasks_message_id".to_string(),),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn current_main_upgrade_preserves_tasks_and_is_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("current-main.db");
+        let old_pool = create_populated_current_main_db(db_path.to_str().unwrap()).await;
+        old_pool.close().await;
+
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+        assert_retained_task_and_managed_schema(&pool).await;
+        let signal_table: (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'task_signal_messages'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(signal_table.0, 1);
+        let signal_index: (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_task_signal_messages_task_id'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(signal_index.0, 1);
+        pool.close().await;
+
+        let second_pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+        assert_retained_task_and_managed_schema(&second_pool).await;
+        let signal_migrations: (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 20260829000000",
+        )
+        .fetch_one(&second_pool)
+        .await
+        .unwrap();
+        assert_eq!(signal_migrations.0, 1);
+    }
+
+    #[tokio::test]
+    async fn telegram_column_rebuild_fallback_preserves_managed_schema() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("fallback.db");
+        let pool = create_populated_current_main_db(db_path.to_str().unwrap()).await;
+
+        drop_tasks_telegram_message_id(&pool, false).await.unwrap();
+
+        assert_retained_task_and_managed_schema(&pool).await;
+    }
+
     #[tokio::test]
     async fn fresh_db_tasks_has_modern_columns() {
         let dir = TempDir::new().unwrap();
@@ -723,6 +987,26 @@ mod tests {
                 "fresh DB tasks missing column `{required}`; have {names:?}"
             );
         }
+        assert!(
+            !names.contains("telegram_message_id"),
+            "fresh DB must not retain Telegram correlation"
+        );
+
+        sqlx::query(
+            "INSERT INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
+             VALUES ('task-1', 'direct', 'aci-1', 42)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert Signal task mapping");
+        let mapped_task: String = sqlx::query_scalar(
+            "SELECT task_id FROM task_signal_messages \
+             WHERE recipient_kind = 'direct' AND recipient_id = 'aci-1' AND message_timestamp = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("look up Signal task mapping");
+        assert_eq!(mapped_task, "task-1");
 
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
