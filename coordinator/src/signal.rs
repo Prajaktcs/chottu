@@ -5918,7 +5918,11 @@ mod tests {
 
     #[tokio::test]
     async fn unroutable_due_tasks_do_not_consume_poll_batch() {
-        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
         sqlx::query(
             "CREATE TABLE tasks (
                 id TEXT PRIMARY KEY,
