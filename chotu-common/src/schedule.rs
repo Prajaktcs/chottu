@@ -206,7 +206,10 @@ reflection: "   "
         );
         assert!(parse_iana_timezone("Americas/Toronto").is_none());
         assert!(parse_iana_timezone("Not/AZone").is_none());
-        assert_eq!(resolve_timezone_name(Some("America/Toronto")), "America/Toronto");
+        assert_eq!(
+            resolve_timezone_name(Some("America/Toronto")),
+            "America/Toronto"
+        );
         assert_eq!(resolve_timezone_name(Some("")), DEFAULT_TIMEZONE);
         let warns = timezone_validation_warnings(Some("Not/AZone"));
         assert_eq!(warns.len(), 1);

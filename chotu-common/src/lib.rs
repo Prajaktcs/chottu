@@ -1,55 +1,24 @@
 pub mod agenda;
+pub mod calendar;
 pub mod database;
 pub mod due_parse;
+pub mod family;
+pub mod finnhub;
 pub mod food_parse;
 pub mod food_tags;
-pub mod family;
 pub mod google_health;
 pub mod ledger;
 pub mod llm;
 pub mod memory;
 pub mod models;
 pub mod oauth;
-pub mod calendar;
 pub mod open_food_facts;
-pub mod finnhub;
 pub mod quotes;
-pub mod yahoo_profile;
-pub mod spend_budget;
 pub mod schedule;
 pub mod signal;
+pub mod spend_budget;
+pub mod yahoo_profile;
 
-pub use database::{
-    complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
-};
-pub use due_parse::{
-    is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
-    parse_due_phrase_tz, split_task_add_args, ParsedDue,
-};
-pub use food_parse::{
-    effective_food_time, meal_of_day_clock_time, resolve_food_log_timing, FoodLogTiming,
-    MEAL_TIME_BREAKFAST, MEAL_TIME_DINNER, MEAL_TIME_LUNCH, MEAL_TIME_SNACK,
-};
-pub use food_tags::{
-    assign_food_tags, backfill_food_log_keyword_tags, delete_food_log_tags,
-    delete_food_log_tags_for_member_day, food_tag_classifier_instruction, insert_food_log_tags,
-    keyword_tags_for, sanitize_food_tags, AssignedFoodTags, FOOD_TAG_VOCABULARY,
-};
-pub use family::{
-    config_path, default_member_id, ensure_food_mutation_allowed, fetch_exchange_rates,
-    has_any_signal_link, has_signal_delivery, health_refresh_token_env_key,
-    is_signal_conversation_allowed, load_config, member_for_signal_aci,
-    resolve_health_refresh_token, set_member_signal_aci, signal_aci_for_member,
-    signal_delivery_targets, AllocationBucket, AppConfig, BucketHolding, CalendarConfig,
-    CoreValue, CoreValues, FamilyMember, FamilySection, FitnessEquipment, FitnessFocus,
-    FitnessGoals, FitnessWeeklyTargets, HealthCondition, InvestmentPhilosophy, NutritionGoals,
-    SpendBudgets, TargetAllocation,
-};
-pub use signal::{SignalAttachment, SignalClient, SignalError, SignalInbound, SignalRecipient};
-pub use schedule::{
-    now_in_tz, parse_hhmm, parse_iana_timezone, resolve_timezone_name, resolve_tz, AgentSchedules,
-    ClockTime, DEFAULT_TIMEZONE,
-};
 pub use agenda::{
     compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
     format_brief_calendar_section, local_day_bounds_utc, member_in_calendar_scope, truncate,
@@ -60,6 +29,36 @@ pub use calendar::{
     schedule_timed_block, CalendarError, CalendarEvent, GoogleCalendarClient,
     TASK_CALENDAR_DURATION_MINUTES,
 };
+pub use database::{
+    complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
+};
+pub use due_parse::{
+    is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
+    parse_due_phrase_tz, split_task_add_args, ParsedDue,
+};
+pub use family::{
+    config_path, default_member_id, ensure_food_mutation_allowed, fetch_exchange_rates,
+    has_any_signal_link, has_signal_delivery, health_refresh_token_env_key,
+    is_signal_conversation_allowed, load_config, member_for_signal_aci,
+    resolve_health_refresh_token, set_member_signal_aci, signal_aci_for_member,
+    signal_delivery_targets, AllocationBucket, AppConfig, BucketHolding, CalendarConfig, CoreValue,
+    CoreValues, FamilyMember, FamilySection, FitnessEquipment, FitnessFocus, FitnessGoals,
+    FitnessWeeklyTargets, HealthCondition, InvestmentPhilosophy, NutritionGoals, SpendBudgets,
+    TargetAllocation,
+};
+pub use finnhub::{
+    cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,
+    FinnhubError,
+};
+pub use food_parse::{
+    effective_food_time, meal_of_day_clock_time, resolve_food_log_timing, FoodLogTiming,
+    MEAL_TIME_BREAKFAST, MEAL_TIME_DINNER, MEAL_TIME_LUNCH, MEAL_TIME_SNACK,
+};
+pub use food_tags::{
+    assign_food_tags, backfill_food_log_keyword_tags, delete_food_log_tags,
+    delete_food_log_tags_for_member_day, food_tag_classifier_instruction, insert_food_log_tags,
+    keyword_tags_for, sanitize_food_tags, AssignedFoodTags, FOOD_TAG_VOCABULARY,
+};
 pub use google_health::{
     parse_exercise_data_points, ExerciseSession, GoogleHealthClient, GoogleHealthFoodSummary,
     NutritionLogWrite, GOOGLE_HEALTH_OAUTH_SCOPES,
@@ -69,30 +68,20 @@ pub use ledger::{
     LEDGER_ABS_AMOUNT_HARD_MAX, LEDGER_USD_EQUIV_MAX,
 };
 pub use llm::{
-    ChotuLlm, GeminiClient, OpenRouterClient, LlmError, NutritionEstimation, MissingSyncNutrition,
-    LedgerExtraction, ActionItemExtraction, TravelItineraryExtraction, UpcomingBillExtraction,
-    PersonalReferenceExtraction, IntentKind, IntentClassification, UserIntent,
-    FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind,
-};
-pub use open_food_facts::{lookup_barcode, OpenFoodFactsProduct};
-pub use finnhub::{
-    cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,
-    FinnhubError,
-};
-pub use quotes::{
-    fetch_stock_quotes, fetch_stock_quotes_near_cost, CostHint, QuoteError, StockQuote,
-};
-pub use yahoo_profile::{
-    prefers_yahoo_profile, yahoo_market_cap_usd_millions, YahooProfileClient,
+    ActionItemExtraction, ChotuLlm, FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind, GeminiClient,
+    IntentClassification, IntentKind, LedgerExtraction, LlmError, MissingSyncNutrition,
+    NutritionEstimation, OpenRouterClient, PersonalReferenceExtraction, TravelItineraryExtraction,
+    UpcomingBillExtraction, UserIntent,
 };
 pub use memory::{
-    answer_memory_query, brain_dir, format_hit_list, memory_chunk_in_scope, spawn_background_reindex,
-    MemoryHit, MemoryIndex, ReindexStats, SourceType, DEFAULT_EMBED_MODEL,
+    answer_memory_query, brain_dir, format_hit_list, memory_chunk_in_scope,
+    spawn_background_reindex, MemoryHit, MemoryIndex, ReindexStats, SourceType,
+    DEFAULT_EMBED_MODEL,
 };
 pub use models::{
-    EmailClassification, EmailMetadata, EvaluationLog, FinancialLedgerEntry, FoodLog,
-    HealthFamilySummary, OllamaClassificationResponse, PendingDocument, PortfolioHolding,
-    DroppedDocumentType, ExtractedPortfolioHolding, DroppedDocumentExtraction,
+    DroppedDocumentExtraction, DroppedDocumentType, EmailClassification, EmailMetadata,
+    EvaluationLog, ExtractedPortfolioHolding, FinancialLedgerEntry, FoodLog, HealthFamilySummary,
+    OllamaClassificationResponse, PendingDocument, PortfolioHolding,
 };
 pub use oauth::{
     exchange_google_code, format_xoauth2_string, refresh_oauth2_token, save_calendar_refresh_token,
@@ -100,11 +89,21 @@ pub use oauth::{
     start_redirect_listener, FitbitTokenResponse, GoogleInitialTokenResponse, GoogleTokenResponse,
     OAuthError,
 };
+pub use open_food_facts::{lookup_barcode, OpenFoodFactsProduct};
+pub use quotes::{
+    fetch_stock_quotes, fetch_stock_quotes_near_cost, CostHint, QuoteError, StockQuote,
+};
+pub use schedule::{
+    now_in_tz, parse_hhmm, parse_iana_timezone, resolve_timezone_name, resolve_tz, AgentSchedules,
+    ClockTime, DEFAULT_TIMEZONE,
+};
+pub use signal::{SignalAttachment, SignalClient, SignalError, SignalInbound, SignalRecipient};
 pub use spend_budget::{
     clear_budget_override, compute_budget_progress, current_budget_month, display_category,
     effective_budgets, format_budget_progress_markdown, mark_budget_alert_sent,
     pending_budget_alerts, set_budget_override, BudgetAlert, BudgetProgress, BUDGET_THRESHOLDS,
 };
+pub use yahoo_profile::{prefers_yahoo_profile, yahoo_market_cap_usd_millions, YahooProfileClient};
 
 #[cfg(test)]
 mod safety_tests {
@@ -141,7 +140,7 @@ mod safety_tests {
             if path.exists() {
                 let content = fs::read_to_string(&path)
                     .unwrap_or_else(|_| panic!("Failed to read {:?}", path));
-                
+
                 for line in content.lines() {
                     let cleaned = line.trim().to_lowercase();
                     if cleaned.starts_with('#') {

@@ -29,12 +29,11 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
     // If the database has an existing `tasks` table with the old schema (lacking `created_at`),
     // we rename it to `tasks_old` and create the base new `tasks` table (matching 20260620000000_tasks.sql).
     // The message_id column will be added subsequently by the 20260620000001 sqlx migration.
-    let table_exists: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
-    )
-    .fetch_one(&pool)
-    .await
-    .context("Failed to probe for the tasks table before migrations")?;
+    let table_exists: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'")
+            .fetch_one(&pool)
+            .await
+            .context("Failed to probe for the tasks table before migrations")?;
 
     let mut migrated_tasks = false;
 
@@ -195,32 +194,29 @@ async fn migration_is_applied(pool: &SqlitePool, version: i64) -> Result<bool> {
         return Ok(false);
     }
 
-    let applied: (i32,) =
-        sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
-            .bind(version)
-            .fetch_one(pool)
-            .await
-            .with_context(|| format!("Failed to probe sqlx migration {version}"))?;
+    let applied: (i32,) = sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = ?")
+        .bind(version)
+        .fetch_one(pool)
+        .await
+        .with_context(|| format!("Failed to probe sqlx migration {version}"))?;
     Ok(applied.0 > 0)
 }
 
 async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
-    let has_tasks: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
-    )
-    .fetch_one(pool)
-    .await
-    .context("Failed to probe for tasks before resolving message_id migrations")?;
+    let has_tasks: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'")
+            .fetch_one(pool)
+            .await
+            .context("Failed to probe for tasks before resolving message_id migrations")?;
     if has_tasks.0 == 0 {
         return Ok(());
     }
 
-    let has_message_id: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='message_id'",
-    )
-    .fetch_one(pool)
-    .await
-    .context("Failed to probe tasks.message_id")?;
+    let has_message_id: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='message_id'")
+            .fetch_one(pool)
+            .await
+            .context("Failed to probe tasks.message_id")?;
     if has_message_id.0 == 0 {
         return Ok(());
     }
@@ -244,11 +240,10 @@ async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
     }
 
     // Fallback: rebuild without message_id so the next ALTER can succeed.
-    let has_created_at: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let has_created_at: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'")
+            .fetch_one(pool)
+            .await?;
 
     let mut tx = pool.begin().await?;
     if has_created_at.0 > 0 {
@@ -321,23 +316,21 @@ async fn drop_tasks_message_id_if_present(pool: &SqlitePool) -> Result<()> {
 /// `CREATE TABLE IF NOT EXISTS tasks (...)` migrations do not replace it, so
 /// runtime inserts that expect `title` / `created_at` / `due_at` would fail.
 async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
-    let table_exists: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
-    )
-    .fetch_one(pool)
-    .await
-    .context("Failed to probe for tasks before modern-schema repair")?;
+    let table_exists: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'")
+            .fetch_one(pool)
+            .await
+            .context("Failed to probe for tasks before modern-schema repair")?;
 
     if table_exists.0 == 0 {
         return Ok(());
     }
 
-    let has_created_at: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
-    )
-    .fetch_one(pool)
-    .await
-    .context("Failed to probe tasks.created_at before modern-schema repair")?;
+    let has_created_at: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'")
+            .fetch_one(pool)
+            .await
+            .context("Failed to probe tasks.created_at before modern-schema repair")?;
 
     if has_created_at.0 > 0 {
         return Ok(());
@@ -396,8 +389,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         sqlx::query_as("SELECT name FROM pragma_table_info('tasks_legacy_schema')")
             .fetch_all(&mut *tx)
             .await?;
-    let legacy: std::collections::HashSet<String> =
-        legacy_cols.into_iter().map(|(n,)| n).collect();
+    let legacy: std::collections::HashSet<String> = legacy_cols.into_iter().map(|(n,)| n).collect();
 
     let has = |c: &str| legacy.contains(c);
     let col = |c: &str, fallback: &str| -> String {
@@ -507,11 +499,10 @@ async fn drop_tasks_telegram_message_id(
     pool: &SqlitePool,
     attempt_drop_column: bool,
 ) -> Result<()> {
-    let has_tasks: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let has_tasks: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'")
+            .fetch_one(pool)
+            .await?;
     if has_tasks.0 == 0 {
         return Ok(());
     }
@@ -534,11 +525,10 @@ async fn drop_tasks_telegram_message_id(
         return Ok(());
     }
 
-    let has_created_at: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let has_created_at: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='created_at'")
+            .fetch_one(pool)
+            .await?;
     if has_created_at.0 == 0 {
         // Legacy shape still present; ensure_modern_tasks_schema owns the rebuild.
         return Ok(());
@@ -619,11 +609,10 @@ async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
     if has_owner.0 == 0 {
         return Ok(());
     }
-    let has_assigned: (i32,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='assigned_to'",
-    )
-    .fetch_one(pool)
-    .await?;
+    let has_assigned: (i32,) =
+        sqlx::query_as("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name='assigned_to'")
+            .fetch_one(pool)
+            .await?;
     if has_assigned.0 == 0 {
         return Ok(());
     }
@@ -664,9 +653,8 @@ pub async fn list_completable_open_tasks(
     pool: &SqlitePool,
     assignee_filter: Option<&str>,
 ) -> Result<Vec<(String, String)>, sqlx::Error> {
-    let mut qb = sqlx::QueryBuilder::new(
-        "SELECT id, title FROM tasks WHERE status IN ('open', 'snoozed')",
-    );
+    let mut qb =
+        sqlx::QueryBuilder::new("SELECT id, title FROM tasks WHERE status IN ('open', 'snoozed')");
     if let Some(member_id) = assignee_filter {
         qb.push(" AND (assigned_to = ");
         qb.push_bind(member_id);
@@ -708,9 +696,7 @@ pub async fn complete_all_open_tasks(
     };
 
     if !rows.is_empty() {
-        let mut qb = sqlx::QueryBuilder::new(
-            "UPDATE tasks SET status = 'done', updated_at = ",
-        );
+        let mut qb = sqlx::QueryBuilder::new("UPDATE tasks SET status = 'done', updated_at = ");
         qb.push_bind(now_rfc3339);
         qb.push(" WHERE status IN ('open', 'snoozed')");
         if let Some(member_id) = assignee_filter {
@@ -724,12 +710,14 @@ pub async fn complete_all_open_tasks(
     tx.commit().await?;
     Ok(rows
         .into_iter()
-        .map(|(id, title, calendar_event_id, assigned_to)| CompletedTaskRow {
-            id,
-            title,
-            calendar_event_id,
-            assigned_to,
-        })
+        .map(
+            |(id, title, calendar_event_id, assigned_to)| CompletedTaskRow {
+                id,
+                title,
+                calendar_event_id,
+                assigned_to,
+            },
+        )
         .collect())
 }
 
@@ -886,9 +874,23 @@ mod tests {
         let columns: std::collections::HashSet<_> =
             columns.into_iter().map(|(name,)| name).collect();
         let expected: std::collections::HashSet<_> = [
-            "id", "created_at", "updated_at", "title", "description", "assigned_to",
-            "due_date", "duration_minutes", "priority", "status", "calendar_event_id",
-            "source", "message_id", "email_sender", "email_subject", "due_at", "reminded_at",
+            "id",
+            "created_at",
+            "updated_at",
+            "title",
+            "description",
+            "assigned_to",
+            "due_date",
+            "duration_minutes",
+            "priority",
+            "status",
+            "calendar_event_id",
+            "source",
+            "message_id",
+            "email_sender",
+            "email_subject",
+            "due_at",
+            "reminded_at",
         ]
         .into_iter()
         .map(str::to_string)
@@ -939,12 +941,11 @@ mod tests {
 
         let second_pool = init_db(db_path.to_str().unwrap()).await.unwrap();
         assert_retained_task_and_managed_schema(&second_pool).await;
-        let signal_migrations: (i32,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 20260829000000",
-        )
-        .fetch_one(&second_pool)
-        .await
-        .unwrap();
+        let signal_migrations: (i32,) =
+            sqlx::query_as("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 20260829000000")
+                .fetch_one(&second_pool)
+                .await
+                .unwrap();
         assert_eq!(signal_migrations.0, 1);
     }
 
@@ -1037,13 +1038,12 @@ mod tests {
             "condition_watchlist",
             "condition_checkin",
         ] {
-            let exists: (i32,) = sqlx::query_as(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-            )
-            .bind(table)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+            let exists: (i32,) =
+                sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
+                    .bind(table)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
             assert_eq!(exists.0, 1, "missing table {table}");
         }
 

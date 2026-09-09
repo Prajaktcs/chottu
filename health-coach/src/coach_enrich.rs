@@ -1,7 +1,7 @@
 //! Load plan/exercises and attach them to [`FitnessCoachContext`].
 
-use chrono::{Duration, Local, NaiveDate};
 use chotu_common::{AppConfig, FitnessGoals};
+use chrono::{Duration, Local, NaiveDate};
 use sqlx::SqlitePool;
 
 use crate::coaching::FitnessCoachContext;
@@ -109,8 +109,7 @@ pub async fn enrich_coach_context(
         .await
         .unwrap_or_default();
 
-    let strength_done =
-        count_strength_sessions(week_ex.iter().map(|e| e.activity_label()));
+    let strength_done = count_strength_sessions(week_ex.iter().map(|e| e.activity_label()));
     let cardio_done = sum_cardio_minutes(
         week_ex
             .iter()
@@ -126,19 +125,14 @@ pub async fn enrich_coach_context(
             .iter()
             .map(|e| (e.date.clone(), e.activity_label()))
             .collect();
-        let (matched, planned_n) =
-            plan_session_adherence(&week_start_s, plan, today, &label_rows);
+        let (matched, planned_n) = plan_session_adherence(&week_start_s, plan, today, &label_rows);
         let duration_rows: Vec<(String, String, i32)> = week_ex
             .iter()
             .map(|e| (e.date.clone(), e.activity_label(), e.duration_mins()))
             .collect();
         let cardio_on_plan =
             plan_cardio_minutes_on_cardio_days(&week_start_s, plan, today, &duration_rows);
-        (
-            Some(matched),
-            Some(planned_n),
-            Some(cardio_on_plan),
-        )
+        (Some(matched), Some(planned_n), Some(cardio_on_plan))
     } else {
         (None, None, None)
     };
@@ -255,8 +249,7 @@ pub async fn plan_week_progress_line(
         .iter()
         .map(|e| (e.date.clone(), e.activity_label(), e.duration_mins()))
         .collect();
-    let plan_cardio =
-        plan_cardio_minutes_on_cardio_days(week_start, &plan, as_of, &duration_rows);
+    let plan_cardio = plan_cardio_minutes_on_cardio_days(week_start, &plan, as_of, &duration_rows);
     Some(format_plan_progress_line(
         matched,
         planned,
@@ -313,9 +306,6 @@ mod tests {
         let trends = CoachEnrichOpts::for_trends("2026-08-14", "2026-08-20");
         assert!(!trends.include_today_plan);
         assert!(trends.exercise_date.is_none());
-        assert_eq!(
-            trends.exercise_range,
-            Some(("2026-08-14", "2026-08-20"))
-        );
+        assert_eq!(trends.exercise_range, Some(("2026-08-14", "2026-08-20")));
     }
 }

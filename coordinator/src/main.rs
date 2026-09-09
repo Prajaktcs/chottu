@@ -196,8 +196,8 @@ async fn perform_startup_oauth_checks() -> Result<()> {
         let has_legacy = std::env::var("FITBIT_REFRESH_TOKEN")
             .ok()
             .is_some_and(|t| !t.is_empty());
-        let has_per_member = std::env::vars()
-            .any(|(k, v)| k.starts_with("HEALTH_REFRESH_TOKEN_") && !v.is_empty());
+        let has_per_member =
+            std::env::vars().any(|(k, v)| k.starts_with("HEALTH_REFRESH_TOKEN_") && !v.is_empty());
         if !has_legacy && !has_per_member {
             let auth_url = format!(
                 "https://accounts.google.com/o/oauth2/v2/auth?prompt=consent&access_type=offline&response_type=code&client_id={}&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Fcallback&scope={}",

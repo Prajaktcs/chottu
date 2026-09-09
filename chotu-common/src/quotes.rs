@@ -116,8 +116,22 @@ pub fn normalize_ticker(ticker: &str) -> Result<String, QuoteError> {
 fn is_exchange_suffix(suffix: &str) -> bool {
     matches!(
         suffix,
-        "TO" | "V" | "L" | "CN" | "NE" | "PA" | "DE" | "AS" | "SW" | "HK" | "AX" | "OL" | "ST"
-            | "NY" | "NQ" | "OB" | "OTC"
+        "TO" | "V"
+            | "L"
+            | "CN"
+            | "NE"
+            | "PA"
+            | "DE"
+            | "AS"
+            | "SW"
+            | "HK"
+            | "AX"
+            | "OL"
+            | "ST"
+            | "NY"
+            | "NQ"
+            | "OB"
+            | "OTC"
     )
 }
 
@@ -284,10 +298,7 @@ pub async fn fetch_stock_quote_near_cost(
     let candidates = yahoo_symbol_candidates(&normalized)?;
     // Without a usable book cost we cannot disambiguate, so take the first hit
     // instead of probing every exchange suffix.
-    let disambiguate = cost
-        .as_ref()
-        .and_then(CostHint::usable_cost)
-        .is_some();
+    let disambiguate = cost.as_ref().and_then(CostHint::usable_cost).is_some();
 
     let mut found = Vec::new();
     let mut last_err = QuoteError::NotFound(normalized.clone());
@@ -370,8 +381,8 @@ pub async fn fetch_stock_quotes_near_cost(
 #[cfg(test)]
 mod tests {
     use super::{
-        chart_url, is_share_class_suffix, normalize_ticker, pick_best_quote, yahoo_symbol_candidates,
-        CostHint, StockQuote,
+        chart_url, is_share_class_suffix, normalize_ticker, pick_best_quote,
+        yahoo_symbol_candidates, CostHint, StockQuote,
     };
 
     fn quote(symbol: &str, price: f64, currency: &str) -> StockQuote {
@@ -387,11 +398,7 @@ mod tests {
     fn candidates_add_tsx_suffix_for_bare_symbols() {
         assert_eq!(
             yahoo_symbol_candidates("vfv").unwrap(),
-            vec![
-                "VFV".to_string(),
-                "VFV.TO".to_string(),
-                "VFV.V".to_string()
-            ]
+            vec!["VFV".to_string(), "VFV.TO".to_string(), "VFV.V".to_string()]
         );
     }
 

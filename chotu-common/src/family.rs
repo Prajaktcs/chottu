@@ -185,8 +185,15 @@ pub struct FitnessGoals {
 
 impl FitnessGoals {
     pub fn is_empty(&self) -> bool {
-        self.intent.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
-            && self.target_date.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true)
+        self.intent
+            .as_ref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+            && self
+                .target_date
+                .as_ref()
+                .map(|s| s.trim().is_empty())
+                .unwrap_or(true)
             && self.focus.is_none()
             && self.sessions_per_week.is_none()
             && self.session_minutes.is_none()
@@ -214,7 +221,12 @@ impl FitnessGoals {
     /// Returns human-readable warnings (does not mutate).
     pub fn validation_warnings(&self, member_id: &str) -> Vec<String> {
         let mut warnings = Vec::new();
-        if let Some(raw) = self.target_date.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(raw) = self
+            .target_date
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             if chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d").is_err() {
                 warnings.push(format!(
                     "member '{}': fitness_goals.target_date '{}' must be YYYY-MM-DD",
@@ -274,12 +286,21 @@ impl FitnessGoals {
             return None;
         }
         let mut lines = Vec::new();
-        if let Some(intent) = self.intent.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(intent) = self
+            .intent
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             lines.push(format!("Outcome: {}", intent));
         }
         if let Some(days) = self.days_until_target(as_of) {
             if days > 0 {
-                lines.push(format!("{} days to target ({})", days, self.target_date.as_deref().unwrap_or("")));
+                lines.push(format!(
+                    "{} days to target ({})",
+                    days,
+                    self.target_date.as_deref().unwrap_or("")
+                ));
             } else if days == 0 {
                 lines.push("Target day is today".to_string());
             } else {
@@ -647,7 +668,13 @@ pub fn member_for_signal_aci<'a>(config: &'a AppConfig, aci: &str) -> Option<&'a
 pub fn default_member_id<'a>(config: &'a AppConfig, aci: &str) -> &'a str {
     member_for_signal_aci(config, aci)
         .map(|member| member.id.as_str())
-        .or_else(|| config.family.members.first().map(|member| member.id.as_str()))
+        .or_else(|| {
+            config
+                .family
+                .members
+                .first()
+                .map(|member| member.id.as_str())
+        })
         .unwrap_or("alex")
 }
 
@@ -815,7 +842,10 @@ pub async fn fetch_exchange_rates(base_currency: &str) -> std::collections::Hash
             }
         }
         Err(e) => {
-            eprintln!("Failed to fetch exchange rates from open.er-api.com: {:?}", e);
+            eprintln!(
+                "Failed to fetch exchange rates from open.er-api.com: {:?}",
+                e
+            );
         }
     }
     std::collections::HashMap::new()
@@ -883,7 +913,6 @@ impl AppConfig {
         }
     }
 }
-
 
 /// Loads application configuration from a file.
 ///
@@ -993,8 +1022,14 @@ mod tests {
             health_conditions: vec![],
             signal_aci: None,
         };
-        assert_eq!(member.calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
-        assert_eq!(member.health_refresh_token_env_key(), "HEALTH_REFRESH_TOKEN_ALEX");
+        assert_eq!(
+            member.calendar_refresh_token_env_key(),
+            "CALENDAR_REFRESH_TOKEN_ALEX"
+        );
+        assert_eq!(
+            member.health_refresh_token_env_key(),
+            "HEALTH_REFRESH_TOKEN_ALEX"
+        );
     }
 
     #[test]
@@ -1070,13 +1105,19 @@ target_allocation:
         assert_eq!(loaded.family.members[2].role, "kid");
         assert_eq!(loaded.currency, Some("CAD".to_string()));
         assert_eq!(loaded.currency(), "CAD");
-        assert_eq!(loaded.email_classifier_prompt_path, Some("prompts/email_classifier_system_prompt.txt".to_string()));
+        assert_eq!(
+            loaded.email_classifier_prompt_path,
+            Some("prompts/email_classifier_system_prompt.txt".to_string())
+        );
         // Alex should have a calendar configured
         assert!(loaded.family.members[0].calendar.is_some());
         let cal = loaded.family.members[0].calendar.as_ref().unwrap();
         assert_eq!(cal.provider, "google");
         assert_eq!(cal.email, "alex@example.com");
-        assert_eq!(loaded.family.members[0].calendar_refresh_token_env_key(), "CALENDAR_REFRESH_TOKEN_ALEX");
+        assert_eq!(
+            loaded.family.members[0].calendar_refresh_token_env_key(),
+            "CALENDAR_REFRESH_TOKEN_ALEX"
+        );
         // Nutrition goals
         let goals = loaded.family.members[0].nutrition_goals.as_ref().unwrap();
         assert_eq!(goals.calories, Some(2200));
@@ -1104,7 +1145,9 @@ target_allocation:
         assert!(conditions[0].check_in);
         assert_eq!(conditions[0].lag_window, [1, 3]);
         assert_eq!(conditions[0].notes.as_deref(), Some("example notes"));
-        assert!(loaded.family.members[0].health_condition_warnings().is_empty());
+        assert!(loaded.family.members[0]
+            .health_condition_warnings()
+            .is_empty());
         assert!(loaded.family.members[2].fitness_goals.is_none());
         assert!(loaded.family.members[2].health_conditions.is_empty());
         // Sam has no calendar
@@ -1313,7 +1356,9 @@ family:
         let cond = &loaded.family.members[0].health_conditions[0];
         assert!(cond.check_in);
         assert_eq!(cond.lag_window, [1, 3]);
-        assert!(loaded.family.members[0].health_condition_warnings().is_empty());
+        assert!(loaded.family.members[0]
+            .health_condition_warnings()
+            .is_empty());
     }
 
     #[test]
@@ -1442,7 +1487,11 @@ family:
         assert!(has_any_signal_link(&linked));
         assert!(is_signal_conversation_allowed(&linked, "aci-alex", None));
         assert!(is_signal_conversation_allowed(&linked, "aci-jordan", None));
-        assert!(!is_signal_conversation_allowed(&linked, "aci-unknown", None));
+        assert!(!is_signal_conversation_allowed(
+            &linked,
+            "aci-unknown",
+            None
+        ));
     }
 
     #[test]
@@ -1503,8 +1552,8 @@ currency: "CAD"
         let mut tmp_file = NamedTempFile::new().unwrap();
         write!(tmp_file, "{}", yaml_content).unwrap();
 
-        let updated = set_member_signal_aci(tmp_file.path(), "jordan", "aci-shared")
-            .expect("link jordan");
+        let updated =
+            set_member_signal_aci(tmp_file.path(), "jordan", "aci-shared").expect("link jordan");
         assert_eq!(
             signal_aci_for_member(&updated, "jordan").as_deref(),
             Some("aci-shared")
@@ -1513,12 +1562,18 @@ currency: "CAD"
 
         let moved = set_member_signal_aci(tmp_file.path(), "alex", "aci-shared")
             .expect("move link to alex");
-        assert_eq!(signal_aci_for_member(&moved, "alex").as_deref(), Some("aci-shared"));
+        assert_eq!(
+            signal_aci_for_member(&moved, "alex").as_deref(),
+            Some("aci-shared")
+        );
         assert!(signal_aci_for_member(&moved, "jordan").is_none());
 
-        let again = set_member_signal_aci(tmp_file.path(), "alex", "aci-shared")
-            .expect("idempotent");
-        assert_eq!(signal_aci_for_member(&again, "alex").as_deref(), Some("aci-shared"));
+        let again =
+            set_member_signal_aci(tmp_file.path(), "alex", "aci-shared").expect("idempotent");
+        assert_eq!(
+            signal_aci_for_member(&again, "alex").as_deref(),
+            Some("aci-shared")
+        );
 
         let hijack = set_member_signal_aci(tmp_file.path(), "alex", "aci-other");
         assert!(hijack.is_err());
@@ -1538,7 +1593,10 @@ family:
         let mut tmp_file = NamedTempFile::new().unwrap();
         write!(tmp_file, "{}", yaml).unwrap();
         let loaded = load_config(tmp_file.path()).expect("valid config");
-        assert_eq!(loaded.family.members[0].signal_aci.as_deref(), Some("aci-alex"));
+        assert_eq!(
+            loaded.family.members[0].signal_aci.as_deref(),
+            Some("aci-alex")
+        );
         let serialized = serde_yaml::to_string(&loaded).unwrap();
         assert!(serialized.contains("signal_aci: aci-alex"));
         assert!(!serialized.contains("telegram_chat_id"));

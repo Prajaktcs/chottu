@@ -1,5 +1,3 @@
-use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use anyhow::Context;
 use chotu_common::{
     fetch_exchange_rates, prefers_yahoo_profile, AppConfig, CapBand, FinancialLedgerEntry,
@@ -9,6 +7,8 @@ use chotu_common::{
 use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 pub mod bench;
 pub use bench::{
@@ -652,11 +652,7 @@ fn judge_model_from_env() -> String {
 }
 
 fn short_model_label(model_id: &str) -> String {
-    model_id
-        .rsplit('/')
-        .next()
-        .unwrap_or(model_id)
-        .to_string()
+    model_id.rsplit('/').next().unwrap_or(model_id).to_string()
 }
 
 fn sanitize_model_slug(model_id: &str) -> String {
@@ -1032,7 +1028,8 @@ fn build_score_prompts(
         focus_areas_str(philosophy)
     );
 
-    let mut user_prompt = String::from("Score this shared universe (same list for every analyst):\n\n");
+    let mut user_prompt =
+        String::from("Score this shared universe (same list for every analyst):\n\n");
     for entry in universe {
         let cap = entry
             .market_cap_m
@@ -1062,7 +1059,11 @@ fn format_universe_markdown(
     let mut out = String::from("# Shared research universe\n\n");
     out.push_str(&format!(
         "_Finnhub enrichment: {}_\n\n",
-        if finnhub_used { "yes" } else { "no (model bands only)" }
+        if finnhub_used {
+            "yes"
+        } else {
+            "no (model bands only)"
+        }
     ));
     for (i, entry) in universe.iter().enumerate() {
         let cap = entry
@@ -1156,16 +1157,15 @@ pub async fn run_stock_research_with_progress(
         .with_context(|| format!("Failed to write stock research file to {:?}", file_path))?;
 
     let universe_path = target_dir.join(format!("{}-stocks-universe.md", date_str));
-    if let Err(e) =
-        tokio::fs::write(
-            &universe_path,
-            format_universe_markdown(
-                &artifacts.universe,
-                &artifacts.dropped,
-                artifacts.finnhub_used,
-            ),
-        )
-        .await
+    if let Err(e) = tokio::fs::write(
+        &universe_path,
+        format_universe_markdown(
+            &artifacts.universe,
+            &artifacts.dropped,
+            artifacts.finnhub_used,
+        ),
+    )
+    .await
     {
         eprintln!(
             "Finance Advisor: failed to write universe file {:?}: {:?}",
@@ -1338,8 +1338,12 @@ fn match_transaction(merchant: &str, category: &str, ticker: &str) -> bool {
     }
 
     if let Some(idx) = merchant_upper.find(&ticker_upper) {
-        let before_ok =
-            idx == 0 || !merchant_upper.chars().nth(idx - 1).unwrap_or(' ').is_alphanumeric();
+        let before_ok = idx == 0
+            || !merchant_upper
+                .chars()
+                .nth(idx - 1)
+                .unwrap_or(' ')
+                .is_alphanumeric();
         let after_ok = idx + ticker_upper.len() == merchant_upper.len()
             || !merchant_upper
                 .chars()
@@ -1641,7 +1645,9 @@ mod tests {
         ];
         let seeded_result = apply_finnhub_profiles(&mut seeded, &profiles, false);
         assert_eq!(seeded.len(), 2);
-        assert!(seeded.iter().any(|e| e.ticker == "BIG" && e.market_cap_m == Some(50_000.0)));
+        assert!(seeded
+            .iter()
+            .any(|e| e.ticker == "BIG" && e.market_cap_m == Some(50_000.0)));
         assert!(seeded.iter().any(|e| e.ticker == "MISS"));
         assert!(seeded_result.dropped.is_empty());
     }

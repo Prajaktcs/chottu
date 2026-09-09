@@ -34,10 +34,7 @@ pub struct FoodLogTiming {
 /// - Missing/invalid `food_date` → today (local).
 /// - Missing/invalid `food_time` → now if the day is today, else local noon.
 /// - `food_time` is `HH:MM` or `HH:MM:SS` (24-hour).
-pub fn resolve_food_log_timing(
-    food_date: Option<&str>,
-    food_time: Option<&str>,
-) -> FoodLogTiming {
+pub fn resolve_food_log_timing(food_date: Option<&str>, food_time: Option<&str>) -> FoodLogTiming {
     let today = Local::now().date_naive();
     let (date, date_was_explicit) = match food_date.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
@@ -127,8 +124,7 @@ fn utterance_has_explicit_clock(utterance: &str) -> bool {
             return true;
         }
         // Spaced forms: "7 pm", "7:30 am"
-        if i + 1 < tokens.len() && is_ampm_token(tokens[i + 1]) && looks_like_hour_minute(token)
-        {
+        if i + 1 < tokens.len() && is_ampm_token(tokens[i + 1]) && looks_like_hour_minute(token) {
             return true;
         }
     }
@@ -192,8 +188,7 @@ fn local_datetime_to_utc(date: NaiveDate, time: NaiveTime) -> chrono::DateTime<U
             // DST gap — try nearby hours, then UTC now.
             for h in [time.hour().saturating_add(1), 12, 15, 18] {
                 if let Some(t) = NaiveTime::from_hms_opt(h, 0, 0) {
-                    if let chrono::LocalResult::Single(dt)
-                    | chrono::LocalResult::Ambiguous(dt, _) =
+                    if let chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) =
                         Local.from_local_datetime(&date.and_time(t))
                     {
                         return dt.with_timezone(&Utc);
