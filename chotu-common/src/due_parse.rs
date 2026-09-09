@@ -88,10 +88,7 @@ pub fn split_task_add_args(
     let mut parts: Vec<&str> = before_due.split_whitespace().collect();
     let mut member_id: Option<String> = None;
     if let Some(first) = parts.first() {
-        if let Some(m) = member_ids
-            .iter()
-            .find(|id| id.eq_ignore_ascii_case(first))
-        {
+        if let Some(m) = member_ids.iter().find(|id| id.eq_ignore_ascii_case(first)) {
             member_id = Some(m.clone());
             parts.remove(0);
         }
@@ -132,9 +129,7 @@ fn parse_date_prefix<'a>(
     let first = tokens.first()?.to_lowercase();
     match first.as_str() {
         "today" => Some((today, tokens[1..].to_vec())),
-        "tomorrow" | "tmr" | "tmrw" => {
-            Some((today + Duration::days(1), tokens[1..].to_vec()))
-        }
+        "tomorrow" | "tmr" | "tmrw" => Some((today + Duration::days(1), tokens[1..].to_vec())),
         "monday" | "mon" => Some((next_weekday(today, Weekday::Mon), tokens[1..].to_vec())),
         "tuesday" | "tue" | "tues" => {
             Some((next_weekday(today, Weekday::Tue), tokens[1..].to_vec()))
@@ -247,7 +242,11 @@ fn parse_clock(s: &str) -> Option<NaiveTime> {
 }
 
 /// Whether a stored due_at is due for a one-shot reminder ping.
-pub fn is_due_for_reminder(due_at: &str, reminded_at: Option<&str>, now: chrono::DateTime<Utc>) -> bool {
+pub fn is_due_for_reminder(
+    due_at: &str,
+    reminded_at: Option<&str>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
     if reminded_at.is_some() {
         return false;
     }
@@ -272,11 +271,7 @@ pub fn looks_like_task_add_query(tokens: &[&str], member_ids: &[String]) -> bool
     if tokens.is_empty() {
         return false;
     }
-    let is_member = |tok: &str| {
-        member_ids
-            .iter()
-            .any(|id| id.eq_ignore_ascii_case(tok))
-    };
+    let is_member = |tok: &str| member_ids.iter().any(|id| id.eq_ignore_ascii_case(tok));
     match tokens {
         [a] => !is_known_task_status_filter(a) && !is_member(a),
         [a, b] => {
@@ -352,7 +347,10 @@ mod tests {
         let parsed = parse_due_phrase("today 3 pm").unwrap();
         let due = chrono::DateTime::parse_from_rfc3339(&parsed.due_at).unwrap();
         assert_eq!(due.with_timezone(&Local).hour(), 15);
-        assert_eq!(parsed.due_date, Local::now().date_naive().format("%Y-%m-%d").to_string());
+        assert_eq!(
+            parsed.due_date,
+            Local::now().date_naive().format("%Y-%m-%d").to_string()
+        );
     }
 
     #[test]

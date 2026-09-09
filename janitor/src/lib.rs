@@ -57,7 +57,14 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                             "Error waiting for file stability for existing file {:?}: {:?}",
                             path_clone, e
                         );
-                    } else if let Err(e) = process_dropped_file(&path_clone, &pool_clone, &archive_dir_clone, &default_currency_clone).await {
+                    } else if let Err(e) = process_dropped_file(
+                        &path_clone,
+                        &pool_clone,
+                        &archive_dir_clone,
+                        &default_currency_clone,
+                    )
+                    .await
+                    {
                         eprintln!("Failed to process existing file {:?}: {:?}", path_clone, e);
                     }
                     active_paths_clone.lock().await.remove(&path_clone);
@@ -119,8 +126,13 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                     return;
                 }
 
-                if let Err(e) =
-                    process_dropped_file(&path_clone, &pool_clone, &archive_dir_clone, &default_currency_clone).await
+                if let Err(e) = process_dropped_file(
+                    &path_clone,
+                    &pool_clone,
+                    &archive_dir_clone,
+                    &default_currency_clone,
+                )
+                .await
                 {
                     eprintln!("Failed to process file {:?}: {:?}", path_clone, e);
                 }
@@ -133,7 +145,12 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
     Ok(())
 }
 
-async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path, default_currency: &str) -> Result<()> {
+async fn process_dropped_file(
+    path: &Path,
+    pool: &SqlitePool,
+    archive_dir: &Path,
+    default_currency: &str,
+) -> Result<()> {
     let filename = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -148,7 +165,8 @@ async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path
     match ext.as_str() {
         "csv" => {
             println!("CSV file detected. Initiating parsing: {}", filename);
-            let entries = parser::parse_csv_file(path, default_currency).context("CSV parsing failure")?;
+            let entries =
+                parser::parse_csv_file(path, default_currency).context("CSV parsing failure")?;
 
             println!(
                 "Parsed {} transactions from CSV. Saving to database...",
@@ -194,7 +212,10 @@ async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path
             println!("CSV file moved to archive directory.");
         }
         "pdf" | "png" | "jpg" | "jpeg" => {
-            println!("Document/Image file detected: {}. Initiating Tier 2 Gemini LLM parsing...", filename);
+            println!(
+                "Document/Image file detected: {}. Initiating Tier 2 Gemini LLM parsing...",
+                filename
+            );
             let gemini_key = match std::env::var("GEMINI_API_KEY") {
                 Ok(key) if !key.trim().is_empty() => key,
                 _ => {
@@ -219,19 +240,17 @@ async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path
 
             let gemini_client = chotu_common::GeminiClient::new(gemini_key);
             match gemini_client.extract_from_document(path).await {
-                Ok(extraction) => {
-                    match extraction.document_type {
-                        chotu_common::DroppedDocumentType::Receipt => {
-                            if let Some(tx) = extraction.receipt_transaction {
-                                match chotu_common::validate_ledger_amount(tx.amount, &tx.currency)
-                                {
-                                    Ok(()) => {
-                                        println!(
-                                            "Extracted transaction: {} - {} {}",
-                                            tx.merchant, tx.amount, tx.currency
-                                        );
-                                        let id = uuid::Uuid::new_v4().to_string();
-                                        sqlx::query(
+                Ok(extraction) => match extraction.document_type {
+                    chotu_common::DroppedDocumentType::Receipt => {
+                        if let Some(tx) = extraction.receipt_transaction {
+                            match chotu_common::validate_ledger_amount(tx.amount, &tx.currency) {
+                                Ok(()) => {
+                                    println!(
+                                        "Extracted transaction: {} - {} {}",
+                                        tx.merchant, tx.amount, tx.currency
+                                    );
+                                    let id = uuid::Uuid::new_v4().to_string();
+                                    sqlx::query(
                                             "INSERT INTO financial_ledger (id, timestamp, amount, currency, institution, merchant, category, source_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
                                         )
                                         .bind(&id)
@@ -244,39 +263,39 @@ async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path
                                         .bind("BATCH_DROP")
                                         .execute(pool)
                                         .await?;
-                                        println!("Saved extracted transaction to financial_ledger.");
-                                    }
-                                    Err(reason) => {
-                                        println!(
-                                            "Skipping receipt commit for {} ({} {}): {}",
-                                            tx.merchant, tx.amount, tx.currency, reason
-                                        );
-                                    }
+                                    println!("Saved extracted transaction to financial_ledger.");
                                 }
-                            } else {
-                                eprintln!("LLM classified document as RECEIPT but no receipt_transaction was populated.");
-                            }
-                        }
-                        chotu_common::DroppedDocumentType::Portfolio => {
-                            if let Some(holdings) = extraction.portfolio_holdings {
-                                println!("Extracted {} portfolio holdings.", holdings.len());
-                                let now = chrono::Utc::now();
-                                for h in holdings {
-                                    let cost_currency = h
-                                        .average_cost_currency
-                                        .as_deref()
-                                        .map(str::trim)
-                                        .filter(|c| !c.is_empty())
-                                        .map(|c| c.to_uppercase());
+                                Err(reason) => {
                                     println!(
-                                        "Updating holding: {} ({} shares @ average cost ${:.2} {})",
-                                        h.ticker,
-                                        h.shares_owned,
-                                        h.average_cost,
-                                        cost_currency.as_deref().unwrap_or("?")
+                                        "Skipping receipt commit for {} ({} {}): {}",
+                                        tx.merchant, tx.amount, tx.currency, reason
                                     );
-                                    let ticker_upper = h.ticker.to_uppercase();
-                                    sqlx::query(
+                                }
+                            }
+                        } else {
+                            eprintln!("LLM classified document as RECEIPT but no receipt_transaction was populated.");
+                        }
+                    }
+                    chotu_common::DroppedDocumentType::Portfolio => {
+                        if let Some(holdings) = extraction.portfolio_holdings {
+                            println!("Extracted {} portfolio holdings.", holdings.len());
+                            let now = chrono::Utc::now();
+                            for h in holdings {
+                                let cost_currency = h
+                                    .average_cost_currency
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|c| !c.is_empty())
+                                    .map(|c| c.to_uppercase());
+                                println!(
+                                    "Updating holding: {} ({} shares @ average cost ${:.2} {})",
+                                    h.ticker,
+                                    h.shares_owned,
+                                    h.average_cost,
+                                    cost_currency.as_deref().unwrap_or("?")
+                                );
+                                let ticker_upper = h.ticker.to_uppercase();
+                                sqlx::query(
                                         "INSERT INTO portfolio_holdings (ticker, shares_owned, average_cost, average_cost_currency, last_updated) \
                                          VALUES (?, ?, ?, ?, ?) \
                                          ON CONFLICT(ticker) DO UPDATE SET \
@@ -292,16 +311,18 @@ async fn process_dropped_file(path: &Path, pool: &SqlitePool, archive_dir: &Path
                                     .bind(now)
                                     .execute(pool)
                                     .await?;
-                                }
-                                println!("Successfully saved/updated holdings in database.");
-                            } else {
-                                eprintln!("LLM classified document as PORTFOLIO but no portfolio_holdings were populated.");
                             }
+                            println!("Successfully saved/updated holdings in database.");
+                        } else {
+                            eprintln!("LLM classified document as PORTFOLIO but no portfolio_holdings were populated.");
                         }
                     }
-                }
+                },
                 Err(e) => {
-                    eprintln!("Failed to extract content from document using Gemini: {:?}", e);
+                    eprintln!(
+                        "Failed to extract content from document using Gemini: {:?}",
+                        e
+                    );
                     let id = uuid::Uuid::new_v4().to_string();
                     let filepath_str = path.to_string_lossy().to_string();
                     sqlx::query(

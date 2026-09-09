@@ -6,7 +6,10 @@ use std::fs::File;
 use std::path::Path;
 
 /// Parses a CSV file, dynamically inferring column mapping, and returns ledger entries.
-pub fn parse_csv_file(file_path: &Path, default_currency: &str) -> Result<Vec<FinancialLedgerEntry>> {
+pub fn parse_csv_file(
+    file_path: &Path,
+    default_currency: &str,
+) -> Result<Vec<FinancialLedgerEntry>> {
     let file = File::open(file_path)
         .with_context(|| format!("Failed to open CSV file: {:?}", file_path))?;
     let mut reader = csv::ReaderBuilder::new()
@@ -299,9 +302,13 @@ mod tests {
     #[test]
     fn test_credit_card_statement_sign_flipping() {
         let tmp_file = NamedTempFile::new().unwrap();
-        let file_path = tmp_file.path().parent().unwrap().join("credit-card-test.csv");
+        let file_path = tmp_file
+            .path()
+            .parent()
+            .unwrap()
+            .join("credit-card-test.csv");
         let mut cc_file = File::create(&file_path).unwrap();
-        
+
         writeln!(
             cc_file,
             "transaction_date,amount,merchant\n2026-05-01,150.00,Best Buy\n2026-05-02,-150.00,Payment Received"
@@ -310,15 +317,15 @@ mod tests {
 
         let entries = parse_csv_file(&file_path, "USD").unwrap();
         assert_eq!(entries.len(), 2);
-        
+
         // Purchase (originally positive 150.00) should be flipped to negative -150.00
         assert_eq!(entries[0].amount, -150.00);
         assert_eq!(entries[0].merchant, "Best Buy");
-        
+
         // Payment (originally negative -150.00) should be flipped to positive 150.00
         assert_eq!(entries[1].amount, 150.00);
         assert_eq!(entries[1].merchant, "Payment Received");
-        
+
         let _ = std::fs::remove_file(&file_path);
     }
 }

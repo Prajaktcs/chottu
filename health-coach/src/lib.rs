@@ -18,10 +18,10 @@ pub use coaching::{
 pub use fitness_plan::{
     activity_matches_plan_kind, classify_activity_type, count_strength_sessions,
     count_strengthish_sessions, current_week_start_str, generate_and_store_weekly_plan,
-    load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days,
-    plan_session_adherence, render_plan_markdown, session_for_date, session_for_date_from_stored,
-    sum_cardio_minutes, week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind,
-    StoredWeeklyPlan, WeeklyFitnessPlan,
+    load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days, plan_session_adherence,
+    render_plan_markdown, session_for_date, session_for_date_from_stored, sum_cardio_minutes,
+    week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind, StoredWeeklyPlan,
+    WeeklyFitnessPlan,
 };
 pub use sync::{
     credentials_configured, delete_google_nutrition_logs, exercise_entries_for_day,
@@ -117,12 +117,8 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Evening sync complete for {} — {} kcal, {} steps",
                                 report.member_id, report.calories, report.steps
                             );
-                            notify_member_signal(
-                                &report.signal_text(),
-                                &config,
-                                &report.member_id,
-                            )
-                            .await;
+                            notify_member_signal(&report.signal_text(), &config, &report.member_id)
+                                .await;
                         }
                         last_evening_sync_date = date_str.clone();
                     }
@@ -201,11 +197,7 @@ fn steps_nudge_text(report: &HealthSyncReport, goal: i32) -> String {
 }
 
 /// Deliver a member's health sync only to their linked DM (never other adults' chats).
-async fn notify_member_signal(
-    message: &str,
-    config: &chotu_common::AppConfig,
-    member_id: &str,
-) {
+async fn notify_member_signal(message: &str, config: &chotu_common::AppConfig, member_id: &str) {
     let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
         Ok(path) if !path.trim().is_empty() => path,
         _ => return,
@@ -229,9 +221,7 @@ async fn notify_member_signal(
     };
     for recipient in targets {
         if let Err(error) = client.send_text(&recipient, message).await {
-            eprintln!(
-                "Health Coach: failed to push sync notification to {recipient}: {error:?}"
-            );
+            eprintln!("Health Coach: failed to push sync notification to {recipient}: {error:?}");
         }
     }
 }
@@ -272,7 +262,10 @@ mod steps_nudge_tests {
         let text = steps_nudge_text(&report(8432), 10_000);
         assert!(text.contains("8432 / 10000"));
         assert!(text.contains("1568 to go"));
-        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
+        assert!(
+            !text.contains('*'),
+            "Signal messages must not use Markdown emphasis: {text}"
+        );
     }
 
     #[test]
@@ -280,7 +273,10 @@ mod steps_nudge_tests {
         let text = steps_nudge_text(&report(10_200), 10_000);
         assert!(text.contains("goal hit"));
         assert!(text.contains("10200 / 10000"));
-        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
+        assert!(
+            !text.contains('*'),
+            "Signal messages must not use Markdown emphasis: {text}"
+        );
     }
 
     #[test]
@@ -291,7 +287,13 @@ mod steps_nudge_tests {
         assert!(text.contains("Google Health Sync Complete"));
         assert!(text.contains("Includes 2 `/food` entries"));
         assert!(!text.contains("Telegram"));
-        assert!(!text.contains('*'), "Signal messages must not use Markdown emphasis: {text}");
-        assert!(!text.contains('_'), "Signal messages must not use Markdown italics: {text}");
+        assert!(
+            !text.contains('*'),
+            "Signal messages must not use Markdown emphasis: {text}"
+        );
+        assert!(
+            !text.contains('_'),
+            "Signal messages must not use Markdown italics: {text}"
+        );
     }
 }

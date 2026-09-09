@@ -255,7 +255,12 @@ impl FitnessCoachContext {
 
         if let Some(fg) = self.fitness_goals.as_ref().filter(|g| !g.is_empty()) {
             lines.push("Fitness outcome:".to_string());
-            if let Some(intent) = fg.intent.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if let Some(intent) = fg
+                .intent
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
                 lines.push(format!("  - Intent: {}", intent));
             }
             if let Some(td) = fg
@@ -306,10 +311,7 @@ impl FitnessCoachContext {
         }
         if let (Some(done), Some(target)) = (self.week_strength_sessions, self.week_strength_target)
         {
-            lines.push(format!(
-                "Strength sessions this week: {}/{}",
-                done, target
-            ));
+            lines.push(format!("Strength sessions this week: {}/{}", done, target));
         }
         if let (Some(done), Some(target)) = (self.week_cardio_minutes, self.week_cardio_target) {
             lines.push(format!("Cardio minutes this week: {}/{}", done, target));
@@ -422,8 +424,8 @@ fn strip_think_blocks(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chotu_common::{FitnessGoals, NutritionGoals};
     use crate::fitness_plan::{PlanDay, PlanDayKind};
+    use chotu_common::{FitnessGoals, NutritionGoals};
 
     fn sample_summary() -> HealthFamilySummary {
         HealthFamilySummary {

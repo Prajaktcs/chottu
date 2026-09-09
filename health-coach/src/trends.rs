@@ -64,10 +64,7 @@ pub async fn build_nutrition_trend_reports(
         let avg_fats: f64 = member_rows.iter().map(|r| r.fats_grams).sum::<f64>() / n;
         let avg_fiber: f64 = member_rows.iter().map(|r| r.fiber_g).sum::<f64>() / n;
         let avg_steps: f64 = member_rows.iter().map(|r| r.step_count as f64).sum::<f64>() / n;
-        let sleep_vals: Vec<f64> = member_rows
-            .iter()
-            .filter_map(|r| r.sleep_hours)
-            .collect();
+        let sleep_vals: Vec<f64> = member_rows.iter().filter_map(|r| r.sleep_hours).collect();
         let avg_sleep = if sleep_vals.is_empty() {
             None
         } else {
@@ -100,7 +97,10 @@ pub async fn build_nutrition_trend_reports(
             "  - Protein: {:.1}g {}\n",
             avg_protein, protein_trend
         ));
-        msg.push_str(&format!("  - Carbs: {:.1}g | Fat: {:.1}g\n", avg_carbs, avg_fats));
+        msg.push_str(&format!(
+            "  - Carbs: {:.1}g | Fat: {:.1}g\n",
+            avg_carbs, avg_fats
+        ));
         msg.push_str(&format!(
             "  - Steps: {:.0}/day {}\n",
             avg_steps, steps_trend

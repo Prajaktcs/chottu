@@ -339,25 +339,19 @@ fn row_to_company_profile(
         .filter(|s| !s.is_empty())
         .ok_or_else(|| QuoteError::NotFound(symbol.clone()))?;
 
-    let currency = row
-        .currency
-        .as_deref()
-        .unwrap_or("USD")
-        .trim()
-        .to_string();
+    let currency = row.currency.as_deref().unwrap_or("USD").trim().to_string();
 
     let market_cap = row
         .market_cap
         .filter(|m| m.is_finite() && *m > 0.0)
         .ok_or_else(|| QuoteError::NotFound(symbol.clone()))?;
 
-    let market_cap_m = yahoo_market_cap_usd_millions(market_cap, &currency, usd_rates).ok_or_else(
-        || {
+    let market_cap_m =
+        yahoo_market_cap_usd_millions(market_cap, &currency, usd_rates).ok_or_else(|| {
             QuoteError::BadPayload(format!(
                 "no FX rate to convert {currency} market cap for {symbol}"
             ))
-        },
-    )?;
+        })?;
 
     Ok(CompanyProfile {
         symbol,

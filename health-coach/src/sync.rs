@@ -108,7 +108,11 @@ pub fn google_health_client_from_env() -> Result<GoogleHealthClient> {
     let refresh_token = std::env::var("FITBIT_REFRESH_TOKEN").context(
         "FITBIT_REFRESH_TOKEN not found in environment. Please add it to your .env file.",
     )?;
-    Ok(GoogleHealthClient::new(client_id, client_secret, refresh_token))
+    Ok(GoogleHealthClient::new(
+        client_id,
+        client_secret,
+        refresh_token,
+    ))
 }
 
 /// Build a Google Health client for a specific family member.
@@ -130,7 +134,11 @@ pub fn google_health_client_for_member(
             health_refresh_token_env_key(member_id)
         )
     })?;
-    Ok(GoogleHealthClient::new(client_id, client_secret, refresh_token))
+    Ok(GoogleHealthClient::new(
+        client_id,
+        client_secret,
+        refresh_token,
+    ))
 }
 
 /// True when this member has a usable Google Health refresh token.
@@ -224,10 +232,7 @@ pub async fn push_pending_food_logs(
     let mut pushed = 0;
     for log in pending {
         // Skip pure local adjustment audit rows — they are not real meals.
-        if log
-            .raw_text_description
-            .starts_with("Manual adjustment:")
-        {
+        if log.raw_text_description.starts_with("Manual adjustment:") {
             continue;
         }
         match push_food_log_to_google(pool, client, &log).await {
@@ -619,11 +624,13 @@ pub async fn exercises_for_range(
     start_date: &str,
     end_date: &str,
 ) -> Result<Vec<(String, String)>> {
-    Ok(exercise_entries_for_range(pool, member_id, start_date, end_date)
-        .await?
-        .into_iter()
-        .map(|e| (e.date, e.description))
-        .collect())
+    Ok(
+        exercise_entries_for_range(pool, member_id, start_date, end_date)
+            .await?
+            .into_iter()
+            .map(|e| (e.date, e.description))
+            .collect(),
+    )
 }
 
 /// Structured exercise rows for a member between `start_date` and `end_date` inclusive.
@@ -1055,7 +1062,10 @@ pub async fn sync_configured_members_today(
                  Run `/login health <member_id>` for each account."
             );
         }
-        bail!("Google Health sync failed for all members: {}", errors.join("; "));
+        bail!(
+            "Google Health sync failed for all members: {}",
+            errors.join("; ")
+        );
     }
 
     Ok(reports)

@@ -36,7 +36,7 @@ pub async fn get_daily_data(
         SELECT *
         FROM health_family_summary
         WHERE date = ?
-        "#
+        "#,
     )
     .bind(date)
     .fetch_all(pool)
@@ -219,10 +219,7 @@ fn strip_think_blocks(text: &str) -> String {
 
 /// Keep only the linked member's health records for a private reflection.
 /// `None` is the configured household group and retains household-wide data.
-pub fn filter_health_for_member(
-    healths: &mut Vec<HealthFamilySummary>,
-    member_id: Option<&str>,
-) {
+pub fn filter_health_for_member(healths: &mut Vec<HealthFamilySummary>, member_id: Option<&str>) {
     if let Some(member_id) = member_id {
         healths.retain(|health| health.family_member_id.eq_ignore_ascii_case(member_id));
     }
@@ -241,7 +238,11 @@ fn encoded_member_component(member_id: &str) -> String {
     encoded
 }
 
-fn reflection_file_path(brain_path: &PathBuf, date: &str, member_id: Option<&str>) -> Result<PathBuf> {
+fn reflection_file_path(
+    brain_path: &PathBuf,
+    date: &str,
+    member_id: Option<&str>,
+) -> Result<PathBuf> {
     let parts: Vec<&str> = date.split('-').collect();
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(anyhow::anyhow!(
@@ -405,7 +406,6 @@ mod tests {
         let escaped = escape_yaml_double_quoted("alex: #1\\home\"");
         assert_eq!(escaped, "alex: #1\\\\home\\\"");
     }
-
 
     fn health_summary(member_id: &str) -> HealthFamilySummary {
         HealthFamilySummary {

@@ -166,7 +166,12 @@ pub async fn lookup_barcode(barcode: &str) -> anyhow::Result<Option<OpenFoodFact
         .trim()
         .to_string();
 
-    let branded = match product.brands.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let branded = match product
+        .brands
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(brand) => format!("{} ({})", name, brand),
         None => name,
     };
@@ -209,7 +214,11 @@ fn cholesterol_to_mg(v: f64) -> f64 {
     }
 }
 
-fn map_nutriments(n: &OffNutriments, serving_quantity: Option<f64>, product_name: &str) -> NutritionEstimation {
+fn map_nutriments(
+    n: &OffNutriments,
+    serving_quantity: Option<f64>,
+    product_name: &str,
+) -> NutritionEstimation {
     // Prefer serving values; else scale 100g by serving_quantity/100; else assume 100g portion.
     let use_serving = n.energy_kcal_serving.is_some()
         || n.proteins_serving.is_some()
@@ -229,11 +238,7 @@ fn map_nutriments(n: &OffNutriments, serving_quantity: Option<f64>, product_name
             .unwrap_or(0.0)
             .max(0.0)
     } else {
-        n.energy_kcal_100g
-            .or(n.energy_kcal)
-            .unwrap_or(0.0)
-            .max(0.0)
-            * scale
+        n.energy_kcal_100g.or(n.energy_kcal).unwrap_or(0.0).max(0.0) * scale
     };
 
     let protein = pick(n.proteins_serving, n.proteins_100g, scale);

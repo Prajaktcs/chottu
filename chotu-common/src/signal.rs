@@ -427,7 +427,6 @@ fn spawn_reader(
     });
 }
 
-
 async fn write_request(
     writer: &mut OwnedWriteHalf,
     id: u64,
@@ -453,8 +452,8 @@ fn dispatch_frame(
     let frame = str::from_utf8(frame)
         .map_err(|error| SignalError::Utf8(error.to_string()))?
         .trim_end_matches(&['\r', '\n'][..]);
-    let message: Value = serde_json::from_str(frame)
-        .map_err(|error| SignalError::Json(error.to_string()))?;
+    let message: Value =
+        serde_json::from_str(frame).map_err(|error| SignalError::Json(error.to_string()))?;
 
     if message.get("method").and_then(Value::as_str) == Some("receive") {
         if let Some(receive) = parse_receive(&message)? {
@@ -494,7 +493,9 @@ fn parse_receive(message: &Value) -> Result<Option<SignalInbound>, SignalError> 
         .get("params")
         .and_then(|params| params.get("result"))
         .and_then(|result| result.get("envelope"))
-        .ok_or_else(|| SignalError::Protocol("receive notification lacked result.envelope".into()))?;
+        .ok_or_else(|| {
+            SignalError::Protocol("receive notification lacked result.envelope".into())
+        })?;
     let Some(sender_aci) = envelope.get("sourceUuid").and_then(Value::as_str) else {
         return Ok(None);
     };
@@ -642,7 +643,9 @@ mod tests {
                 }
             }}}
         });
-        let inbound = parse_receive(&message).unwrap().expect("text should survive");
+        let inbound = parse_receive(&message)
+            .unwrap()
+            .expect("text should survive");
         assert_eq!(inbound.text.as_deref(), Some("hello"));
         assert!(inbound.attachments.is_empty());
     }
@@ -665,7 +668,9 @@ mod tests {
             }}}
         });
 
-        let inbound = parse_receive(&message).unwrap().expect("text should survive");
+        let inbound = parse_receive(&message)
+            .unwrap()
+            .expect("text should survive");
         assert_eq!(inbound.text.as_deref(), Some("hello"));
         assert_eq!(
             inbound.attachments,
@@ -744,8 +749,20 @@ mod tests {
         let (second_tx, second_rx) = oneshot::channel();
         let deadline = Instant::now() + Duration::from_secs(1);
         let mut pending = HashMap::from([
-            (1, PendingRequest { deadline, response: first_tx }),
-            (2, PendingRequest { deadline, response: second_tx }),
+            (
+                1,
+                PendingRequest {
+                    deadline,
+                    response: first_tx,
+                },
+            ),
+            (
+                2,
+                PendingRequest {
+                    deadline,
+                    response: second_tx,
+                },
+            ),
         ]);
         let mut writer = None;
         let mut reconnect_deadline = None;
@@ -775,7 +792,6 @@ mod tests {
 
     #[tokio::test]
     async fn interleaves_receive_notification_and_matches_response() {
-
         let (_dir, listener, path) = socket().await;
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
@@ -783,18 +799,45 @@ mod tests {
             let mut reader = BufReader::new(read);
             let subscribe = request(&mut reader).await;
             assert_eq!(subscribe["method"], "subscribeReceive");
-            write.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":subscribe["id"],"result":{}})).as_bytes()).await.unwrap();
+            write
+                .write_all(
+                    format!(
+                        "{}\n",
+                        json!({"jsonrpc":"2.0","id":subscribe["id"],"result":{}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
             let send = request(&mut reader).await;
             let notification = json!({
                 "jsonrpc":"2.0", "method":"receive", "params":{"result":{"envelope":{
                     "sourceUuid":"aci-1", "dataMessage":{"message":"hello","quote":{"id":42}}
                 }}}
             });
-            write.write_all(format!("{}\n{}\n", notification, json!({"jsonrpc":"2.0","id":send["id"],"result":{"timestamp":17}})).as_bytes()).await.unwrap();
+            write
+                .write_all(
+                    format!(
+                        "{}\n{}\n",
+                        notification,
+                        json!({"jsonrpc":"2.0","id":send["id"],"result":{"timestamp":17}})
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
         });
         let client = SignalClient::connect(&path).await.unwrap();
         let mut receives = client.subscribe_receive().await.unwrap();
-        let timestamp = client.send_text(&SignalRecipient::Direct { aci: "aci-2".into() }, "out").await.unwrap();
+        let timestamp = client
+            .send_text(
+                &SignalRecipient::Direct {
+                    aci: "aci-2".into(),
+                },
+                "out",
+            )
+            .await
+            .unwrap();
         assert_eq!(timestamp, 17);
         let received = receives.recv().await.unwrap();
         assert_eq!(received.sender_aci, "aci-1");
@@ -809,7 +852,10 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
-            for (timestamp, expected) in [(3, json!({"recipient":["aci"],"message":"one"})), (4, json!({"groupId":"group","message":"two"}))] {
+            for (timestamp, expected) in [
+                (3, json!({"recipient":["aci"],"message":"one"})),
+                (4, json!({"groupId":"group","message":"two"})),
+            ] {
                 let request = request(&mut reader).await;
                 assert_eq!(request["method"], "send");
                 assert_eq!(request["params"], expected);
@@ -817,8 +863,25 @@ mod tests {
             }
         });
         let client = SignalClient::connect(&path).await.unwrap();
-        assert_eq!(client.send_text(&SignalRecipient::Direct { aci: "aci".into() }, "one").await.unwrap(), 3);
-        assert_eq!(client.send_text(&SignalRecipient::Group { group_id: "group".into() }, "two").await.unwrap(), 4);
+        assert_eq!(
+            client
+                .send_text(&SignalRecipient::Direct { aci: "aci".into() }, "one")
+                .await
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            client
+                .send_text(
+                    &SignalRecipient::Group {
+                        group_id: "group".into()
+                    },
+                    "two"
+                )
+                .await
+                .unwrap(),
+            4
+        );
         server.await.unwrap();
     }
 
@@ -829,16 +892,45 @@ mod tests {
             let (stream, _) = listener.accept().await.unwrap();
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
-            for expected in [json!({"id":"one","recipient":"aci"}), json!({"id":"two","groupId":"group"})] {
+            for expected in [
+                json!({"id":"one","recipient":"aci"}),
+                json!({"id":"two","groupId":"group"}),
+            ] {
                 let request = request(&mut reader).await;
                 assert_eq!(request["method"], "getAttachment");
                 assert_eq!(request["params"], expected);
-                write.write_all(format!("{}\n", json!({"jsonrpc":"2.0","id":request["id"],"result":"aGVsbG8="})).as_bytes()).await.unwrap();
+                write
+                    .write_all(
+                        format!(
+                            "{}\n",
+                            json!({"jsonrpc":"2.0","id":request["id"],"result":"aGVsbG8="})
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
             }
         });
         let client = SignalClient::connect(&path).await.unwrap();
-        assert_eq!(client.get_attachment(&SignalRecipient::Direct { aci: "aci".into() }, "one").await.unwrap(), b"hello");
-        assert_eq!(client.get_attachment(&SignalRecipient::Group { group_id: "group".into() }, "two").await.unwrap(), b"hello");
+        assert_eq!(
+            client
+                .get_attachment(&SignalRecipient::Direct { aci: "aci".into() }, "one")
+                .await
+                .unwrap(),
+            b"hello"
+        );
+        assert_eq!(
+            client
+                .get_attachment(
+                    &SignalRecipient::Group {
+                        group_id: "group".into()
+                    },
+                    "two"
+                )
+                .await
+                .unwrap(),
+            b"hello"
+        );
         server.await.unwrap();
     }
 
@@ -858,7 +950,10 @@ mod tests {
         let client = SignalClient::connect(&path).await.unwrap();
         let error = client.subscribe_receive().await.unwrap_err();
         assert!(matches!(error, SignalError::Rpc { code: Some(-1), .. }));
-        let error = client.send_text(&SignalRecipient::Direct { aci: "aci".into() }, "x").await.unwrap_err();
+        let error = client
+            .send_text(&SignalRecipient::Direct { aci: "aci".into() }, "x")
+            .await
+            .unwrap_err();
         assert!(matches!(error, SignalError::Json(_)));
         server.await.unwrap();
     }

@@ -1,6 +1,6 @@
 //! Family calendar agenda: day/week windows, fetch, formatting, conflict detection.
 
-use chrono::{Datelike, DateTime, Duration, Local, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Timelike, Utc};
 
 use crate::calendar::{build_calendar_client, CalendarError, CalendarEvent};
 use crate::family::AppConfig;
@@ -84,9 +84,7 @@ pub struct CalendarConflict {
 }
 
 /// Local civil day `[start, end)` in UTC.
-pub fn local_day_bounds_utc(
-    date_yyyy_mm_dd: &str,
-) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+pub fn local_day_bounds_utc(date_yyyy_mm_dd: &str) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     let naive = NaiveDate::parse_from_str(date_yyyy_mm_dd, "%Y-%m-%d").ok()?;
     local_naive_day_bounds_utc(naive)
 }
@@ -106,7 +104,10 @@ fn naive_day_bounds_utc_in<Tz: TimeZone>(
     let end_local = timezone
         .from_local_datetime(&next_day.and_hms_opt(0, 0, 0)?)
         .single()?;
-    Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
+    Some((
+        start_local.with_timezone(&Utc),
+        end_local.with_timezone(&Utc),
+    ))
 }
 
 /// Full local calendar week Mon 00:00 → next Mon 00:00 (UTC).
@@ -126,7 +127,10 @@ fn week_bounds_utc_in<Tz: TimeZone>(
     let end_local = timezone
         .from_local_datetime(&next_monday.and_hms_opt(0, 0, 0)?)
         .single()?;
-    Some((start_local.with_timezone(&Utc), end_local.with_timezone(&Utc)))
+    Some((
+        start_local.with_timezone(&Utc),
+        end_local.with_timezone(&Utc),
+    ))
 }
 
 fn local_week_monday_sunday(anchor: NaiveDate) -> (NaiveDate, NaiveDate) {
@@ -170,7 +174,10 @@ pub fn event_civil_day(ev: &CalendarEvent) -> String {
     if is_all_day(ev) {
         ev.start.format("%Y-%m-%d").to_string()
     } else {
-        ev.start.with_timezone(&Local).format("%Y-%m-%d").to_string()
+        ev.start
+            .with_timezone(&Local)
+            .format("%Y-%m-%d")
+            .to_string()
     }
 }
 
@@ -217,10 +224,7 @@ pub async fn fetch_family_events(
         match client.fetch_events(&member.name, from, to).await {
             Ok(mut member_events) => events.append(&mut member_events),
             Err(e) => {
-                eprintln!(
-                    "Calendar: fetch failed for {}: {:?}",
-                    member.id, e
-                );
+                eprintln!("Calendar: fetch failed for {}: {:?}", member.id, e);
                 errors.push(FamilyCalendarError {
                     member_id: member.id.clone(),
                     member_name: member.name.clone(),
@@ -400,10 +404,7 @@ fn format_errors_footer(errors: &[FamilyCalendarError]) -> String {
         .map(|error| error.member_name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    format!(
-        "_Calendar unavailable for: {}_\n",
-        escape_md(&member_names)
-    )
+    format!("_Calendar unavailable for: {}_\n", escape_md(&member_names))
 }
 
 /// Full `/cal` Markdown reply for a window (timeline + conflicts).

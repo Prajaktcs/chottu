@@ -1351,11 +1351,8 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
         };
 
         let message = action_item_reminder_message(&delivery.task_id, &delivery.title);
-        match tokio::time::timeout(
-            SIGNAL_SEND_TIMEOUT,
-            client.send_text(&recipient, &message),
-        )
-        .await
+        match tokio::time::timeout(SIGNAL_SEND_TIMEOUT, client.send_text(&recipient, &message))
+            .await
         {
             Ok(Ok(timestamp)) => {
                 if let Err(error) =
@@ -1522,8 +1519,8 @@ mod signal_mapping_tests {
 
     #[test]
     fn signal_drain_worst_case_stays_under_imap_idle() {
-        let worst = SIGNAL_CONNECT_TIMEOUT
-            + SIGNAL_SEND_TIMEOUT * SIGNAL_DELIVERY_BATCH_SIZE as u32;
+        let worst =
+            SIGNAL_CONNECT_TIMEOUT + SIGNAL_SEND_TIMEOUT * SIGNAL_DELIVERY_BATCH_SIZE as u32;
         assert!(
             worst < IMAP_IDLE_KEEPALIVE,
             "batch drain {worst:?} must stay under IMAP IDLE {IMAP_IDLE_KEEPALIVE:?}"
@@ -1899,7 +1896,10 @@ mod signal_mapping_tests {
         .unwrap();
         assert_eq!(
             states,
-            vec![("task-1".into(), "delivered".into()), ("task-2".into(), "pending".into())]
+            vec![
+                ("task-1".into(), "delivered".into()),
+                ("task-2".into(), "pending".into())
+            ]
         );
         let mapped_task: String = sqlx::query_scalar(
             "SELECT task_id FROM task_signal_messages \
