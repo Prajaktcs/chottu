@@ -937,6 +937,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(signal_index.0, 1);
+        let delivery_table: (i32,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'task_due_reminder_deliveries'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(delivery_table.0, 1);
         pool.close().await;
 
         let second_pool = init_db(db_path.to_str().unwrap()).await.unwrap();
@@ -1008,6 +1015,13 @@ mod tests {
         .await
         .expect("look up Signal task mapping");
         assert_eq!(mapped_task, "task-1");
+        sqlx::query(
+            "INSERT INTO task_due_reminder_deliveries (task_id, recipient_kind, recipient_id) \
+             VALUES ('task-1', 'direct', 'aci-1')",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert due-reminder delivery");
 
         let now = chrono::Utc::now().to_rfc3339();
         sqlx::query(
