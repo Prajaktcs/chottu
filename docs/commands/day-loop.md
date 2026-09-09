@@ -81,7 +81,7 @@ Plain text: `remind me to …`, `open tasks`.
 | `/tasks reassign <id> <member>` | |
 | `/tasks open <id>` | Unsnooze |
 
-Timed `due_at` triggers one Telegram reminder to the assignee’s DM (else household targets).
+Timed `due_at` triggers one Signal reminder to the assignee’s configured DM, falling back to `SIGNAL_GROUP_ID` when that assignee is unlinked. Unassigned reminders use all household targets.
 
 **Email feedback:** reply `unactionable` to a task reminder to suppress similar mail next time.
 

@@ -44,4 +44,4 @@ Two things this project will not do:
 1. **Give up privacy.** Historical data stays local. Mail, notes, and RAG stay on the machine. PRs do not include live household data, real `config.yaml`, or `.env`.
 2. **Hand the wheel to AI.** Targeted jobs, not autonomy that cannot tell when to stop or when to ask. Tracking and suggestions — not a stand-in for an advisor, a doctor, a coach, or a human review of what ships.
 
-Everything else is open. Talk it through on GitHub issues. Pull requests are welcome. Harden what already ships if you can (`STRENGTHEN.md`, `just test`, `ARCHITECTURE.md`); fork and tweak workflows if your household needs something different.
+Everything else is open. Talk it through on GitHub issues. Pull requests are welcome. Harden what already ships if you can (`STRENGTHEN.md`, `just test`, `ARCHITECTURE.md`); fork and tweak workflows if your household needs something different. `just setup` (or `just hooks`) installs local git hooks: **pre-commit** runs `just lint` (`fmt` + `clippy`), **pre-push** runs `just test`.
