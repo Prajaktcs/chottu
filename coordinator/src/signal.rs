@@ -2471,13 +2471,71 @@ async fn create_manual_task(
     Ok(())
 }
 
-fn task_reminder_targets(config: &AppConfig, assigned_to: Option<&str>) -> Vec<ChatId> {
+fn task_reminder_targets(
+    config: &AppConfig,
+    assigned_to: Option<&str>,
+    household_targets: &[ChatId],
+) -> Vec<ChatId> {
     match assigned_to {
         Some(member_id) => signal_aci_for_member(config, member_id)
-            .map(|aci| vec![SignalRecipient::Direct { aci }])
-            .unwrap_or_default(),
-        None => signal_delivery_targets(config),
+            .map(|aci| SignalRecipient::Direct { aci })
+            .or_else(|| {
+                household_targets
+                    .iter()
+                    .find(|target| matches!(target, SignalRecipient::Group { .. }))
+                    .cloned()
+            })
+            .into_iter()
+            .collect(),
+        None => household_targets.to_vec(),
     }
+}
+
+type DueTaskReminderRow = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+async fn load_routable_due_task_reminders(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    group_fallback_configured: bool,
+    now: &str,
+) -> Result<Vec<DueTaskReminderRow>, sqlx::Error> {
+    let mut due_query = sqlx::QueryBuilder::new(
+        "SELECT id, title, due_date, due_at, assigned_to FROM tasks \
+         WHERE status = 'open' \
+           AND due_at IS NOT NULL \
+           AND due_at <= ",
+    );
+    due_query.push_bind(now).push(" AND reminded_at IS NULL");
+    if !group_fallback_configured {
+        due_query.push(" AND (assigned_to IS NULL");
+        if config
+            .family
+            .members
+            .iter()
+            .any(|member| member.signal_aci.is_some())
+        {
+            due_query.push(" OR assigned_to COLLATE NOCASE IN (");
+            let mut ids = due_query.separated(", ");
+            for member in config
+                .family
+                .members
+                .iter()
+                .filter(|member| member.signal_aci.is_some())
+            {
+                ids.push_bind(member.id.as_str());
+            }
+            ids.push_unseparated(")");
+        }
+        due_query.push(")");
+    }
+    due_query.push(" ORDER BY due_at ASC LIMIT 20");
+    due_query.build_query_as().fetch_all(pool).await
 }
 
 async fn poll_due_task_reminders(
@@ -2487,25 +2545,20 @@ async fn poll_due_task_reminders(
 ) -> Result<(), anyhow::Error> {
     let now = chrono::Utc::now();
     let now_s = now.to_rfc3339();
-    let rows: Vec<(
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
-        "SELECT id, title, due_date, due_at, assigned_to FROM tasks \
-         WHERE status = 'open' \
-           AND due_at IS NOT NULL \
-           AND due_at <= ? \
-           AND reminded_at IS NULL \
-         ORDER BY due_at ASC LIMIT 20",
-    )
-    .bind(&now_s)
-    .fetch_all(pool)
-    .await?;
+    let household_targets = signal_delivery_targets(config);
+    let group_fallback_configured = household_targets
+        .iter()
+        .any(|target| matches!(target, SignalRecipient::Group { .. }));
+    let rows =
+        load_routable_due_task_reminders(pool, config, group_fallback_configured, &now_s).await?;
 
     for (id, title, due_date, due_at, assigned_to) in rows {
+        // No destination is not a delivery failure. Leave reminded_at NULL so a
+        // later member link or household-group configuration makes it eligible.
+        let targets = task_reminder_targets(config, assigned_to.as_deref(), &household_targets);
+        if targets.is_empty() {
+            continue;
+        }
         // Claim first so concurrent pollers cannot double-send.
         let claimed = sqlx::query(
             "UPDATE tasks SET reminded_at = ?, updated_at = ? \
@@ -2545,7 +2598,6 @@ async fn poll_due_task_reminders(
             when,
             task_complete_snooze_help(&short_id)
         );
-        let targets = task_reminder_targets(config, assigned_to.as_deref());
 
         let mut send_ok = !targets.is_empty();
         for cid in &targets {
@@ -6328,18 +6380,95 @@ mod tests {
         assert!(!dm.allows_task_assignee(Some("jordan")));
         assert!(group.allows_task_assignee(Some("jordan")));
         assert_eq!(
-            task_reminder_targets(&config, Some("alex")),
-            vec![SignalRecipient::Direct {
-                aci: "aci-alex".to_string()
-            }]
-        );
-        assert!(task_reminder_targets(&config, Some("jordan")).is_empty());
-        assert_eq!(
             resolve_task_target(&group, Some("jordan".to_string()), &config)
                 .unwrap()
                 .as_deref(),
             Some("jordan")
         );
+    }
+
+    #[test]
+    fn due_reminders_prefer_assignee_dm_and_fallback_to_group() {
+        let mut config = AppConfig::default();
+        config.family.members[0].signal_aci = Some("aci-alex".to_string());
+        let group_target = SignalRecipient::Group {
+            group_id: "household".to_string(),
+        };
+
+        assert!(task_reminder_targets(&config, Some("jordan"), &[]).is_empty());
+        assert_eq!(
+            task_reminder_targets(&config, Some("alex"), std::slice::from_ref(&group_target)),
+            vec![SignalRecipient::Direct {
+                aci: "aci-alex".to_string()
+            }]
+        );
+        assert_eq!(
+            task_reminder_targets(&config, Some("jordan"), std::slice::from_ref(&group_target)),
+            vec![group_target]
+        );
+    }
+
+    #[tokio::test]
+    async fn unroutable_due_tasks_do_not_consume_poll_batch() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                due_date TEXT,
+                due_at TEXT,
+                assigned_to TEXT,
+                status TEXT NOT NULL,
+                reminded_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        for index in 0..20 {
+            sqlx::query(
+                "INSERT INTO tasks
+                 (id, title, due_at, assigned_to, status)
+                 VALUES (?, 'Blocked reminder', ?, 'jordan', 'open')",
+            )
+            .bind(format!("blocked-{index}"))
+            .bind(format!("2026-09-08T10:{index:02}:00Z"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        sqlx::query(
+            "INSERT INTO tasks
+             (id, title, due_at, assigned_to, status)
+             VALUES ('routable', 'Routable reminder', '2026-09-08T11:00:00Z', 'ALEX', 'open')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        config.family.members[0].signal_aci = Some("aci-alex".to_string());
+        let rows = load_routable_due_task_reminders(&pool, &config, false, "2026-09-08T12:00:00Z")
+            .await
+            .unwrap();
+        let pending_unroutable: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM tasks
+             WHERE assigned_to = 'jordan' AND reminded_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(
+            rows.into_iter().map(|row| row.0).collect::<Vec<_>>(),
+            vec!["routable"]
+        );
+        assert_eq!(pending_unroutable.0, 20);
     }
 
     #[test]
