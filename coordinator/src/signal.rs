@@ -376,12 +376,30 @@ impl ScheduledJob {
 struct ScheduledDeliveries {
     delivered: HashMap<(ScheduledJob, String), HashSet<ChatId>>,
     due_on: HashMap<ScheduledJob, String>,
+    portfolio_body: Option<(String, String)>,
 }
 
 impl ScheduledDeliveries {
     fn prune(&mut self, today: &str) {
         self.due_on.retain(|_, date| date == today);
         self.delivered.retain(|(_, date), _| date == today);
+        if self
+            .portfolio_body
+            .as_ref()
+            .is_none_or(|(date, _)| date != today)
+        {
+            self.portfolio_body = None;
+        }
+    }
+
+    fn portfolio_body(&self, today: &str) -> Option<&str> {
+        self.portfolio_body
+            .as_ref()
+            .and_then(|(date, body)| (date == today).then_some(body.as_str()))
+    }
+
+    fn cache_portfolio_body(&mut self, today: &str, body: String) {
+        self.portfolio_body = Some((today.to_string(), body));
     }
 
     /// Recipients still owed this job. The day's attempt starts when the clock matches
@@ -604,36 +622,38 @@ pub async fn start_signal_client(
                 let due =
                     deliveries.outstanding(ScheduledJob::Portfolio, &date_str, &targets, matches);
                 if !due.is_empty() {
-                    match build_networth_summary(&sched_pool, cfg).await {
-                        Ok(msg) => {
-                            log_scheduled_job(ScheduledJob::Portfolio, clock, &tz_name, !matches);
-                            for cid in send_scheduled_recipients(
-                                &sched_bot,
-                                &due,
-                                &msg,
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                                "scheduled portfolio overview",
-                            )
-                            .await
-                            {
-                                deliveries.mark_delivered(ScheduledJob::Portfolio, &date_str, cid);
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "Signal: failed to build scheduled portfolio overview: {}",
-                                e
-                            );
-                            if matches {
+                    if deliveries.portfolio_body(&date_str).is_none() && matches {
+                        match build_networth_summary(&sched_pool, cfg).await {
+                            Ok(msg) => deliveries.cache_portfolio_body(&date_str, msg),
+                            Err(e) => {
+                                eprintln!(
+                                    "Signal: failed to build scheduled portfolio overview: {}",
+                                    e
+                                );
+                                let err_msg = format!("Portfolio overview failed: {}", e);
                                 let _ = send_scheduled_recipients(
                                     &sched_bot,
                                     &due,
-                                    &format!("Portfolio overview failed: {}", e),
+                                    &err_msg,
                                     SCHEDULED_SIGNAL_ATTEMPTS,
                                     "scheduled portfolio overview error",
                                 )
                                 .await;
                             }
+                        }
+                    }
+                    if let Some(msg) = deliveries.portfolio_body(&date_str).map(str::to_string) {
+                        log_scheduled_job(ScheduledJob::Portfolio, clock, &tz_name, !matches);
+                        for cid in send_scheduled_recipients(
+                            &sched_bot,
+                            &due,
+                            &msg,
+                            SCHEDULED_SIGNAL_ATTEMPTS,
+                            "scheduled portfolio overview",
+                        )
+                        .await
+                        {
+                            deliveries.mark_delivered(ScheduledJob::Portfolio, &date_str, cid);
                         }
                     }
                 }
@@ -6960,5 +6980,22 @@ mod tests {
         assert!(deliveries
             .outstanding(ScheduledJob::MorningBrief, "2026-09-09", &targets, false)
             .is_empty());
+    }
+
+    #[test]
+    fn scheduled_portfolio_body_is_cached_for_the_due_day() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (_, _, targets) = scheduled_sample_targets();
+        assert!(deliveries.portfolio_body(date).is_none());
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, true);
+        deliveries.cache_portfolio_body(date, "networth".into());
+        assert_eq!(deliveries.portfolio_body(date), Some("networth"));
+
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, false);
+        assert_eq!(deliveries.portfolio_body(date), Some("networth"));
+
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, "2026-09-10", &targets, true);
+        assert!(deliveries.portfolio_body("2026-09-10").is_none());
     }
 }
