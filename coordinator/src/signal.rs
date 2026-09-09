@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -354,6 +354,106 @@ async fn send_text_retry(
     .await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ScheduledJob {
+    MorningBrief,
+    Portfolio,
+    Reflection,
+}
+
+impl ScheduledJob {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MorningBrief => "morning brief",
+            Self::Portfolio => "portfolio overview",
+            Self::Reflection => "evening reflection",
+        }
+    }
+}
+
+/// In-memory success by job, local civil date, and recipient.
+#[derive(Debug, Default)]
+struct ScheduledDeliveries {
+    delivered: HashMap<(ScheduledJob, String), HashSet<ChatId>>,
+    due_on: HashMap<ScheduledJob, String>,
+}
+
+impl ScheduledDeliveries {
+    fn prune(&mut self, today: &str) {
+        self.due_on.retain(|_, date| date == today);
+        self.delivered.retain(|(_, date), _| date == today);
+    }
+
+    /// Recipients still owed this job. The day's attempt starts when the clock matches
+    /// and at least one target exists; outstanding recipients keep retrying afterward.
+    fn outstanding(
+        &mut self,
+        job: ScheduledJob,
+        today: &str,
+        targets: &[ChatId],
+        clock_matches: bool,
+    ) -> Vec<ChatId> {
+        self.prune(today);
+        if clock_matches && !targets.is_empty() {
+            self.due_on.insert(job, today.to_string());
+        }
+        if self.due_on.get(&job).map(String::as_str) != Some(today) {
+            return Vec::new();
+        }
+        let delivered = self.delivered.get(&(job, today.to_string()));
+        targets
+            .iter()
+            .filter(|cid| delivered.is_none_or(|set| !set.contains(*cid)))
+            .cloned()
+            .collect()
+    }
+
+    fn mark_delivered(&mut self, job: ScheduledJob, today: &str, cid: ChatId) {
+        self.delivered
+            .entry((job, today.to_string()))
+            .or_default()
+            .insert(cid);
+    }
+}
+
+async fn send_scheduled_recipients(
+    bot: &Bot,
+    recipients: &[ChatId],
+    text: &str,
+    attempts: u32,
+    label: &str,
+) -> Vec<ChatId> {
+    let mut ok = Vec::new();
+    for cid in recipients {
+        if send_text_retry(bot, cid, text, attempts, label)
+            .await
+            .is_ok()
+        {
+            ok.push(cid.clone());
+        }
+    }
+    ok
+}
+
+fn log_scheduled_job(
+    job: ScheduledJob,
+    clock: chotu_common::ClockTime,
+    tz_name: &str,
+    retry: bool,
+) {
+    if retry {
+        println!("Signal: retrying scheduled {}.", job.label());
+    } else {
+        println!(
+            "Signal: scheduled {} ({:02}:{:02} {}).",
+            job.label(),
+            clock.hour,
+            clock.minute,
+            tz_name
+        );
+    }
+}
+
 async fn push_scheduled_brief(
     bot: &Bot,
     chat_id: &ChatId,
@@ -470,9 +570,7 @@ pub async fn start_signal_client(
     let sched_states = conversation_states.clone();
     let sched_config = shared_config.clone();
     tokio::spawn(async move {
-        let mut last_brief = String::new();
-        let mut last_portfolio = String::new();
-        let mut last_reflect = String::new();
+        let mut deliveries = ScheduledDeliveries::default();
         loop {
             let cfg = sched_config.as_ref();
             let now = cfg.now_in_tz();
@@ -481,43 +579,44 @@ pub async fn start_signal_client(
             let tz_name = cfg.resolved_timezone_name();
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::morning_brief) {
-                if clock.matches(now) && date_str != last_brief && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled morning brief ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    let mut any_ok = false;
-                    for cid in &targets {
-                        if push_scheduled_brief(&sched_bot, cid, &sched_pool, &cfg)
+                let matches = clock.matches(now);
+                let due = deliveries.outstanding(
+                    ScheduledJob::MorningBrief,
+                    &date_str,
+                    &targets,
+                    matches,
+                );
+                if !due.is_empty() {
+                    log_scheduled_job(ScheduledJob::MorningBrief, clock, &tz_name, !matches);
+                    for cid in due {
+                        if push_scheduled_brief(&sched_bot, &cid, &sched_pool, cfg)
                             .await
                             .is_ok()
                         {
-                            any_ok = true;
+                            deliveries.mark_delivered(ScheduledJob::MorningBrief, &date_str, cid);
                         }
-                    }
-                    if any_ok {
-                        last_brief = date_str.clone();
                     }
                 }
             }
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::portfolio) {
-                if clock.matches(now) && date_str != last_portfolio && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled portfolio overview ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    match build_networth_summary(&sched_pool, &cfg).await {
+                let matches = clock.matches(now);
+                let due =
+                    deliveries.outstanding(ScheduledJob::Portfolio, &date_str, &targets, matches);
+                if !due.is_empty() {
+                    match build_networth_summary(&sched_pool, cfg).await {
                         Ok(msg) => {
-                            if send_household_attempts(
+                            log_scheduled_job(ScheduledJob::Portfolio, clock, &tz_name, !matches);
+                            for cid in send_scheduled_recipients(
                                 &sched_bot,
-                                &cfg,
-                                msg,
+                                &due,
+                                &msg,
                                 SCHEDULED_SIGNAL_ATTEMPTS,
+                                "scheduled portfolio overview",
                             )
                             .await
                             {
-                                last_portfolio = date_str.clone();
+                                deliveries.mark_delivered(ScheduledJob::Portfolio, &date_str, cid);
                             }
                         }
                         Err(e) => {
@@ -525,31 +624,33 @@ pub async fn start_signal_client(
                                 "Signal: failed to build scheduled portfolio overview: {}",
                                 e
                             );
-                            let _ = send_household_attempts(
-                                &sched_bot,
-                                &cfg,
-                                format!("Portfolio overview failed: {}", e),
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                            )
-                            .await;
+                            if matches {
+                                let _ = send_scheduled_recipients(
+                                    &sched_bot,
+                                    &due,
+                                    &format!("Portfolio overview failed: {}", e),
+                                    SCHEDULED_SIGNAL_ATTEMPTS,
+                                    "scheduled portfolio overview error",
+                                )
+                                .await;
+                            }
                         }
                     }
                 }
             }
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::reflection) {
-                if clock.matches(now) && date_str != last_reflect && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled evening reflection ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    let mut any_ok = false;
-                    for cid in &targets {
-                        let scope = caller_scope(cfg, cid, cid.lookup_aci())
+                let matches = clock.matches(now);
+                let due =
+                    deliveries.outstanding(ScheduledJob::Reflection, &date_str, &targets, matches);
+                if !due.is_empty() {
+                    log_scheduled_job(ScheduledJob::Reflection, clock, &tz_name, !matches);
+                    for cid in due {
+                        let scope = caller_scope(cfg, &cid, cid.lookup_aci())
                             .expect("scheduled reflection targets are authorized");
                         if handle_reflect_trigger(
                             &sched_bot,
-                            cid,
+                            &cid,
                             &sched_pool,
                             &sched_llm,
                             sched_states.clone(),
@@ -560,11 +661,8 @@ pub async fn start_signal_client(
                         .await
                         .is_ok()
                         {
-                            any_ok = true;
+                            deliveries.mark_delivered(ScheduledJob::Reflection, &date_str, cid);
                         }
-                    }
-                    if any_ok {
-                        last_reflect = date_str;
                     }
                 }
             }
@@ -6805,5 +6903,62 @@ mod tests {
         assert!(!ok);
         assert_eq!(delivered, 0);
         assert_eq!(reminder_mappings(&pool).await, Vec::<(String, i64)>::new());
+    }
+
+    fn scheduled_sample_targets() -> (ChatId, ChatId, Vec<ChatId>) {
+        let alex = SignalRecipient::Direct {
+            aci: "aci-alex".to_string(),
+        };
+        let jordan = SignalRecipient::Direct {
+            aci: "aci-jordan".to_string(),
+        };
+        (alex.clone(), jordan.clone(), vec![alex, jordan])
+    }
+
+    #[test]
+    fn scheduled_jobs_retry_only_failed_recipients() {
+        let date = "2026-09-09";
+        let (alex, jordan, targets) = scheduled_sample_targets();
+        for job in [
+            ScheduledJob::MorningBrief,
+            ScheduledJob::Portfolio,
+            ScheduledJob::Reflection,
+        ] {
+            let mut deliveries = ScheduledDeliveries::default();
+            assert_eq!(deliveries.outstanding(job, date, &targets, true), targets);
+            deliveries.mark_delivered(job, date, alex.clone());
+
+            assert_eq!(
+                deliveries.outstanding(job, date, &targets, true),
+                vec![jordan.clone()]
+            );
+            assert_eq!(
+                deliveries.outstanding(job, date, &targets, false),
+                vec![jordan.clone()]
+            );
+
+            deliveries.mark_delivered(job, date, jordan.clone());
+            assert!(deliveries.outstanding(job, date, &targets, true).is_empty());
+            assert!(deliveries
+                .outstanding(job, date, &targets, false)
+                .is_empty());
+
+            assert_eq!(
+                deliveries.outstanding(job, "2026-09-10", &targets, true),
+                targets
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_jobs_do_not_start_without_targets() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let (_, _, targets) = scheduled_sample_targets();
+        assert!(deliveries
+            .outstanding(ScheduledJob::MorningBrief, "2026-09-09", &[], true)
+            .is_empty());
+        assert!(deliveries
+            .outstanding(ScheduledJob::MorningBrief, "2026-09-09", &targets, false)
+            .is_empty());
     }
 }
