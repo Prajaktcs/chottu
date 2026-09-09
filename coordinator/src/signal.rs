@@ -2480,6 +2480,120 @@ fn task_reminder_targets(config: &AppConfig, assigned_to: Option<&str>) -> Vec<C
     }
 }
 
+fn reminder_recipient_parts(cid: &ChatId) -> (&'static str, &str) {
+    match cid {
+        SignalRecipient::Direct { aci } => ("direct", aci.as_str()),
+        SignalRecipient::Group { group_id } => ("group", group_id.as_str()),
+    }
+}
+
+fn reminder_already_delivered(delivered: &[(String, String)], cid: &ChatId) -> bool {
+    let (kind, id) = reminder_recipient_parts(cid);
+    delivered.iter().any(|(k, i)| k == kind && i == id)
+}
+
+async fn load_due_reminder_deliveries(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<Vec<(String, String)>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT recipient_kind, recipient_id FROM task_due_reminder_deliveries WHERE task_id = ?",
+    )
+    .bind(task_id)
+    .fetch_all(pool)
+    .await
+}
+
+async fn persist_due_reminder_delivery(
+    pool: &SqlitePool,
+    task_id: &str,
+    cid: &ChatId,
+    message_timestamp: i64,
+) -> Result<(), sqlx::Error> {
+    let (kind, id) = reminder_recipient_parts(cid);
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO task_signal_messages \
+         (task_id, recipient_kind, recipient_id, message_timestamp) \
+         VALUES (?, ?, ?, ?)",
+    )
+    .bind(task_id)
+    .bind(kind)
+    .bind(id)
+    .bind(message_timestamp)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO task_due_reminder_deliveries \
+         (task_id, recipient_kind, recipient_id) \
+         VALUES (?, ?, ?)",
+    )
+    .bind(task_id)
+    .bind(kind)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn clear_due_reminder_deliveries(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("DELETE FROM task_due_reminder_deliveries WHERE task_id = ?")
+        .bind(task_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Send a due reminder to each target that has no delivery in the current cycle.
+/// Successful recipients keep their `task_signal_messages` row for reply correlation.
+/// Returns false when any pending recipient fails so the task-level claim can reset.
+async fn fan_out_due_task_reminder<F, Fut>(
+    pool: &SqlitePool,
+    task_id: &str,
+    targets: &[ChatId],
+    mut send: F,
+) -> Result<bool, sqlx::Error>
+where
+    F: FnMut(ChatId) -> Fut,
+    Fut: std::future::Future<Output = Result<i64, SignalError>>,
+{
+    if targets.is_empty() {
+        return Ok(false);
+    }
+    let delivered = load_due_reminder_deliveries(pool, task_id).await?;
+    let mut send_ok = true;
+    for cid in targets {
+        if reminder_already_delivered(&delivered, cid) {
+            continue;
+        }
+        match send(cid.clone()).await {
+            Err(error) => {
+                send_ok = false;
+                eprintln!(
+                    "Signal: failed to send task reminder {} to {}: {:?}",
+                    task_id, cid, error
+                );
+            }
+            Ok(message_timestamp) => {
+                if let Err(error) =
+                    persist_due_reminder_delivery(pool, task_id, cid, message_timestamp).await
+                {
+                    send_ok = false;
+                    eprintln!(
+                        "Signal: failed to persist reminder correlation for {} to {}: {:?}",
+                        task_id, cid, error
+                    );
+                }
+            }
+        }
+    }
+    Ok(send_ok)
+}
+
 async fn poll_due_task_reminders(
     bot: &Bot,
     pool: &SqlitePool,
@@ -2546,46 +2660,12 @@ async fn poll_due_task_reminders(
             task_complete_snooze_help(&short_id)
         );
         let targets = task_reminder_targets(config, assigned_to.as_deref());
-
-        let mut send_ok = !targets.is_empty();
-        for cid in &targets {
-            match send_signal(bot, cid, msg.clone()).await {
-                Err(error) => {
-                    send_ok = false;
-                    eprintln!(
-                        "Signal: failed to send task reminder {} to {}: {:?}",
-                        id, cid, error
-                    );
-                }
-                Ok(message_timestamp) => {
-                    let (recipient_kind, recipient_id) = match cid {
-                        SignalRecipient::Direct { aci } => ("direct", aci.as_str()),
-                        SignalRecipient::Group { group_id } => ("group", group_id.as_str()),
-                    };
-                    match sqlx::query(
-                        "INSERT OR IGNORE INTO task_signal_messages \
-                         (task_id, recipient_kind, recipient_id, message_timestamp) \
-                         VALUES (?, ?, ?, ?)",
-                    )
-                    .bind(&id)
-                    .bind(recipient_kind)
-                    .bind(recipient_id)
-                    .bind(message_timestamp)
-                    .execute(pool)
-                    .await
-                    {
-                        Ok(_) => {}
-                        Err(error) => {
-                            send_ok = false;
-                            eprintln!(
-                                "Signal: failed to persist reminder correlation for {} to {}: {:?}",
-                                id, cid, error
-                            );
-                        }
-                    }
-                }
-            }
-        }
+        let send_ok = fan_out_due_task_reminder(pool, &id, &targets, |cid| {
+            let bot = bot.clone();
+            let msg = msg.clone();
+            async move { send_signal(&bot, &cid, msg).await }
+        })
+        .await?;
 
         if !send_ok {
             eprintln!("Signal: failed to send task reminder {}: no delivery", id);
@@ -2718,7 +2798,12 @@ async fn snooze_task_by_id(
             .push(" OR assigned_to IS NULL)");
     }
     match update.build().execute(pool).await {
-        Ok(result) if result.rows_affected() == 1 => TaskMutateOutcome::Snoozed { title, due },
+        Ok(result) if result.rows_affected() == 1 => {
+            if let Err(error) = clear_due_reminder_deliveries(pool, task_id).await {
+                eprintln!("Failed to clear due-reminder deliveries for {task_id}: {error:?}");
+            }
+            TaskMutateOutcome::Snoozed { title, due }
+        }
         Ok(_) => TaskMutateOutcome::NotFound,
         Err(error) => {
             eprintln!("Failed to snooze task: {error:?}");
@@ -6396,5 +6481,131 @@ mod tests {
             caption: None,
         };
         assert!(!bad_file.content_type.starts_with("image/") || bad_file.id.is_empty());
+    }
+
+    async fn reminder_fanout_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE task_signal_messages (
+                task_id TEXT NOT NULL,
+                recipient_kind TEXT NOT NULL,
+                recipient_id TEXT NOT NULL,
+                message_timestamp INTEGER NOT NULL,
+                PRIMARY KEY (recipient_kind, recipient_id, message_timestamp)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE task_due_reminder_deliveries (
+                task_id TEXT NOT NULL,
+                recipient_kind TEXT NOT NULL,
+                recipient_id TEXT NOT NULL,
+                PRIMARY KEY (task_id, recipient_kind, recipient_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn reminder_mappings(pool: &SqlitePool) -> Vec<(String, i64)> {
+        sqlx::query_as(
+            "SELECT recipient_id, message_timestamp FROM task_signal_messages
+             WHERE task_id = 'task-1' ORDER BY recipient_id, message_timestamp",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn due_reminder_partial_success_does_not_resend() {
+        let pool = reminder_fanout_pool().await;
+        let alex = SignalRecipient::Direct {
+            aci: "aci-alex".to_string(),
+        };
+        let jordan = SignalRecipient::Direct {
+            aci: "aci-jordan".to_string(),
+        };
+        let targets = vec![alex.clone(), jordan.clone()];
+        let sent = std::sync::Mutex::new(Vec::<ChatId>::new());
+
+        let first = fan_out_due_task_reminder(&pool, "task-1", &targets, |cid| {
+            let outcome = match &cid {
+                SignalRecipient::Direct { aci } if aci == "aci-alex" => Ok(100),
+                _ => Err(SignalError::Eof),
+            };
+            sent.lock().unwrap().push(cid);
+            async move { outcome }
+        })
+        .await
+        .unwrap();
+        assert!(!first);
+        assert_eq!(*sent.lock().unwrap(), vec![alex.clone(), jordan.clone()]);
+        assert_eq!(
+            reminder_mappings(&pool).await,
+            vec![("aci-alex".into(), 100)]
+        );
+
+        sent.lock().unwrap().clear();
+        let second = fan_out_due_task_reminder(&pool, "task-1", &targets, |cid| {
+            sent.lock().unwrap().push(cid.clone());
+            async move { Ok(200) }
+        })
+        .await
+        .unwrap();
+        assert!(second);
+        assert_eq!(*sent.lock().unwrap(), vec![jordan.clone()]);
+        assert_eq!(
+            reminder_mappings(&pool).await,
+            vec![("aci-alex".into(), 100), ("aci-jordan".into(), 200)]
+        );
+
+        sent.lock().unwrap().clear();
+        let third = fan_out_due_task_reminder(&pool, "task-1", &targets, |cid| {
+            sent.lock().unwrap().push(cid);
+            async move { Ok(300) }
+        })
+        .await
+        .unwrap();
+        assert!(third);
+        assert!(sent.lock().unwrap().is_empty());
+        assert_eq!(
+            reminder_mappings(&pool).await,
+            vec![("aci-alex".into(), 100), ("aci-jordan".into(), 200)]
+        );
+
+        clear_due_reminder_deliveries(&pool, "task-1")
+            .await
+            .unwrap();
+        sent.lock().unwrap().clear();
+        let after_snooze = fan_out_due_task_reminder(&pool, "task-1", &targets, |cid| {
+            let ts = match &cid {
+                SignalRecipient::Direct { aci } if aci == "aci-alex" => 300,
+                _ => 400,
+            };
+            sent.lock().unwrap().push(cid);
+            async move { Ok(ts) }
+        })
+        .await
+        .unwrap();
+        assert!(after_snooze);
+        assert_eq!(*sent.lock().unwrap(), vec![alex, jordan]);
+        assert_eq!(
+            reminder_mappings(&pool).await,
+            vec![
+                ("aci-alex".into(), 100),
+                ("aci-alex".into(), 300),
+                ("aci-jordan".into(), 200),
+                ("aci-jordan".into(), 400)
+            ]
+        );
     }
 }
