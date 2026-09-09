@@ -7,8 +7,12 @@ default:
 # Create config.yaml and template .env file if they do not exist
 setup:
     #!/usr/bin/env bash
+    set -euo pipefail
     if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git config --local core.hooksPath .githooks
+        if ! git config --local core.hooksPath .githooks; then
+            echo "Failed to install git hooks." >&2
+            exit 1
+        fi
         echo "Git hooks: .githooks (pre-commit → just lint, pre-push → just test)"
     else
         echo "Skipping git hooks install (not inside a git worktree)."
