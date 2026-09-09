@@ -3,7 +3,7 @@
 //! Metrics are computed locally from structured score drafts. Live OpenRouter
 //! calls stay in the `research_bench` binary — run that on a machine with keys.
 
-use crate::{normalize_ticker, Conviction, ScoredCandidate, ScoreReport, UniverseEntry};
+use crate::{normalize_ticker, Conviction, ScoreReport, ScoredCandidate, UniverseEntry};
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -41,8 +41,8 @@ pub struct ResearchFixture {
 impl ResearchFixture {
     pub fn load(path: impl AsRef<Path>) -> Result<Self, anyhow::Error> {
         let path = path.as_ref();
-        let raw = fs::read_to_string(path)
-            .with_context(|| format!("read fixture {}", path.display()))?;
+        let raw =
+            fs::read_to_string(path).with_context(|| format!("read fixture {}", path.display()))?;
         let fix: Self = serde_json::from_str(&raw)
             .with_context(|| format!("parse fixture {}", path.display()))?;
         fix.validate()?;
@@ -252,9 +252,8 @@ pub fn evaluate_scorer(
     };
 
     // Composite: pairwise ordering is the strongest gold signal; then pass labels; then top-k.
-    let composite = 0.5 * pairwise_order_accuracy
-        + 0.3 * pass_label_accuracy
-        + 0.2 * interest_in_top_k;
+    let composite =
+        0.5 * pairwise_order_accuracy + 0.3 * pass_label_accuracy + 0.2 * interest_in_top_k;
 
     ScorerMetrics {
         model_id: model_id.to_string(),
@@ -272,10 +271,7 @@ pub fn evaluate_scorer(
     }
 }
 
-pub fn compare_scorers(
-    baseline: ScorerMetrics,
-    candidate: ScorerMetrics,
-) -> BenchComparison {
+pub fn compare_scorers(baseline: ScorerMetrics, candidate: ScorerMetrics) -> BenchComparison {
     let delta = candidate.composite - baseline.composite;
     let mut notes = Vec::new();
     if candidate.pairwise_order_accuracy + 1e-9 < baseline.pairwise_order_accuracy {
@@ -289,7 +285,9 @@ pub fn compare_scorers(
     } else if delta < -0.02 {
         notes.push("Baseline composite ahead — keep current panel scorer.".into());
     } else {
-        notes.push("Composites within 0.02 — treat as inconclusive; prefer cheaper model if tied.".into());
+        notes.push(
+            "Composites within 0.02 — treat as inconclusive; prefer cheaper model if tied.".into(),
+        );
     }
 
     BenchComparison {

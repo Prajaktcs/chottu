@@ -28,10 +28,14 @@ async fn main() -> Result<()> {
     // Load golden dataset from evals/dataset.json
     let dataset_path = Path::new("evals/dataset.json");
     if !dataset_path.exists() {
-        return Err(anyhow::anyhow!("Golden dataset not found at {:?}", dataset_path));
+        return Err(anyhow::anyhow!(
+            "Golden dataset not found at {:?}",
+            dataset_path
+        ));
     }
     let dataset_str = fs::read_to_string(dataset_path).context("Failed to read golden dataset")?;
-    let test_cases: Vec<TestCase> = serde_json::from_str(&dataset_str).context("Failed to deserialize golden dataset")?;
+    let test_cases: Vec<TestCase> =
+        serde_json::from_str(&dataset_str).context("Failed to deserialize golden dataset")?;
     println!("Loaded {} evaluation test cases.", test_cases.len());
 
     // Setup local LLM client
@@ -41,7 +45,10 @@ async fn main() -> Result<()> {
         .parse::<u16>()
         .unwrap_or(11434);
     let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5:9b".to_string());
-    println!("Initializing Ollama LLM client for evaluation: {}:{} / model: {}", host, port, model);
+    println!(
+        "Initializing Ollama LLM client for evaluation: {}:{} / model: {}",
+        host, port, model
+    );
     let llm = ChotuLlm::new(&host, port, &model);
 
     let mut successes = 0;
@@ -55,7 +62,10 @@ async fn main() -> Result<()> {
             body_preview: Some(tc.body_preview.clone()),
         };
 
-        print!("[{}] Expected: {}... ", tc.test_id, tc.expected_classification);
+        print!(
+            "[{}] Expected: {}... ",
+            tc.test_id, tc.expected_classification
+        );
         std::io::Write::flush(&mut std::io::stdout())?;
 
         match llm.classify_email(&metadata, &[]).await {
@@ -64,7 +74,7 @@ async fn main() -> Result<()> {
                     .as_str()
                     .unwrap_or("")
                     .to_string();
-                
+
                 if actual_str == tc.expected_classification {
                     println!("MATCH (Reason: {})", res.reason);
                     successes += 1;
@@ -84,7 +94,12 @@ async fn main() -> Result<()> {
         0.0
     };
     println!("\nEvaluation Run Completed.");
-    println!("Triage Accuracy: {:.2}% ({}/{})", triage_accuracy * 100.0, successes, total);
+    println!(
+        "Triage Accuracy: {:.2}% ({}/{})",
+        triage_accuracy * 100.0,
+        successes,
+        total
+    );
 
     // Save validation log to database
     let eval_id = uuid::Uuid::new_v4().to_string();
@@ -110,7 +125,7 @@ async fn main() -> Result<()> {
             threshold * 100.0
         ));
     }
-    
+
     println!("Triage accuracy meets requirements. Build passes!");
 
     Ok(())

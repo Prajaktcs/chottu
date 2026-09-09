@@ -119,11 +119,10 @@ pub async fn effective_budgets(
         }
     }
 
-    let overrides: Vec<(String, f64)> = sqlx::query_as(
-        "SELECT category, limit_amount FROM spend_budget_overrides",
-    )
-    .fetch_all(pool)
-    .await?;
+    let overrides: Vec<(String, f64)> =
+        sqlx::query_as("SELECT category, limit_amount FROM spend_budget_overrides")
+            .fetch_all(pool)
+            .await?;
 
     for (cat, limit) in overrides {
         if limit <= 0.0 {
@@ -168,10 +167,7 @@ pub async fn set_budget_override(
 }
 
 /// Remove a Telegram override (falls back to YAML if present).
-pub async fn clear_budget_override(
-    pool: &SqlitePool,
-    category: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn clear_budget_override(pool: &SqlitePool, category: &str) -> Result<bool, sqlx::Error> {
     let norm = normalize_category(category);
     let result = sqlx::query("DELETE FROM spend_budget_overrides WHERE lower(category) = ?")
         .bind(&norm)
@@ -262,11 +258,7 @@ pub async fn compute_budget_progress(
 }
 
 /// Format pull-surface Markdown for `/budget` and `/monthly` append.
-pub fn format_budget_progress_markdown(
-    month: &str,
-    base: &str,
-    rows: &[BudgetProgress],
-) -> String {
+pub fn format_budget_progress_markdown(month: &str, base: &str, rows: &[BudgetProgress]) -> String {
     if rows.is_empty() {
         return format!(
             "📊 *Budgets · {}* ({})\n\n_No category budgets configured. \

@@ -203,9 +203,15 @@ pub struct IntentClassification {
 pub enum UserIntent {
     Status,
     Brief,
-    Calendar { window: String },
-    Trends { days: Option<i64> },
-    Tasks { filter: String },
+    Calendar {
+        window: String,
+    },
+    Trends {
+        days: Option<i64>,
+    },
+    Tasks {
+        filter: String,
+    },
     TaskAdd {
         member_id: Option<String>,
         title: String,
@@ -221,13 +227,21 @@ pub enum UserIntent {
         time: Option<String>,
     },
     Networth,
-    Monthly { yyyy_mm: Option<String> },
+    Monthly {
+        yyyy_mm: Option<String>,
+    },
     Budget,
-    Memory { query: String },
+    Memory {
+        query: String,
+    },
     /// Weekly training plan; `regenerate` forces `/plan new`.
-    Plan { regenerate: bool },
+    Plan {
+        regenerate: bool,
+    },
     Help,
-    Unknown { clarify_question: String },
+    Unknown {
+        clarify_question: String,
+    },
 }
 
 impl IntentClassification {
@@ -841,10 +855,7 @@ in YYYY-MM-DD form from the email metadata and body.";
     }
 
     /// Resolve meal text + optional log day/time from a food description (for `/food`).
-    pub async fn extract_food_log_context(
-        &self,
-        text: &str,
-    ) -> Result<FoodLogContext, LlmError> {
+    pub async fn extract_food_log_context(&self, text: &str) -> Result<FoodLogContext, LlmError> {
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let system_prompt = "\
 You extract food-log fields from a short user message.\
@@ -914,11 +925,7 @@ impl OpenRouterClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, LlmError> {
-        let agent = self
-            .client
-            .agent(model)
-            .preamble(system_prompt)
-            .build();
+        let agent = self.client.agent(model).preamble(system_prompt).build();
 
         agent
             .prompt(user_prompt)
@@ -1073,10 +1080,9 @@ Do not include any explanation or markdown formatting outside the JSON block.";
             .await
             .map_err(|e| LlmError::Client(format!("Gemini request failed: {:?}", e)))?;
 
-        let res_json: serde_json::Value = res
-            .json()
-            .await
-            .map_err(|e| LlmError::Client(format!("Failed to parse Gemini response JSON: {:?}", e)))?;
+        let res_json: serde_json::Value = res.json().await.map_err(|e| {
+            LlmError::Client(format!("Failed to parse Gemini response JSON: {:?}", e))
+        })?;
 
         // Extract text from the response
         let text_response = res_json["candidates"][0]["content"]["parts"][0]["text"]
@@ -1311,7 +1317,10 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let text = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Client(format!("Gemini ask returned {}: {}", status, text)));
+            return Err(LlmError::Client(format!(
+                "Gemini ask returned {}: {}",
+                status, text
+            )));
         }
 
         let res_json: serde_json::Value = resp
@@ -1448,16 +1457,13 @@ mod tests {
 
     #[test]
     fn test_parse_intent_classification_samples() {
-        let status: IntentClassification = serde_json::from_str(
-            r#"{"intent":"STATUS","reason":"asks for today overview"}"#,
-        )
-        .unwrap();
+        let status: IntentClassification =
+            serde_json::from_str(r#"{"intent":"STATUS","reason":"asks for today overview"}"#)
+                .unwrap();
         assert_eq!(status.into_user_intent(), UserIntent::Status);
 
-        let brief: IntentClassification = serde_json::from_str(
-            r#"{"intent":"BRIEF","reason":"morning digest"}"#,
-        )
-        .unwrap();
+        let brief: IntentClassification =
+            serde_json::from_str(r#"{"intent":"BRIEF","reason":"morning digest"}"#).unwrap();
         assert_eq!(brief.into_user_intent(), UserIntent::Brief);
 
         let calendar: IntentClassification = serde_json::from_str(
@@ -1482,10 +1488,8 @@ mod tests {
             }
         );
 
-        let calendar_default: IntentClassification = serde_json::from_str(
-            r#"{"intent":"CALENDAR","reason":"what's on today"}"#,
-        )
-        .unwrap();
+        let calendar_default: IntentClassification =
+            serde_json::from_str(r#"{"intent":"CALENDAR","reason":"what's on today"}"#).unwrap();
         assert_eq!(
             calendar_default.into_user_intent(),
             UserIntent::Calendar {
@@ -1493,10 +1497,9 @@ mod tests {
             }
         );
 
-        let trends: IntentClassification = serde_json::from_str(
-            r#"{"intent":"TRENDS","days":14,"reason":"two week trends"}"#,
-        )
-        .unwrap();
+        let trends: IntentClassification =
+            serde_json::from_str(r#"{"intent":"TRENDS","days":14,"reason":"two week trends"}"#)
+                .unwrap();
         assert_eq!(
             trends.into_user_intent(),
             UserIntent::Trends { days: Some(14) }
@@ -1587,10 +1590,9 @@ mod tests {
             }
         );
 
-        let monthly: IntentClassification = serde_json::from_str(
-            r#"{"intent":"MONTHLY","month":"2026-07","reason":"July spend"}"#,
-        )
-        .unwrap();
+        let monthly: IntentClassification =
+            serde_json::from_str(r#"{"intent":"MONTHLY","month":"2026-07","reason":"July spend"}"#)
+                .unwrap();
         assert_eq!(
             monthly.into_user_intent(),
             UserIntent::Monthly {
@@ -1598,16 +1600,12 @@ mod tests {
             }
         );
 
-        let budget: IntentClassification = serde_json::from_str(
-            r#"{"intent":"BUDGET","reason":"food budget progress"}"#,
-        )
-        .unwrap();
+        let budget: IntentClassification =
+            serde_json::from_str(r#"{"intent":"BUDGET","reason":"food budget progress"}"#).unwrap();
         assert_eq!(budget.into_user_intent(), UserIntent::Budget);
 
-        let plan: IntentClassification = serde_json::from_str(
-            r#"{"intent":"PLAN","reason":"show training plan"}"#,
-        )
-        .unwrap();
+        let plan: IntentClassification =
+            serde_json::from_str(r#"{"intent":"PLAN","reason":"show training plan"}"#).unwrap();
         assert_eq!(
             plan.into_user_intent(),
             UserIntent::Plan { regenerate: false }
@@ -1673,8 +1671,14 @@ mod tests {
         }"#;
         let reference: PersonalReferenceExtraction = serde_json::from_str(ref_json).unwrap();
         assert_eq!(reference.title, "Chef John's lasagna recipe");
-        assert_eq!(reference.url, Some("https://example.com/lasagna".to_string()));
-        assert_eq!(reference.notes, "Remember to use fresh mozzarella and double the basil.");
+        assert_eq!(
+            reference.url,
+            Some("https://example.com/lasagna".to_string())
+        );
+        assert_eq!(
+            reference.notes,
+            "Remember to use fresh mozzarella and double the basil."
+        );
     }
 
     #[test]
@@ -1682,8 +1686,12 @@ mod tests {
         let llm = ChotuLlm::new("http://localhost", 11434, "test-model");
         assert!(llm.prompt_path.is_none());
 
-        let llm = llm.with_prompt_path(Some("prompts/email_classifier_system_prompt.txt".to_string()));
-        assert_eq!(llm.prompt_path, Some("prompts/email_classifier_system_prompt.txt".to_string()));
+        let llm = llm.with_prompt_path(Some(
+            "prompts/email_classifier_system_prompt.txt".to_string(),
+        ));
+        assert_eq!(
+            llm.prompt_path,
+            Some("prompts/email_classifier_system_prompt.txt".to_string())
+        );
     }
 }
-

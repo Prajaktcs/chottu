@@ -332,7 +332,8 @@ pub async fn start_redirect_listener(port: u16) -> Result<String, anyhow::Error>
 
             // For non-oauth/helper requests, respond to avoid browser hangs
             if request.contains("GET /favicon.ico") {
-                let response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let response =
+                    "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 let _ = stream.write_all(response.as_bytes()).await;
                 let _ = stream.flush().await;
             } else if request.starts_with("GET ") {

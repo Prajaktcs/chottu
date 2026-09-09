@@ -6,21 +6,21 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 
 use chotu_common::{
-    answer_memory_query, build_calendar_client, clear_budget_override, complete_all_open_tasks,
-    compose_calendar_agenda, compute_budget_progress, current_budget_month, default_member_id,
-    display_category, ensure_food_mutation_allowed, exchange_google_code,
-    fetch_exchange_rates, fetch_stock_quotes_near_cost, format_budget_progress_markdown,
-    has_signal_delivery, is_signal_conversation_allowed, list_completable_open_tasks,
+    answer_memory_query, assign_food_tags, build_calendar_client, clear_budget_override,
+    complete_all_open_tasks, compose_calendar_agenda, compute_budget_progress,
+    current_budget_month, default_member_id, delete_food_log_tags,
+    delete_food_log_tags_for_member_day, display_category, effective_food_time,
+    ensure_food_mutation_allowed, exchange_google_code, fetch_exchange_rates,
+    fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_signal_delivery,
+    insert_food_log_tags, is_signal_conversation_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_signal_aci,
-    effective_food_time, parse_due_phrase_tz, pending_budget_alerts, resolve_food_log_timing,
-    assign_food_tags, delete_food_log_tags, delete_food_log_tags_for_member_day,
-    insert_food_log_tags, reschedule_at, save_calendar_refresh_token, save_google_refresh_token,
-    save_health_refresh_token, schedule_at, set_budget_override, spawn_background_reindex,
-    split_task_add_args, start_redirect_listener,
-    signal_aci_for_member, signal_delivery_targets, AppConfig, AssignedFoodTags,
-    CalendarWindow, ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient,
-    InvestmentPhilosophy, MemoryIndex, SignalClient, SignalError, SignalInbound, SignalRecipient,
-    UserIntent, TASK_CALENDAR_DURATION_MINUTES,
+    parse_due_phrase_tz, pending_budget_alerts, reschedule_at, resolve_food_log_timing,
+    save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token, schedule_at,
+    set_budget_override, signal_aci_for_member, signal_delivery_targets, spawn_background_reindex,
+    split_task_add_args, start_redirect_listener, AppConfig, AssignedFoodTags, CalendarWindow,
+    ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient, InvestmentPhilosophy,
+    MemoryIndex, SignalClient, SignalError, SignalInbound, SignalRecipient, UserIntent,
+    TASK_CALENDAR_DURATION_MINUTES,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 
@@ -29,10 +29,28 @@ type ChatId = SignalRecipient;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
-    Help, Food(String), Status, Plan(String), Brief, Cal(String), Trends(String),
-    Tasks(String), Task(String), Memory(String), Reflect, Chat, Whoami,
-    Research(String), Sync, Login(String), Clearfood(String), Adjustfood(String),
-    Undofood(String), Networth, Monthly(String), Budget(String),
+    Help,
+    Food(String),
+    Status,
+    Plan(String),
+    Brief,
+    Cal(String),
+    Trends(String),
+    Tasks(String),
+    Task(String),
+    Memory(String),
+    Reflect,
+    Chat,
+    Whoami,
+    Research(String),
+    Sync,
+    Login(String),
+    Clearfood(String),
+    Adjustfood(String),
+    Undofood(String),
+    Networth,
+    Monthly(String),
+    Budget(String),
 }
 
 const HELP_TEXT: &str = "\
@@ -118,8 +136,9 @@ impl CallerScope {
 
     fn allows_task_assignee(&self, assigned_to: Option<&str>) -> bool {
         match self {
-            Self::LinkedDm { member_id } => assigned_to
-                .is_none_or(|assignee| member_id.eq_ignore_ascii_case(assignee)),
+            Self::LinkedDm { member_id } => {
+                assigned_to.is_none_or(|assignee| member_id.eq_ignore_ascii_case(assignee))
+            }
             Self::HouseholdGroup => true,
         }
     }
@@ -130,18 +149,20 @@ fn caller_scope(config: &AppConfig, chat_id: &ChatId, sender_aci: &str) -> Optio
         return None;
     }
     match chat_id {
-        SignalRecipient::Direct { .. } => member_for_signal_aci(config, sender_aci).map(|member| {
-            CallerScope::LinkedDm {
+        SignalRecipient::Direct { .. } => {
+            member_for_signal_aci(config, sender_aci).map(|member| CallerScope::LinkedDm {
                 member_id: member.id.clone(),
-            }
-        }),
+            })
+        }
         SignalRecipient::Group { .. } => Some(CallerScope::HouseholdGroup),
     }
 }
 
 fn oauth_member_target(scope: &CallerScope, requested: &str) -> Result<String, &'static str> {
     match scope {
-        CallerScope::HouseholdGroup => Err("OAuth setup is only available in an authorized direct conversation."),
+        CallerScope::HouseholdGroup => {
+            Err("OAuth setup is only available in an authorized direct conversation.")
+        }
         CallerScope::LinkedDm { member_id }
             if requested.trim().is_empty() || member_id.eq_ignore_ascii_case(requested.trim()) =>
         {
@@ -166,7 +187,11 @@ fn resolve_task_target(
             _ => Ok(Some(member_id.clone())),
         },
         CallerScope::HouseholdGroup => Ok(requested.or_else(|| {
-            config.family.members.first().map(|member| member.id.clone())
+            config
+                .family
+                .members
+                .first()
+                .map(|member| member.id.clone())
         })),
     }
 }
@@ -254,7 +279,10 @@ async fn send_household_attempts(
 const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
 
 fn signal_error_is_retryable(err: &SignalError) -> bool {
-    matches!(err, SignalError::Io(_) | SignalError::Eof | SignalError::Reconnecting)
+    matches!(
+        err,
+        SignalError::Io(_) | SignalError::Eof | SignalError::Reconnecting
+    )
 }
 
 async fn retry_scheduled_push<F, Fut>(
@@ -335,7 +363,14 @@ async fn push_scheduled_brief(
     let _ = send_signal(bot, chat_id, "Building morning brief...").await;
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
-    send_markdown_retry(bot, chat_id, report, SCHEDULED_SIGNAL_ATTEMPTS, "scheduled morning brief").await
+    send_markdown_retry(
+        bot,
+        chat_id,
+        report,
+        SCHEDULED_SIGNAL_ATTEMPTS,
+        "scheduled morning brief",
+    )
+    .await
 }
 
 async fn reject_unauthorized_chat(bot: &Bot, chat_id: &ChatId) -> Result<(), SignalError> {
@@ -447,10 +482,16 @@ pub async fn start_signal_client(
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::morning_brief) {
                 if clock.matches(now) && date_str != last_brief && !targets.is_empty() {
-                    println!("Signal: scheduled morning brief ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
+                    println!(
+                        "Signal: scheduled morning brief ({:02}:{:02} {}).",
+                        clock.hour, clock.minute, tz_name
+                    );
                     let mut any_ok = false;
                     for cid in &targets {
-                        if push_scheduled_brief(&sched_bot, cid, &sched_pool, &cfg).await.is_ok() {
+                        if push_scheduled_brief(&sched_bot, cid, &sched_pool, &cfg)
+                            .await
+                            .is_ok()
+                        {
                             any_ok = true;
                         }
                     }
@@ -462,15 +503,28 @@ pub async fn start_signal_client(
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::portfolio) {
                 if clock.matches(now) && date_str != last_portfolio && !targets.is_empty() {
-                    println!("Signal: scheduled portfolio overview ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
+                    println!(
+                        "Signal: scheduled portfolio overview ({:02}:{:02} {}).",
+                        clock.hour, clock.minute, tz_name
+                    );
                     match build_networth_summary(&sched_pool, &cfg).await {
                         Ok(msg) => {
-                            if send_household_attempts(&sched_bot, &cfg, msg, SCHEDULED_SIGNAL_ATTEMPTS).await {
+                            if send_household_attempts(
+                                &sched_bot,
+                                &cfg,
+                                msg,
+                                SCHEDULED_SIGNAL_ATTEMPTS,
+                            )
+                            .await
+                            {
                                 last_portfolio = date_str.clone();
                             }
                         }
                         Err(e) => {
-                            eprintln!("Signal: failed to build scheduled portfolio overview: {}", e);
+                            eprintln!(
+                                "Signal: failed to build scheduled portfolio overview: {}",
+                                e
+                            );
                             let _ = send_household_attempts(
                                 &sched_bot,
                                 &cfg,
@@ -485,7 +539,10 @@ pub async fn start_signal_client(
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::reflection) {
                 if clock.matches(now) && date_str != last_reflect && !targets.is_empty() {
-                    println!("Signal: scheduled evening reflection ({:02}:{:02} {}).", clock.hour, clock.minute, tz_name);
+                    println!(
+                        "Signal: scheduled evening reflection ({:02}:{:02} {}).",
+                        clock.hour, clock.minute, tz_name
+                    );
                     let mut any_ok = false;
                     for cid in &targets {
                         let scope = caller_scope(cfg, cid, cid.lookup_aci())
@@ -566,20 +623,16 @@ pub async fn start_signal_client(
         config: shared_config,
     };
     let concurrency = Arc::new(Semaphore::new(MAX_CONCURRENT_INBOUND_HANDLERS));
-    let mut conversations: HashMap<
-        ChatId,
-        mpsc::UnboundedSender<(SignalInbound, CallerScope)>,
-    > = HashMap::new();
+    let mut conversations: HashMap<ChatId, mpsc::UnboundedSender<(SignalInbound, CallerScope)>> =
+        HashMap::new();
 
     loop {
         match inbound.recv().await {
             Ok(message) => {
                 let conversation = message.recipient.clone();
-                let Some(scope) = caller_scope(
-                    context.config.as_ref(),
-                    &conversation,
-                    &message.sender_aci,
-                ) else {
+                let Some(scope) =
+                    caller_scope(context.config.as_ref(), &conversation, &message.sender_aci)
+                else {
                     if let Ok(permit) = concurrency.clone().try_acquire_owned() {
                         let bot = context.bot.clone();
                         tokio::spawn(async move {
@@ -673,7 +726,6 @@ async fn handle_inbound(
     }
 }
 
-
 #[allow(clippy::too_many_arguments)]
 async fn handle_command(
     bot: Bot,
@@ -688,79 +740,169 @@ async fn handle_command(
     shared_config: SharedConfig,
     scope: CallerScope,
 ) -> Result<(), SignalError> {
-    println!("Signal: Received command from {} in {}", sender_aci, chat_id);
+    println!(
+        "Signal: Received command from {} in {}",
+        sender_aci, chat_id
+    );
     {
         let mut s = states.write().await;
         s.insert(chat_id.clone(), ConversationState::Idle);
     }
     let config = shared_config.as_ref();
     match cmd {
-        Command::Help => { send_signal(&bot, &chat_id, HELP_TEXT).await?; }
-        Command::Food(args) => { handle_food_log(&bot, &chat_id, args, &pool, &llm, &gemini_client, &config).await?; }
-        Command::Status => { handle_status(&bot, &chat_id, &pool, &config, &llm).await?; }
-        Command::Plan(args) => { handle_plan(&bot, &chat_id, args, &pool, &config, &llm).await?; }
-        Command::Brief => { handle_brief(&bot, &chat_id, &pool, &config).await?; }
-        Command::Cal(args) => { handle_cal(&bot, &chat_id, args, &config).await?; }
-        Command::Trends(args) => { handle_trends(&bot, &chat_id, args, &pool, &config, &llm).await?; }
-        Command::Tasks(args) | Command::Task(args) => { handle_tasks(&bot, &chat_id, args, &pool, config, &scope).await?; }
-        Command::Memory(args) => { handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?; }
-        Command::Reflect => { handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1).await?; }
-        Command::Chat => {
-            send_signal(&bot, &chat_id, format!("Current Signal conversation: {chat_id}")).await?;
+        Command::Help => {
+            send_signal(&bot, &chat_id, HELP_TEXT).await?;
         }
-        Command::Whoami => { handle_whoami(&bot, &chat_id, &scope, config).await?; }
+        Command::Food(args) => {
+            handle_food_log(&bot, &chat_id, args, &pool, &llm, &gemini_client, &config).await?;
+        }
+        Command::Status => {
+            handle_status(&bot, &chat_id, &pool, &config, &llm).await?;
+        }
+        Command::Plan(args) => {
+            handle_plan(&bot, &chat_id, args, &pool, &config, &llm).await?;
+        }
+        Command::Brief => {
+            handle_brief(&bot, &chat_id, &pool, &config).await?;
+        }
+        Command::Cal(args) => {
+            handle_cal(&bot, &chat_id, args, &config).await?;
+        }
+        Command::Trends(args) => {
+            handle_trends(&bot, &chat_id, args, &pool, &config, &llm).await?;
+        }
+        Command::Tasks(args) | Command::Task(args) => {
+            handle_tasks(&bot, &chat_id, args, &pool, config, &scope).await?;
+        }
+        Command::Memory(args) => {
+            handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
+        }
+        Command::Reflect => {
+            handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1).await?;
+        }
+        Command::Chat => {
+            send_signal(
+                &bot,
+                &chat_id,
+                format!("Current Signal conversation: {chat_id}"),
+            )
+            .await?;
+        }
+        Command::Whoami => {
+            handle_whoami(&bot, &chat_id, &scope, config).await?;
+        }
         Command::Research(args) => {
-            let targets = if args.trim().is_empty() { None } else { Some(args.as_str()) };
-            if let Err(e) = run_and_log_stock_research(&bot, &chat_id, &pool, &researcher, config.investment_philosophy.as_ref(), targets).await {
+            let targets = if args.trim().is_empty() {
+                None
+            } else {
+                Some(args.as_str())
+            };
+            if let Err(e) = run_and_log_stock_research(
+                &bot,
+                &chat_id,
+                &pool,
+                &researcher,
+                config.investment_philosophy.as_ref(),
+                targets,
+            )
+            .await
+            {
                 eprintln!("Signal: manual stock research trigger failed: {:?}", e);
                 let _ = send_signal(&bot, &chat_id, format!("Stock research failed: {}", e)).await;
             }
         }
         Command::Sync => {
-            if let Err(e) = sync_google_health_nutrition(&bot, &chat_id, &pool, &gemini_client, &config).await {
+            if let Err(e) =
+                sync_google_health_nutrition(&bot, &chat_id, &pool, &gemini_client, &config).await
+            {
                 eprintln!("Signal: manual Google Health sync failed: {:?}", e);
-                let _ = send_signal(&bot, &chat_id, format!("Google Health sync failed: {}", e)).await;
+                let _ =
+                    send_signal(&bot, &chat_id, format!("Google Health sync failed: {}", e)).await;
             }
         }
         Command::Login(args) => {
             if matches!(scope, CallerScope::HouseholdGroup) {
-                send_signal(&bot, &chat_id, "OAuth setup is only available in an authorized direct conversation.").await?;
+                send_signal(
+                    &bot,
+                    &chat_id,
+                    "OAuth setup is only available in an authorized direct conversation.",
+                )
+                .await?;
             } else {
                 let args_trimmed = args.trim();
                 if args_trimmed.to_lowercase().starts_with("code") {
                     let rest = args_trimmed[4..].trim();
                     if let Err(e) = handle_manual_code(&bot, &chat_id, rest, config, &scope).await {
                         eprintln!("Signal: manual code exchange failed: {:?}", e);
-                        let _ = send_signal(&bot, &chat_id, format!("Manual code exchange failed: {}", e)).await;
+                        let _ = send_signal(
+                            &bot,
+                            &chat_id,
+                            format!("Manual code exchange failed: {}", e),
+                        )
+                        .await;
                     }
                 } else {
-                    let service = args_trimmed.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+                    let service = args_trimmed
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_lowercase();
                     let requested_member = args_trimmed.split_whitespace().nth(1).unwrap_or("");
                     if service == "fitbit" || service == "health" {
                         match oauth_member_target(&scope, requested_member) {
                             Ok(member_id) => {
-                                if let Err(e) = handle_login_google_health(&bot, &chat_id, &member_id, config).await {
-                                    eprintln!("Signal: Google Health login initialization failed: {:?}", e);
-                                    let _ = send_signal(&bot, &chat_id, format!("Google Health login failed: {}", e)).await;
+                                if let Err(e) =
+                                    handle_login_google_health(&bot, &chat_id, &member_id, config)
+                                        .await
+                                {
+                                    eprintln!(
+                                        "Signal: Google Health login initialization failed: {:?}",
+                                        e
+                                    );
+                                    let _ = send_signal(
+                                        &bot,
+                                        &chat_id,
+                                        format!("Google Health login failed: {}", e),
+                                    )
+                                    .await;
                                 }
                             }
-                            Err(message) => { send_signal(&bot, &chat_id, message).await?; }
+                            Err(message) => {
+                                send_signal(&bot, &chat_id, message).await?;
+                            }
                         }
                     } else if service == "gmail" || service == "google" {
                         // Gmail uses one operator/global token, but mutation is restricted to an authorized DM.
                         if let Err(e) = handle_login_google(&bot, &chat_id).await {
                             eprintln!("Signal: Google/Gmail login initialization failed: {:?}", e);
-                            let _ = send_signal(&bot, &chat_id, format!("Google/Gmail login failed: {}", e)).await;
+                            let _ = send_signal(
+                                &bot,
+                                &chat_id,
+                                format!("Google/Gmail login failed: {}", e),
+                            )
+                            .await;
                         }
                     } else if service == "calendar" {
                         match oauth_member_target(&scope, requested_member) {
                             Ok(member_id) => {
-                                if let Err(e) = handle_login_calendar(&bot, &chat_id, &member_id, config).await {
-                                    eprintln!("Signal: Calendar login initialization failed: {:?}", e);
-                                    let _ = send_signal(&bot, &chat_id, format!("Calendar login failed: {}", e)).await;
+                                if let Err(e) =
+                                    handle_login_calendar(&bot, &chat_id, &member_id, config).await
+                                {
+                                    eprintln!(
+                                        "Signal: Calendar login initialization failed: {:?}",
+                                        e
+                                    );
+                                    let _ = send_signal(
+                                        &bot,
+                                        &chat_id,
+                                        format!("Calendar login failed: {}", e),
+                                    )
+                                    .await;
                                 }
                             }
-                            Err(message) => { send_signal(&bot, &chat_id, message).await?; }
+                            Err(message) => {
+                                send_signal(&bot, &chat_id, message).await?;
+                            }
                         }
                     } else {
                         let _ = send_signal(
@@ -772,12 +914,24 @@ async fn handle_command(
                 }
             }
         }
-        Command::Clearfood(args) => { handle_clear_food(&bot, &chat_id, args, &pool, &config).await?; }
-        Command::Adjustfood(args) => { handle_adjust_food(&bot, &chat_id, args, &pool, &config).await?; }
-        Command::Undofood(args) => { handle_undo_food(&bot, &chat_id, args, &pool, &config).await?; }
-        Command::Networth => { handle_networth(&bot, &chat_id, &pool, &config).await?; }
-        Command::Monthly(args) => { handle_monthly(&bot, &chat_id, args, &pool, &config).await?; }
-        Command::Budget(args) => { handle_budget(&bot, &chat_id, args, &pool, &config).await?; }
+        Command::Clearfood(args) => {
+            handle_clear_food(&bot, &chat_id, args, &pool, &config).await?;
+        }
+        Command::Adjustfood(args) => {
+            handle_adjust_food(&bot, &chat_id, args, &pool, &config).await?;
+        }
+        Command::Undofood(args) => {
+            handle_undo_food(&bot, &chat_id, args, &pool, &config).await?;
+        }
+        Command::Networth => {
+            handle_networth(&bot, &chat_id, &pool, &config).await?;
+        }
+        Command::Monthly(args) => {
+            handle_monthly(&bot, &chat_id, args, &pool, &config).await?;
+        }
+        Command::Budget(args) => {
+            handle_budget(&bot, &chat_id, args, &pool, &config).await?;
+        }
     }
     Ok(())
 }
@@ -804,7 +958,12 @@ async fn handle_whoami(
             .await?;
         }
         CallerScope::HouseholdGroup => {
-            send_signal(bot, chat_id, "This is the configured household Signal group.").await?;
+            send_signal(
+                bot,
+                chat_id,
+                "This is the configured household Signal group.",
+            )
+            .await?;
         }
     }
     Ok(())
@@ -821,7 +980,12 @@ async fn handle_food_log(
 ) -> Result<(), SignalError> {
     let args = args.trim();
     if args.is_empty() {
-        send_signal(bot, chat_id, "Please provide a description, e.g. `/food breakfast oats`.").await?;
+        send_signal(
+            bot,
+            chat_id,
+            "Please provide a description, e.g. `/food breakfast oats`.",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -831,15 +995,23 @@ async fn handle_food_log(
         return Ok(());
     }
     if food_description.is_empty() {
-        send_signal(&bot, chat_id, format!(
+        send_signal(
+            &bot,
+            chat_id,
+            format!(
                 "Please provide a food description after the member ID. E.g. /food {} salad",
                 family_member_id
-            ),)
+            ),
+        )
         .await?;
         return Ok(());
     }
 
-    send_signal(&bot, chat_id, format!("Got it — logging food for {}...", family_member_id),)
+    send_signal(
+        &bot,
+        chat_id,
+        format!("Got it — logging food for {}...", family_member_id),
+    )
     .await?;
 
     // Let the LLM resolve relative days/times ("yesterday's dinner…") into YYYY-MM-DD / HH:MM.
@@ -897,10 +1069,14 @@ async fn log_food_for_member(
     let food_time = effective_food_time(timing_utterance, food_time);
     let timing = resolve_food_log_timing(food_date, food_time.as_deref());
 
-    send_signal(&bot, chat_id, format!(
+    send_signal(
+        &bot,
+        chat_id,
+        format!(
             "Estimating nutrition for {}… (usually under a minute)",
             family_member_id
-        ),)
+        ),
+    )
     .await?;
 
     let estimate = {
@@ -935,8 +1111,12 @@ async fn log_food_for_member(
         }
         Err(e) => {
             eprintln!("Gemini client error: {:?}", e);
-            send_signal(&bot, chat_id, format!("❌ Failed to estimate nutrition: {}", e))
-                .await?;
+            send_signal(
+                &bot,
+                chat_id,
+                format!("❌ Failed to estimate nutrition: {}", e),
+            )
+            .await?;
         }
     }
 
@@ -1237,8 +1417,7 @@ async fn persist_food_estimation(
     .await
     {
         eprintln!("Failed to persist food_log + tags + summary: {:?}", e);
-        send_signal(&bot, chat_id, "Database error saving food log.")
-            .await?;
+        send_signal(&bot, chat_id, "Database error saving food log.").await?;
         return Ok(());
     }
 
@@ -1363,8 +1542,7 @@ async fn persist_food_estimation(
         google_sync_note
     );
 
-    send_signal(&bot, chat_id, msg_text)
-        .await?;
+    send_signal(&bot, chat_id, msg_text).await?;
 
     Ok(())
 }
@@ -1384,16 +1562,15 @@ async fn handle_clear_food(
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     // Preserve Google Health (or other non-food_log) nutrition, then drop Telegram logs.
-    let external = match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to compute external nutrition base: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error reading today's summary.")
-                .await?;
-            return Ok(());
-        }
-    };
+    let external =
+        match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Failed to compute external nutrition base: {:?}", e);
+                send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+                return Ok(());
+            }
+        };
 
     // Remove any meals we previously pushed to Google Health.
     match health_coach::google_data_point_ids_for_day(pool, &target_member_id, &date_str).await {
@@ -1401,7 +1578,10 @@ async fn handle_clear_food(
             if let Err(e) =
                 health_coach::delete_google_nutrition_logs(&target_member_id, config, &ids).await
             {
-                eprintln!("Failed to delete Google Health nutrition logs on clear: {:?}", e);
+                eprintln!(
+                    "Failed to delete Google Health nutrition logs on clear: {:?}",
+                    e
+                );
             }
         }
         Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
@@ -1423,8 +1603,7 @@ async fn handle_clear_food(
     .await
     {
         eprintln!("Failed to clear food_log + tags: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error clearing food logs.")
-            .await?;
+        send_signal(&bot, chat_id, "❌ Database error clearing food logs.").await?;
         return Ok(());
     }
 
@@ -1439,17 +1618,20 @@ async fn handle_clear_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to rebuild health summary after clear: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error resetting health summary.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error resetting health summary.").await?;
             return Ok(());
         }
     };
 
-    send_signal(&bot, chat_id, format!(
+    send_signal(
+        &bot,
+        chat_id,
+        format!(
             "🧹 Today's food logs cleared for {}.\n\
              Remaining (e.g. Google Health): {} kcal · {:.0}g P / {:.0}g C / {:.0}g F",
             target_member_id, rebuilt.calories, rebuilt.protein, rebuilt.carbs, rebuilt.fats
-        ),)
+        ),
+    )
     .await?;
 
     Ok(())
@@ -1464,7 +1646,12 @@ async fn handle_adjust_food(
 ) -> Result<(), SignalError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.is_empty() {
-        send_signal(&bot, chat_id, "⚠️ Usage: `/adjustfood [member_id] <calories> <protein> <carbs> <fats>`").await?;
+        send_signal(
+            &bot,
+            chat_id,
+            "⚠️ Usage: `/adjustfood [member_id] <calories> <protein> <carbs> <fats>`",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1498,7 +1685,12 @@ async fn handle_adjust_food(
     let calories: i32 = match remaining_tokens[0].parse() {
         Ok(val) => val,
         Err(_) => {
-            send_signal(&bot, chat_id, "❌ Invalid calories value. Must be an integer.").await?;
+            send_signal(
+                &bot,
+                chat_id,
+                "❌ Invalid calories value. Must be an integer.",
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -1536,8 +1728,7 @@ async fn handle_adjust_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to compute external nutrition base: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error reading today's summary.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
             return Ok(());
         }
     };
@@ -1605,8 +1796,7 @@ async fn handle_adjust_food(
     .await
     {
         eprintln!("Failed to replace food_log + tags on adjust: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error adjusting food log.")
-            .await?;
+        send_signal(&bot, chat_id, "❌ Database error adjusting food log.").await?;
         return Ok(());
     }
 
@@ -1614,8 +1804,7 @@ async fn handle_adjust_food(
         health_coach::write_summary_nutrition(pool, &member_id, &date_str, &desired).await
     {
         eprintln!("Failed to adjust health summary: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error adjusting health summary.")
-            .await?;
+        send_signal(&bot, chat_id, "❌ Database error adjusting health summary.").await?;
         return Ok(());
     }
 
@@ -1628,8 +1817,7 @@ async fn handle_adjust_food(
         member_id, calories, protein, carbs, fats
     );
 
-    send_signal(&bot, chat_id, msg)
-        .await?;
+    send_signal(&bot, chat_id, msg).await?;
 
     Ok(())
 }
@@ -1649,17 +1837,15 @@ async fn handle_undo_food(
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     // Snapshot the non-food_log base before mutating food_log.
-    let external = match health_coach::external_nutrition_base(pool, &target_member_id, &date_str)
-        .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to compute external nutrition base: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error reading today's summary.")
-                .await?;
-            return Ok(());
-        }
-    };
+    let external =
+        match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("Failed to compute external nutrition base: {:?}", e);
+                send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+                return Ok(());
+            }
+        };
 
     let last_log: Option<chotu_common::FoodLog> = match sqlx::query_as::<_, chotu_common::FoodLog>(
         "SELECT * FROM food_log \
@@ -1674,8 +1860,12 @@ async fn handle_undo_food(
         Ok(res) => res,
         Err(e) => {
             eprintln!("Failed to fetch last food log: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error retrieving last food entry.")
-                .await?;
+            send_signal(
+                &bot,
+                chat_id,
+                "❌ Database error retrieving last food entry.",
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -1683,10 +1873,14 @@ async fn handle_undo_food(
     let log_entry = match last_log {
         Some(entry) => entry,
         None => {
-            send_signal(&bot, chat_id, format!(
+            send_signal(
+                &bot,
+                chat_id,
+                format!(
                     "⚠️ No food log entries found for *{}* today.",
                     target_member_id
-                ),)
+                ),
+            )
             .await?;
             return Ok(());
         }
@@ -1720,8 +1914,7 @@ async fn handle_undo_food(
     .await
     {
         eprintln!("Failed to delete food_log + tags on undo: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error deleting food log entry.")
-            .await?;
+        send_signal(&bot, chat_id, "❌ Database error deleting food log entry.").await?;
         return Ok(());
     }
 
@@ -1736,8 +1929,7 @@ async fn handle_undo_food(
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to rebuild summary after undo: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error updating today's summary.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error updating today's summary.").await?;
             return Ok(());
         }
     };
@@ -1759,8 +1951,7 @@ async fn handle_undo_food(
         rebuilt.fats
     );
 
-    send_signal(&bot, chat_id, msg)
-        .await?;
+    send_signal(&bot, chat_id, msg).await?;
 
     Ok(())
 }
@@ -1810,8 +2001,12 @@ async fn handle_tasks(
                     mark_task_complete(bot, chat_id, pool, config, scope, id).await
                 }
                 _ => {
-                    send_signal(&bot, chat_id, "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all` \
-                         (linked DM: yours + unassigned; household: add `confirm`)",)
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        "⚠️ Usage: `/tasks complete <id>` or `/tasks complete all` \
+                         (linked DM: yours + unassigned; household: add `confirm`)",
+                    )
                     .await?;
                     Ok(())
                 }
@@ -1834,7 +2029,11 @@ async fn handle_tasks(
                     snooze_task(bot, chat_id, pool, config, scope, id, days).await
                 }
                 _ => {
-                    send_signal(&bot, chat_id, "⚠️ Usage: `/tasks snooze <id> [days]` (default 1 day)",)
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        "⚠️ Usage: `/tasks snooze <id> [days]` (default 1 day)",
+                    )
                     .await?;
                     Ok(())
                 }
@@ -1870,7 +2069,11 @@ async fn handle_tasks(
                     }
                 }
                 _ => {
-                    send_signal(&bot, chat_id, "⚠️ Usage: `/tasks reassign <id> <member_id>`",)
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        "⚠️ Usage: `/tasks reassign <id> <member_id>`",
+                    )
                     .await?;
                     Ok(())
                 }
@@ -1955,8 +2158,7 @@ async fn handle_tasks(
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to list tasks: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error listing tasks.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error listing tasks.").await?;
             return Ok(());
         }
     };
@@ -1966,7 +2168,11 @@ async fn handle_tasks(
             .as_deref()
             .map(|m| format!(" for *{}*", m))
             .unwrap_or_default();
-        send_signal(&bot, chat_id, format!("✅ No *{}* tasks found{}.", label, scope),)
+        send_signal(
+            &bot,
+            chat_id,
+            format!("✅ No *{}* tasks found{}.", label, scope),
+        )
         .await?;
         return Ok(());
     }
@@ -2043,9 +2249,7 @@ async fn find_task_by_prefix(
     id_prefix: &str,
 ) -> Result<Option<(String, String, String)>, SignalError> {
     let pattern = format!("{}%", id_prefix);
-    let mut query = sqlx::QueryBuilder::new(
-        "SELECT id, title, status FROM tasks WHERE id LIKE ",
-    );
+    let mut query = sqlx::QueryBuilder::new("SELECT id, title, status FROM tasks WHERE id LIKE ");
     query.push_bind(&pattern).push(" COLLATE NOCASE");
     if let CallerScope::LinkedDm { member_id } = scope {
         query
@@ -2054,22 +2258,22 @@ async fn find_task_by_prefix(
             .push(" OR assigned_to IS NULL)");
     }
     query.push(" LIMIT 5");
-    let matches: Vec<(String, String, String)> = match query
-        .build_query_as()
-        .fetch_all(pool)
-        .await
+    let matches: Vec<(String, String, String)> = match query.build_query_as().fetch_all(pool).await
     {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to look up task: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error looking up task.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error looking up task.").await?;
             return Ok(None);
         }
     };
 
     if matches.is_empty() {
-        send_signal(&bot, chat_id, format!("⚠️ No task found starting with `{}`.", id_prefix),)
+        send_signal(
+            &bot,
+            chat_id,
+            format!("⚠️ No task found starting with `{}`.", id_prefix),
+        )
         .await?;
         return Ok(None);
     }
@@ -2088,8 +2292,7 @@ async fn find_task_by_prefix(
                 status
             ));
         }
-        send_signal(&bot, chat_id, msg)
-            .await?;
+        send_signal(&bot, chat_id, msg).await?;
         return Ok(None);
     }
 
@@ -2133,8 +2336,7 @@ async fn create_manual_task(
 ) -> Result<(), SignalError> {
     let title = title.trim().to_string();
     if title.is_empty() {
-        send_signal(&bot, chat_id, "⚠️ Task title cannot be empty.")
-            .await?;
+        send_signal(&bot, chat_id, "⚠️ Task title cannot be empty.").await?;
         return Ok(());
     }
 
@@ -2143,11 +2345,15 @@ async fn create_manual_task(
             Some(p) => {
                 if let Ok(due_dt) = chrono::DateTime::parse_from_rfc3339(&p.due_at) {
                     if due_dt.with_timezone(&chrono::Utc) <= chrono::Utc::now() {
-                        send_signal(&bot, chat_id, format!(
+                        send_signal(
+                            &bot,
+                            chat_id,
+                            format!(
                                 "⚠️ Due `{}` is already in the past. Try a future time \
                                  (e.g. `tomorrow 9am`, `friday 15:00`).",
                                 (raw)
-                            ),)
+                            ),
+                        )
                         .await?;
                         return Ok(());
                     }
@@ -2172,44 +2378,36 @@ async fn create_manual_task(
         if let Some(ref mid) = member_id {
             if let Some(member) = config.family.members.iter().find(|m| &m.id == mid) {
                 match build_calendar_client(member) {
-                    Some(cal_client) => {
-                        match chrono::DateTime::parse_from_rfc3339(&due.due_at) {
-                            Ok(due_dt) => {
-                                let start = due_dt.with_timezone(&chrono::Utc);
-                                match schedule_at(
-                                    &cal_client,
-                                    &title,
-                                    Some("Created via Telegram"),
-                                    start,
-                                    TASK_CALENDAR_DURATION_MINUTES,
-                                )
-                                .await
-                                {
-                                    Ok(event_id) => {
-                                        println!(
-                                            "Signal: scheduled task on calendar: {}",
-                                            event_id
-                                        );
-                                        calendar_event_id = Some(event_id);
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "Signal: failed to schedule task on calendar: {:?}",
-                                            e
-                                        );
-                                        calendar_note = Some("calendar schedule failed");
-                                    }
+                    Some(cal_client) => match chrono::DateTime::parse_from_rfc3339(&due.due_at) {
+                        Ok(due_dt) => {
+                            let start = due_dt.with_timezone(&chrono::Utc);
+                            match schedule_at(
+                                &cal_client,
+                                &title,
+                                Some("Created via Telegram"),
+                                start,
+                                TASK_CALENDAR_DURATION_MINUTES,
+                            )
+                            .await
+                            {
+                                Ok(event_id) => {
+                                    println!("Signal: scheduled task on calendar: {}", event_id);
+                                    calendar_event_id = Some(event_id);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "Signal: failed to schedule task on calendar: {:?}",
+                                        e
+                                    );
+                                    calendar_note = Some("calendar schedule failed");
                                 }
                             }
-                            Err(e) => {
-                                eprintln!(
-                                    "Signal: invalid due_at for calendar: {:?}",
-                                    e
-                                );
-                                calendar_note = Some("calendar schedule failed");
-                            }
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("Signal: invalid due_at for calendar: {:?}", e);
+                            calendar_note = Some("calendar schedule failed");
+                        }
+                    },
                     None => {
                         calendar_note = Some("calendar not linked");
                     }
@@ -2245,11 +2443,7 @@ async fn create_manual_task(
     }
 
     let short_id: String = id.chars().take(8).collect();
-    let mut msg = format!(
-        "✅ Added task `{}`: _{}_",
-        short_id,
-        (title)
-    );
+    let mut msg = format!("✅ Added task `{}`: _{}_", short_id, (title));
     if let Some(ref mid) = member_id {
         msg.push_str(&format!(" · @{}", mid));
     }
@@ -2257,11 +2451,7 @@ async fn create_manual_task(
         if let Some(ref at) = due_at {
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at) {
                 let local = dt.with_timezone(&chrono::Local);
-                msg.push_str(&format!(
-                    " · due {} {}",
-                    due,
-                    local.format("%H:%M")
-                ));
+                msg.push_str(&format!(" · due {} {}", due, local.format("%H:%M")));
             } else {
                 msg.push_str(&format!(" · due {}", due));
             }
@@ -2275,8 +2465,7 @@ async fn create_manual_task(
         msg.push_str(&format!(" · _{}_", note));
     }
 
-    send_signal(&bot, chat_id, msg)
-        .await?;
+    send_signal(&bot, chat_id, msg).await?;
 
     refresh_task_memory(pool, &id).await;
     Ok(())
@@ -2298,7 +2487,13 @@ async fn poll_due_task_reminders(
 ) -> Result<(), anyhow::Error> {
     let now = chrono::Utc::now();
     let now_s = now.to_rfc3339();
-    let rows: Vec<(String, String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         "SELECT id, title, due_date, due_at, assigned_to FROM tasks \
          WHERE status = 'open' \
            AND due_at IS NOT NULL \
@@ -2415,7 +2610,6 @@ async fn poll_due_task_reminders(
     Ok(())
 }
 
-
 #[derive(Debug)]
 enum TaskMutateOutcome {
     Done { title: String, already: bool },
@@ -2456,11 +2650,17 @@ async fn complete_task_by_id(
         return TaskMutateOutcome::NotFound;
     };
     if status == "done" {
-        return TaskMutateOutcome::Done { title, already: true };
+        return TaskMutateOutcome::Done {
+            title,
+            already: true,
+        };
     }
     let now = chrono::Utc::now().to_rfc3339();
     let mut update = sqlx::QueryBuilder::new("UPDATE tasks SET status = 'done', updated_at = ");
-    update.push_bind(&now).push(" WHERE id = ").push_bind(task_id);
+    update
+        .push_bind(&now)
+        .push(" WHERE id = ")
+        .push_bind(task_id);
     if let CallerScope::LinkedDm { member_id } = scope {
         update
             .push(" AND (assigned_to = ")
@@ -2468,9 +2668,10 @@ async fn complete_task_by_id(
             .push(" OR assigned_to IS NULL)");
     }
     match update.build().execute(pool).await {
-        Ok(result) if result.rows_affected() == 1 => {
-            TaskMutateOutcome::Done { title, already: false }
-        }
+        Ok(result) if result.rows_affected() == 1 => TaskMutateOutcome::Done {
+            title,
+            already: false,
+        },
         Ok(_) => TaskMutateOutcome::NotFound,
         Err(error) => {
             eprintln!("Failed to mark task done: {error:?}");
@@ -2501,9 +2702,7 @@ async fn snooze_task_by_id(
         .to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let due_at = parse_due_phrase_tz(&due, config.resolved_tz()).map(|p| p.due_at);
-    let mut update = sqlx::QueryBuilder::new(
-        "UPDATE tasks SET status = 'snoozed', due_date = ",
-    );
+    let mut update = sqlx::QueryBuilder::new("UPDATE tasks SET status = 'snoozed', due_date = ");
     update
         .push_bind(&due)
         .push(", due_at = ")
@@ -2536,11 +2735,13 @@ async fn mark_task_complete(
     scope: &CallerScope,
     id_prefix: &str,
 ) -> Result<(), SignalError> {
-    let Some((id, _title, _status)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
+    let Some((id, _title, _status)) =
+        find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await?
+    else {
         return Ok(());
     };
 
-            match complete_task_by_id(pool, &id, scope).await {
+    match complete_task_by_id(pool, &id, scope).await {
         TaskMutateOutcome::Done { title, already } => {
             let msg = if already {
                 format!("ℹ️ Task already done: _{}_", (title))
@@ -2551,15 +2752,13 @@ async fn mark_task_complete(
                 sync_calendar_after_complete(pool, config, &id).await;
                 refresh_task_memory(pool, &id).await;
             }
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
         }
         TaskMutateOutcome::NotFound => {
             send_signal(&bot, chat_id, "⚠️ Task not found.").await?;
         }
         TaskMutateOutcome::DbError => {
-            send_signal(&bot, chat_id, "❌ Database error updating task.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error updating task.").await?;
         }
         TaskMutateOutcome::Snoozed { .. } => unreachable!(),
     }
@@ -2586,14 +2785,12 @@ async fn mark_all_tasks_complete(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("Failed to preview complete-all tasks: {:?}", e);
-                send_signal(&bot, chat_id, "❌ Database error listing tasks.")
-                    .await?;
+                send_signal(&bot, chat_id, "❌ Database error listing tasks.").await?;
                 return Ok(());
             }
         };
         if rows.is_empty() {
-            send_signal(&bot, chat_id, "✅ No open or snoozed tasks to complete.")
-                .await?;
+            send_signal(&bot, chat_id, "✅ No open or snoozed tasks to complete.").await?;
             return Ok(());
         }
         let count = rows.len();
@@ -2607,17 +2804,13 @@ async fn mark_all_tasks_complete(
                 msg.push_str(&format!("_…and {} more_\n", count - 10));
                 break;
             }
-            msg.push_str(&format!(
-                "• {}\n",
-                (truncate_chars(title, 80))
-            ));
+            msg.push_str(&format!("• {}\n", (truncate_chars(title, 80))));
         }
         msg.push_str(
             "\nReply `/tasks complete all confirm` to proceed \
              (linked DMs only clear your tasks + unassigned).",
         );
-        send_signal(&bot, chat_id, msg)
-            .await?;
+        send_signal(&bot, chat_id, msg).await?;
         return Ok(());
     }
 
@@ -2626,8 +2819,7 @@ async fn mark_all_tasks_complete(
         Ok(r) => r,
         Err(e) => {
             eprintln!("Failed to mark all tasks done: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error updating tasks.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error updating tasks.").await?;
             return Ok(());
         }
     };
@@ -2673,14 +2865,10 @@ async fn mark_all_tasks_complete(
             msg.push_str(&format!("_…and {} more_", count - 15));
             break;
         }
-        msg.push_str(&format!(
-            "• {}\n",
-            (truncate_chars(&row.title, 80))
-        ));
+        msg.push_str(&format!("• {}\n", (truncate_chars(&row.title, 80))));
     }
 
-    send_signal(&bot, chat_id, msg)
-        .await?;
+    send_signal(&bot, chat_id, msg).await?;
 
     for row in &rows {
         refresh_task_memory(pool, &row.id).await;
@@ -2697,31 +2885,26 @@ async fn snooze_task(
     id_prefix: &str,
     days: i64,
 ) -> Result<(), SignalError> {
-    let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
+    let Some((id, _title, _)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await?
+    else {
         return Ok(());
     };
 
     match snooze_task_by_id(pool, &id, days, config, scope).await {
         TaskMutateOutcome::Snoozed { title, due } => {
             let calendar_note = sync_calendar_after_snooze(pool, config, &id, &due).await;
-            let mut msg = format!(
-                "😴 Snoozed until *{}*: _{}_",
-                due,
-                (title)
-            );
+            let mut msg = format!("😴 Snoozed until *{}*: _{}_", due, (title));
             if let Some(note) = calendar_note {
                 msg.push_str(&format!(" · _{}_", note));
             }
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
             refresh_task_memory(pool, &id).await;
         }
         TaskMutateOutcome::NotFound => {
             send_signal(&bot, chat_id, "⚠️ Task not found.").await?;
         }
         TaskMutateOutcome::DbError => {
-            send_signal(&bot, chat_id, "❌ Database error snoozing task.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error snoozing task.").await?;
         }
         TaskMutateOutcome::Done { .. } => unreachable!(),
     }
@@ -2750,11 +2933,13 @@ async fn load_task_calendar_link(pool: &SqlitePool, task_id: &str) -> Option<Tas
         None
     });
 
-    row.map(|(calendar_event_id, assigned_to, duration_minutes)| TaskCalendarLink {
-        calendar_event_id,
-        assigned_to,
-        duration_minutes,
-    })
+    row.map(
+        |(calendar_event_id, assigned_to, duration_minutes)| TaskCalendarLink {
+            calendar_event_id,
+            assigned_to,
+            duration_minutes,
+        },
+    )
 }
 
 fn calendar_client_for_assignee(
@@ -2767,11 +2952,7 @@ fn calendar_client_for_assignee(
 }
 
 async fn delete_linked_calendar_event(config: &AppConfig, link: &TaskCalendarLink) -> bool {
-    let Some(event_id) = link
-        .calendar_event_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(event_id) = link.calendar_event_id.as_deref().filter(|s| !s.is_empty()) else {
         return true;
     };
     let Some(client) = calendar_client_for_assignee(config, link.assigned_to.as_deref()) else {
@@ -2798,13 +2979,12 @@ async fn delete_linked_calendar_event(config: &AppConfig, link: &TaskCalendarLin
 
 async fn clear_task_calendar_event_id(pool: &SqlitePool, task_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
-    if let Err(e) = sqlx::query(
-        "UPDATE tasks SET calendar_event_id = NULL, updated_at = ? WHERE id = ?",
-    )
-    .bind(&now)
-    .bind(task_id)
-    .execute(pool)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE tasks SET calendar_event_id = NULL, updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(task_id)
+            .execute(pool)
+            .await
     {
         eprintln!(
             "Signal: failed to clear calendar_event_id for {}: {:?}",
@@ -2864,11 +3044,7 @@ async fn reschedule_linked_calendar_event(
     link: &TaskCalendarLink,
     due_at_rfc3339: &str,
 ) -> CalendarRescheduleOutcome {
-    let Some(event_id) = link
-        .calendar_event_id
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(event_id) = link.calendar_event_id.as_deref().filter(|s| !s.is_empty()) else {
         return CalendarRescheduleOutcome::NoOp;
     };
     let Some(client) = calendar_client_for_assignee(config, link.assigned_to.as_deref()) else {
@@ -2923,7 +3099,8 @@ async fn reassign_task(
     id_prefix: &str,
     member_id: &str,
 ) -> Result<(), SignalError> {
-    let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
+    let Some((id, title, _)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await?
+    else {
         return Ok(());
     };
 
@@ -2954,11 +3131,11 @@ async fn reassign_task(
         }
     }
 
-    send_signal(&bot, chat_id, format!(
-            "👤 Assigned to *{}*: _{}_",
-            member_id,
-            (title)
-        ),)
+    send_signal(
+        &bot,
+        chat_id,
+        format!("👤 Assigned to *{}*: _{}_", member_id, (title)),
+    )
     .await?;
 
     refresh_task_memory(pool, &id).await;
@@ -2972,13 +3149,14 @@ async fn reopen_task(
     scope: &CallerScope,
     id_prefix: &str,
 ) -> Result<(), SignalError> {
-    let Some((id, title, status)) = find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await? else {
+    let Some((id, title, status)) =
+        find_task_by_prefix(bot, chat_id, pool, scope, id_prefix).await?
+    else {
         return Ok(());
     };
 
     if status == "open" {
-        send_signal(&bot, chat_id, format!("ℹ️ Already open: _{}_", (title)),)
-        .await?;
+        send_signal(&bot, chat_id, format!("ℹ️ Already open: _{}_", (title))).await?;
         return Ok(());
     }
 
@@ -3004,8 +3182,7 @@ async fn reopen_task(
         }
     }
 
-    send_signal(&bot, chat_id, format!("📂 Reopened: _{}_", (title)),)
-    .await?;
+    send_signal(&bot, chat_id, format!("📂 Reopened: _{}_", (title))).await?;
 
     refresh_task_memory(pool, &id).await;
     Ok(())
@@ -3029,40 +3206,36 @@ async fn handle_trends(
     config: &AppConfig,
     llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
-    let days = args
-        .trim()
-        .parse::<i64>()
-        .unwrap_or(7)
-        .clamp(2, 90);
+    let days = args.trim().parse::<i64>().unwrap_or(7).clamp(2, 90);
 
-    send_signal(&bot, chat_id, format!("📈 Building nutrition trends for the last {} days...", days),)
+    send_signal(
+        &bot,
+        chat_id,
+        format!("📈 Building nutrition trends for the last {} days...", days),
+    )
     .await?;
 
     let only_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
-    match health_coach::build_nutrition_trend_reports(
-        pool,
-        config,
-        days,
-        Some(llm),
-        only_member_id,
-    )
-    .await
+    match health_coach::build_nutrition_trend_reports(pool, config, days, Some(llm), only_member_id)
+        .await
     {
         Ok(reports) => {
             if reports.is_empty() {
-                send_signal(&bot, chat_id, "_No trends to show for your linked member in this window._",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "_No trends to show for your linked member in this window._",
+                )
                 .await?;
             } else {
                 for report in reports {
-                    send_signal(&bot, chat_id, report)
-                        .await?;
+                    send_signal(&bot, chat_id, report).await?;
                 }
             }
         }
         Err(e) => {
             eprintln!("Trends query error: {:?}", e);
-            send_signal(&bot, chat_id, format!("❌ Failed to build trends: {}", e))
-                .await?;
+            send_signal(&bot, chat_id, format!("❌ Failed to build trends: {}", e)).await?;
         }
     }
 
@@ -3075,14 +3248,12 @@ async fn handle_brief(
     pool: &SqlitePool,
     config: &AppConfig,
 ) -> Result<(), SignalError> {
-    send_signal(&bot, chat_id, "☀️ Building morning brief...")
-        .await?;
+    send_signal(&bot, chat_id, "☀️ Building morning brief...").await?;
 
     // Linked DMs get private calendar/tasks/nutrition/training; household chat stays family-wide.
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
-    send_signal(&bot, chat_id, report)
-        .await?;
+    send_signal(&bot, chat_id, report).await?;
     Ok(())
 }
 
@@ -3099,7 +3270,11 @@ async fn handle_plan(
         "new" | "regen" | "regenerate" | "refresh" | "redo"
     );
     if !args.trim().is_empty() && !regenerate {
-        send_signal(&bot, chat_id, "Usage: `/plan` (show this week) or `/plan new` (regenerate).",)
+        send_signal(
+            &bot,
+            chat_id,
+            "Usage: `/plan` (show this week) or `/plan new` (regenerate).",
+        )
         .await?;
         return Ok(());
     }
@@ -3115,11 +3290,15 @@ async fn handle_plan(
         .map(|g| g.is_empty())
         .unwrap_or(true)
     {
-        send_signal(&bot, chat_id, format!(
+        send_signal(
+            &bot,
+            chat_id,
+            format!(
                 "⚠️ No `fitness_goals` for *{}* in config.yaml yet.\n\
                  Add intent / target_date / sessions_per_week, then try `/plan` again.",
                 member_id
-            ),)
+            ),
+        )
         .await?;
         return Ok(());
     }
@@ -3154,17 +3333,20 @@ async fn handle_plan(
                 msg.push_str(&progress);
                 msg.push('\n');
             }
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
             return Ok(());
         }
     }
 
-    send_signal(&bot, chat_id, if regenerate {
+    send_signal(
+        &bot,
+        chat_id,
+        if regenerate {
             "🏋️ Regenerating this week's training plan (local Ollama)…"
         } else {
             "🏋️ Building this week's training plan (local Ollama)…"
-        },)
+        },
+    )
     .await?;
 
     match health_coach::generate_and_store_weekly_plan(pool, llm, config, &member_id, &week_start)
@@ -3200,13 +3382,11 @@ async fn handle_plan(
                 msg.push_str(&progress);
                 msg.push('\n');
             }
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
         }
         Err(e) => {
             eprintln!("Training plan generation failed: {:?}", e);
-            send_signal(&bot, chat_id, format!("❌ Could not build plan: {}", e))
-                .await?;
+            send_signal(&bot, chat_id, format!("❌ Could not build plan: {}", e)).await?;
         }
     }
     Ok(())
@@ -3231,8 +3411,7 @@ async fn handle_cal(
     {
         CalendarWindow::parse(&trimmed)
     } else {
-        send_signal(&bot, chat_id, "⚠️ Usage: `/cal [today|tomorrow|week]`",)
-        .await?;
+        send_signal(&bot, chat_id, "⚠️ Usage: `/cal [today|tomorrow|week]`").await?;
         return Ok(());
     };
 
@@ -3242,8 +3421,7 @@ async fn handle_cal(
         member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str()),
     )
     .await;
-    send_signal(&bot, chat_id, report)
-        .await?;
+    send_signal(&bot, chat_id, report).await?;
     Ok(())
 }
 
@@ -3271,8 +3449,12 @@ async fn handle_memory(
     let index = MemoryIndex::from_env();
 
     if args.eq_ignore_ascii_case("reindex") {
-        send_signal(&bot, chat_id, "🧠 Rebuilding memory index (this may take a while)...")
-            .await?;
+        send_signal(
+            &bot,
+            chat_id,
+            "🧠 Rebuilding memory index (this may take a while)...",
+        )
+        .await?;
         match index.reindex_all(pool, true).await {
             Ok(stats) => {
                 send_signal(&bot, chat_id, format!(
@@ -3283,15 +3465,13 @@ async fn handle_memory(
             }
             Err(e) => {
                 eprintln!("Memory reindex failed: {:?}", e);
-                send_signal(&bot, chat_id, format!("❌ Memory reindex failed: {}", e))
-                    .await?;
+                send_signal(&bot, chat_id, format!("❌ Memory reindex failed: {}", e)).await?;
             }
         }
         return Ok(());
     }
 
-    send_signal(&bot, chat_id, "🧠 Searching memory...")
-        .await?;
+    send_signal(&bot, chat_id, "🧠 Searching memory...").await?;
 
     let for_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
     let hits = match index.search(pool, args, None, for_member_id).await {
@@ -3313,10 +3493,14 @@ async fn handle_memory(
         return Ok(());
     }
 
-    send_signal(&bot, chat_id, format!(
+    send_signal(
+        &bot,
+        chat_id,
+        format!(
             "📚 Found {} matches — drafting with local Ollama (usually ~10–30s; times out at 45s)…",
             hits.len()
-        ),)
+        ),
+    )
     .await?;
 
     // Prefer local Ollama (same model as email/intent); Gemini only if Ollama fails.
@@ -3328,8 +3512,7 @@ async fn handle_memory(
         }
     };
 
-    send_signal(&bot, chat_id, reply)
-        .await?;
+    send_signal(&bot, chat_id, reply).await?;
     Ok(())
 }
 
@@ -3391,8 +3574,12 @@ async fn handle_status(
         Ok(data) => data,
         Err(e) => {
             eprintln!("Status query error: {:?}", e);
-            send_signal(&bot, chat_id, "Failed to retrieve today's logs from database.")
-                .await?;
+            send_signal(
+                &bot,
+                chat_id,
+                "Failed to retrieve today's logs from database.",
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -3417,12 +3604,12 @@ async fn handle_status(
             ));
         }
     }
-    send_signal(&bot, chat_id, finance_report)
-        .await?;
+    send_signal(&bot, chat_id, finance_report).await?;
 
     // 2. Build per-member health reports, then coach tips in parallel.
     // Linked personal DMs only see their own health/fitness (goals stay private).
-    let status_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.clone());
+    let status_member_id =
+        member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.clone());
     let mut pending: Vec<(String, Option<health_coach::NutritionCoachContext>)> = Vec::new();
 
     for h in &healths {
@@ -3473,7 +3660,9 @@ async fn handle_status(
             member_report.push_str("\n");
         }
 
-        if let Some(fitness) = member.and_then(|m| m.fitness_goals.as_ref()).filter(|g| !g.is_empty())
+        if let Some(fitness) = member
+            .and_then(|m| m.fitness_goals.as_ref())
+            .filter(|g| !g.is_empty())
         {
             let today = chrono::Local::now().date_naive();
             if let Some(block) = fitness.outcome_markdown(today) {
@@ -3690,7 +3879,12 @@ async fn handle_status(
             .map(|g| !g.is_empty())
             .unwrap_or(false);
 
-        if !has_activity && !has_sleep && !has_energy && !has_nutrition && exercises.is_empty() && !has_fitness
+        if !has_activity
+            && !has_sleep
+            && !has_energy
+            && !has_nutrition
+            && exercises.is_empty()
+            && !has_fitness
         {
             member_report.push_str("• _No health telemetry logged today._\n");
             pending.push((member_report, None));
@@ -3742,8 +3936,7 @@ async fn handle_status(
                 report.push('\n');
             }
         }
-        send_signal(&bot, chat_id, report)
-            .await?;
+        send_signal(&bot, chat_id, report).await?;
     }
 
     Ok(())
@@ -3762,14 +3955,17 @@ async fn handle_networth(
             .unwrap_or(0)
             > 0;
     if has_holdings {
-        send_signal(&bot, chat_id, "🔍 Fetching live quotes via Yahoo Finance...")
-            .await?;
+        send_signal(
+            &bot,
+            chat_id,
+            "🔍 Fetching live quotes via Yahoo Finance...",
+        )
+        .await?;
     }
 
     match build_networth_summary(pool, config).await {
         Ok(msg) => {
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
         }
         Err(e) => {
             send_signal(&bot, chat_id, format!("❌ {}", e)).await?;
@@ -3796,7 +3992,10 @@ async fn build_networth_summary(pool: &SqlitePool, config: &AppConfig) -> Result
     })?;
 
     let mut msg = String::new();
-    msg.push_str(&format!("💰 *Project Chotu Net Worth Summary* ({})\n\n", base));
+    msg.push_str(&format!(
+        "💰 *Project Chotu Net Worth Summary* ({})\n\n",
+        base
+    ));
     msg.push_str("• 💵 *Liquid Cash:* _not tracked yet_ (ledger is spend history, not balances)\n");
 
     if holdings.is_empty() {
@@ -3978,33 +4177,49 @@ async fn handle_monthly(
         chrono::Local::now().format("%Y-%m").to_string()
     } else {
         if date_str.len() != 7 || !date_str.contains('-') {
-            send_signal(&bot, chat_id, "⚠️ Invalid format. Usage: `/monthly [YYYY-MM]` (e.g. `/monthly 2026-06`)").await?;
+            send_signal(
+                &bot,
+                chat_id,
+                "⚠️ Invalid format. Usage: `/monthly [YYYY-MM]` (e.g. `/monthly 2026-06`)",
+            )
+            .await?;
             return Ok(());
         }
         date_str
     };
 
     // Query all transactions for that month
-    let entries: Vec<chotu_common::FinancialLedgerEntry> = match sqlx::query_as::<_, chotu_common::FinancialLedgerEntry>(
-        "SELECT id, timestamp, amount, currency, institution, merchant, category, source_type \
+    let entries: Vec<chotu_common::FinancialLedgerEntry> =
+        match sqlx::query_as::<_, chotu_common::FinancialLedgerEntry>(
+            "SELECT id, timestamp, amount, currency, institution, merchant, category, source_type \
          FROM financial_ledger \
          WHERE strftime('%Y-%m', timestamp) = ? \
-         ORDER BY timestamp DESC"
-    )
-    .bind(&target_month)
-    .fetch_all(pool)
-    .await {
-        Ok(res) => res,
-        Err(e) => {
-            eprintln!("Failed to fetch monthly transactions: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error retrieving monthly ledger.").await?;
-            return Ok(());
-        }
-    };
+         ORDER BY timestamp DESC",
+        )
+        .bind(&target_month)
+        .fetch_all(pool)
+        .await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                eprintln!("Failed to fetch monthly transactions: {:?}", e);
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "❌ Database error retrieving monthly ledger.",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
 
     if entries.is_empty() {
-        send_signal(&bot, chat_id, format!("📅 *No transactions found for {}*.", target_month))
-            .await?;
+        send_signal(
+            &bot,
+            chat_id,
+            format!("📅 *No transactions found for {}*.", target_month),
+        )
+        .await?;
         return Ok(());
     }
 
@@ -4012,7 +4227,8 @@ async fn handle_monthly(
     let rates = fetch_exchange_rates(base).await;
 
     // Group and sum by category (converted to base currency)
-    let mut category_totals: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut category_totals: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
     let mut total_spend = 0.0;
     let mut total_income = 0.0;
 
@@ -4027,10 +4243,19 @@ async fn handle_monthly(
     }
 
     let mut msg = String::new();
-    msg.push_str(&format!("📅 *Monthly Financial Summary: {}* ({})\n\n", target_month, base));
-    msg.push_str(&format!("• 💳 *Total Spend:* ${:.2} {}\n", total_spend, base));
+    msg.push_str(&format!(
+        "📅 *Monthly Financial Summary: {}* ({})\n\n",
+        target_month, base
+    ));
+    msg.push_str(&format!(
+        "• 💳 *Total Spend:* ${:.2} {}\n",
+        total_spend, base
+    ));
     if total_income > 0.0 {
-        msg.push_str(&format!("• 💵 *Total Income:* ${:.2} {}\n", total_income, base));
+        msg.push_str(&format!(
+            "• 💵 *Total Income:* ${:.2} {}\n",
+            total_income, base
+        ));
     }
     msg.push_str("\n*Spend by Category:*\n");
 
@@ -4055,7 +4280,9 @@ async fn handle_monthly(
     spend_entries.sort_by(|a, b| {
         let a_base = config.convert_to_base(a.amount, &a.currency, &rates).abs();
         let b_base = config.convert_to_base(b.amount, &b.currency, &rates).abs();
-        b_base.partial_cmp(&a_base).unwrap_or(std::cmp::Ordering::Equal)
+        b_base
+            .partial_cmp(&a_base)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     for entry in spend_entries.iter().take(5) {
@@ -4069,18 +4296,20 @@ async fn handle_monthly(
     // Append Target Allocation report if configured
     if let Some(ref target) = config.target_allocation {
         msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
-        let target_report = finance_advisor::check_allocation_status(&target_month, target, &entries, config, &rates);
+        let target_report = finance_advisor::check_allocation_status(
+            &target_month,
+            target,
+            &entries,
+            config,
+            &rates,
+        );
         msg.push_str(&target_report);
     }
 
     match compute_budget_progress(pool, config, &target_month).await {
         Ok(rows) if !rows.is_empty() => {
             msg.push_str("\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n");
-            msg.push_str(&format_budget_progress_markdown(
-                &target_month,
-                base,
-                &rows,
-            ));
+            msg.push_str(&format_budget_progress_markdown(&target_month, base, &rows));
         }
         Ok(_) => {}
         Err(e) => {
@@ -4088,8 +4317,7 @@ async fn handle_monthly(
         }
     }
 
-    send_signal(&bot, chat_id, msg)
-        .await?;
+    send_signal(&bot, chat_id, msg).await?;
 
     Ok(())
 }
@@ -4113,81 +4341,100 @@ async fn handle_budget(
             let category = parts.next().unwrap_or("").trim();
             let amount_raw = parts.next().unwrap_or("").trim();
             if category.is_empty() || amount_raw.is_empty() {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/budget set <Category> <amount>` (e.g. `/budget set Food 800`)",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "⚠️ Usage: `/budget set <Category> <amount>` (e.g. `/budget set Food 800`)",
+                )
                 .await?;
                 return Ok(());
             }
             let Ok(amount) = amount_raw.replace(',', "").parse::<f64>() else {
-                send_signal(&bot, chat_id, "⚠️ Amount must be a number (e.g. `800`).")
-                    .await?;
+                send_signal(&bot, chat_id, "⚠️ Amount must be a number (e.g. `800`).").await?;
                 return Ok(());
             };
             if amount <= 0.0 {
-                send_signal(&bot, chat_id, "⚠️ Amount must be greater than zero.")
-                    .await?;
+                send_signal(&bot, chat_id, "⚠️ Amount must be greater than zero.").await?;
                 return Ok(());
             }
             let display = display_category(category);
             if display.is_empty() || display.to_lowercase() == "income" {
-                send_signal(&bot, chat_id, "⚠️ Invalid category name.")
-                    .await?;
+                send_signal(&bot, chat_id, "⚠️ Invalid category name.").await?;
                 return Ok(());
             }
             match set_budget_override(pool, &display, amount).await {
                 Ok(()) => {
                     let base = config.currency();
-                    send_signal(&bot, chat_id, format!(
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        format!(
                             "✅ Budget set: {} → ${:.0} {} / month\n\n{}",
                             (display),
                             amount,
                             base,
                             "Override saved (wins over config.yaml)."
-                        ),)
+                        ),
+                    )
                     .await?;
                     send_budget_progress(bot, chat_id, pool, config).await?;
                 }
                 Err(e) => {
                     eprintln!("Failed to set budget override: {:?}", e);
-                    send_signal(&bot, chat_id, "❌ Failed to save budget override.")
-                        .await?;
+                    send_signal(&bot, chat_id, "❌ Failed to save budget override.").await?;
                 }
             }
         }
         "clear" => {
             let category = parts.next().unwrap_or("").trim();
             if category.is_empty() {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/budget clear <Category>` (e.g. `/budget clear Entertainment`)",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "⚠️ Usage: `/budget clear <Category>` (e.g. `/budget clear Entertainment`)",
+                )
                 .await?;
                 return Ok(());
             }
             let display = display_category(category);
             match clear_budget_override(pool, &display).await {
                 Ok(true) => {
-                    send_signal(&bot, chat_id, format!(
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        format!(
                             "✅ Cleared budget override for {} (falls back to config.yaml if set).",
                             (display)
-                        ),)
+                        ),
+                    )
                     .await?;
                     send_budget_progress(bot, chat_id, pool, config).await?;
                 }
                 Ok(false) => {
-                    send_signal(&bot, chat_id, format!(
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        format!(
                             "ℹ️ No budget override found for {}. YAML budgets are unchanged.",
                             (display)
-                        ),)
+                        ),
+                    )
                     .await?;
                 }
                 Err(e) => {
                     eprintln!("Failed to clear budget override: {:?}", e);
-                    send_signal(&bot, chat_id, "❌ Failed to clear budget override.")
-                        .await?;
+                    send_signal(&bot, chat_id, "❌ Failed to clear budget override.").await?;
                 }
             }
         }
         _ => {
-            send_signal(&bot, chat_id, "⚠️ Usage:\n• `/budget` — this month's progress\n\
+            send_signal(
+                &bot,
+                chat_id,
+                "⚠️ Usage:\n• `/budget` — this month's progress\n\
                  • `/budget set <Category> <amount>`\n\
-                 • `/budget clear <Category>`",)
+                 • `/budget clear <Category>`",
+            )
             .await?;
         }
     }
@@ -4205,13 +4452,11 @@ async fn send_budget_progress(
     match compute_budget_progress(pool, config, &month).await {
         Ok(rows) => {
             let msg = format_budget_progress_markdown(&month, base, &rows);
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
         }
         Err(e) => {
             eprintln!("Failed to compute budget progress: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error retrieving budgets.")
-                .await?;
+            send_signal(&bot, chat_id, "❌ Database error retrieving budgets.").await?;
         }
     }
     Ok(())
@@ -4248,15 +4493,12 @@ async fn poll_spend_budget_alerts(
         month
     );
     if !send_household(bot, config, msg).await {
-        eprintln!(
-            "Signal: spend budget alerts not delivered; will retry on next poll"
-        );
+        eprintln!("Signal: spend budget alerts not delivered; will retry on next poll");
         return Ok(());
     }
 
     for alert in &alerts {
-        if let Err(e) =
-            mark_budget_alert_sent(pool, &month, &alert.category, alert.threshold).await
+        if let Err(e) = mark_budget_alert_sent(pool, &month, &alert.category, alert.threshold).await
         {
             eprintln!(
                 "Signal: failed to mark budget alert sent ({}/{}): {:?}",
@@ -4279,15 +4521,20 @@ async fn handle_reflect_trigger(
 ) -> Result<(), SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    let ping = send_signal(&bot, chat_id, "Querying daily metrics and generating evening reflection prompt via local Ollama...",)
-        .await;
+    let ping = send_signal(
+        &bot,
+        chat_id,
+        "Querying daily metrics and generating evening reflection prompt via local Ollama...",
+    )
+    .await;
     // Scheduled runs ignore a failed status ping so we can still deliver the prompt.
     // Interactive `/reflect` still surfaces the send error.
     if prompt_attempts <= 1 {
         ping?;
     }
 
-    let (txs, mut healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
+    let (txs, mut healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await
+    {
         Ok(data) => data,
         Err(e) => {
             eprintln!("Reflect prompt query error: {:?}", e);
@@ -4374,8 +4621,18 @@ async fn handle_message(
     if let Some(quote_timestamp) = inbound.quote_timestamp {
         let reply_text = text.trim().to_lowercase();
         let is_unactionable_cue = [
-            "not useful", "unactionable", "ignore", "not worth it", "delete", "trash", "useless",
-        ].iter().any(|cue| reply_text == *cue || reply_text.contains(cue) || reply_text.contains("not worth"));
+            "not useful",
+            "unactionable",
+            "ignore",
+            "not worth it",
+            "delete",
+            "trash",
+            "useless",
+        ]
+        .iter()
+        .any(|cue| {
+            reply_text == *cue || reply_text.contains(cue) || reply_text.contains("not worth")
+        });
         if is_unactionable_cue {
             let (kind, recipient_id) = match &chat_id {
                 SignalRecipient::Direct { aci } => ("direct", aci.as_str()),
@@ -4406,9 +4663,8 @@ async fn handle_message(
                 .ok()
                 .flatten();
             if let Some((title, email_sender, email_subject, task_id)) = task_opt {
-                let mut update = sqlx::QueryBuilder::new(
-                    "UPDATE tasks SET status = 'ignored' WHERE id = ",
-                );
+                let mut update =
+                    sqlx::QueryBuilder::new("UPDATE tasks SET status = 'ignored' WHERE id = ");
                 update.push_bind(&task_id);
                 if let CallerScope::LinkedDm { member_id } = &scope {
                     update
@@ -4422,10 +4678,18 @@ async fn handle_message(
                     .await
                     .is_ok_and(|result| result.rows_affected() == 1);
                 if !updated {
-                    send_signal(&bot, &chat_id, "That task is no longer available in your scope.").await?;
+                    send_signal(
+                        &bot,
+                        &chat_id,
+                        "That task is no longer available in your scope.",
+                    )
+                    .await?;
                     return Ok(());
                 }
-                println!("Signal: Marking task as ignored and recording feedback for task: {}", title);
+                println!(
+                    "Signal: Marking task as ignored and recording feedback for task: {}",
+                    title
+                );
                 let feedback_id = uuid::Uuid::new_v4().to_string();
                 let sender = email_sender.unwrap_or_else(|| "Unknown".to_string());
                 let subject = email_subject.unwrap_or_else(|| "No Subject".to_string());
@@ -4454,9 +4718,23 @@ async fn handle_message(
         date,
         prompt,
         member_id,
-    }) = active_state {
-        if inbound.attachments.iter().any(|a| a.content_type.starts_with("image/")) {
-            handle_food_photo(&bot, &chat_id, &inbound, &pool, &llm, &gemini_client, &config).await?;
+    }) = active_state
+    {
+        if inbound
+            .attachments
+            .iter()
+            .any(|a| a.content_type.starts_with("image/"))
+        {
+            handle_food_photo(
+                &bot,
+                &chat_id,
+                &inbound,
+                &pool,
+                &llm,
+                &gemini_client,
+                &config,
+            )
+            .await?;
             send_signal(&bot, &chat_id, "Evening reflection is still open — type your journal reply, or send a command to cancel.").await?;
             return Ok(());
         }
@@ -4465,12 +4743,23 @@ async fn handle_message(
             send_signal(&bot, &chat_id, "Reflection text cannot be empty. Please type your reflection or send a command to cancel.").await?;
             return Ok(());
         }
-        send_signal(&bot, &chat_id, "Saving reflection entry to your local journal...").await?;
-        let (txs, mut healths) = match crate::reflection::get_daily_data(&pool, &date, config).await {
+        send_signal(
+            &bot,
+            &chat_id,
+            "Saving reflection entry to your local journal...",
+        )
+        .await?;
+        let (txs, mut healths) = match crate::reflection::get_daily_data(&pool, &date, config).await
+        {
             Ok(data) => data,
             Err(e) => {
                 eprintln!("Failed to query daily data during save: {:?}", e);
-                send_signal(&bot, &chat_id, "Failed to retrieve today's logs to compile journal header.").await?;
+                send_signal(
+                    &bot,
+                    &chat_id,
+                    "Failed to retrieve today's logs to compile journal header.",
+                )
+                .await?;
                 return Ok(());
             }
         };
@@ -4482,7 +4771,9 @@ async fn handle_message(
             &txs,
             &healths,
             member_id.as_deref(),
-        ).await {
+        )
+        .await
+        {
             Ok(filepath) => {
                 {
                     let mut s = states.write().await;
@@ -4492,7 +4783,10 @@ async fn handle_message(
                 if let Err(e) = index.index_journal_file(&pool, &filepath).await {
                     eprintln!("Memory: failed to index journal {:?}: {:?}", filepath, e);
                 }
-                let filename = filepath.file_name().and_then(|n| n.to_str()).unwrap_or("journal.md");
+                let filename = filepath
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("journal.md");
                 send_signal(&bot, &chat_id, format!("Reflection recorded.\nSaved file `{filename}` inside `~/chotu_brain/Journal/`.")).await?;
             }
             Err(e) => {
@@ -4500,10 +4794,33 @@ async fn handle_message(
                 send_signal(&bot, &chat_id, format!("Failed to write journal file: {e}")).await?;
             }
         }
-    } else if inbound.attachments.iter().any(|a| a.content_type.starts_with("image/")) {
-        handle_food_photo(&bot, &chat_id, &inbound, &pool, &llm, &gemini_client, &config).await?;
+    } else if inbound
+        .attachments
+        .iter()
+        .any(|a| a.content_type.starts_with("image/"))
+    {
+        handle_food_photo(
+            &bot,
+            &chat_id,
+            &inbound,
+            &pool,
+            &llm,
+            &gemini_client,
+            &config,
+        )
+        .await?;
     } else {
-        dispatch_free_text_intent(&bot, &chat_id, &text, &pool, &llm, &gemini_client, config, &scope).await?;
+        dispatch_free_text_intent(
+            &bot,
+            &chat_id,
+            &text,
+            &pool,
+            &llm,
+            &gemini_client,
+            config,
+            &scope,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -4518,20 +4835,39 @@ async fn handle_food_photo(
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), SignalError> {
-    let Some(attachment) = inbound.attachments.iter().find(|a| a.content_type.starts_with("image/") && !a.id.is_empty()) else {
-        send_signal(bot, chat_id, "Couldn't read that photo. Try sending it again.").await?;
+    let Some(attachment) = inbound
+        .attachments
+        .iter()
+        .find(|a| a.content_type.starts_with("image/") && !a.id.is_empty())
+    else {
+        send_signal(
+            bot,
+            chat_id,
+            "Couldn't read that photo. Try sending it again.",
+        )
+        .await?;
         return Ok(());
     };
     let body = inbound.text.as_deref().unwrap_or("").trim();
-    let caption_src = if !body.is_empty() { body } else { attachment.caption.as_deref().unwrap_or("") };
+    let caption_src = if !body.is_empty() {
+        body
+    } else {
+        attachment.caption.as_deref().unwrap_or("")
+    };
     let caption = strip_leading_food_command(caption_src);
 
-    let (member_id, caption_rest) = resolve_food_member_and_description(caption, config, chat_id.lookup_aci());
+    let (member_id, caption_rest) =
+        resolve_food_member_and_description(caption, config, chat_id.lookup_aci());
     if reject_foreign_food_mutation(bot, chat_id, config, &member_id).await? {
         return Ok(());
     }
 
-    send_signal(bot, chat_id, "Analyzing food photo (barcode / package / plate)… usually under a minute").await?;
+    send_signal(
+        bot,
+        chat_id,
+        "Analyzing food photo (barcode / package / plate)… usually under a minute",
+    )
+    .await?;
     let image_bytes = match bot.get_attachment(chat_id, &attachment.id).await {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -4548,7 +4884,9 @@ async fn handle_food_photo(
             20,
             "Still analyzing that photo — hang tight…".to_string(),
         );
-        gemini_client.approximate_nutrition_from_image(&image_bytes, &attachment.content_type, caption).await
+        gemini_client
+            .approximate_nutrition_from_image(&image_bytes, &attachment.content_type, caption)
+            .await
     };
     let analysis = match analysis {
         Ok(a) => a,
@@ -4569,9 +4907,16 @@ async fn handle_food_photo(
                 let desc = if caption_rest.is_empty() {
                     format!("{} [barcode {}]", product.product_name, barcode)
                 } else {
-                    format!("{} — {} [barcode {}]", product.product_name, caption_rest, barcode)
+                    format!(
+                        "{} — {} [barcode {}]",
+                        product.product_name, caption_rest, barcode
+                    )
                 };
-                (desc, product.nutrition, format!("Open Food Facts ({})", barcode))
+                (
+                    desc,
+                    product.nutrition,
+                    format!("Open Food Facts ({})", barcode),
+                )
             }
             Ok(None) => {
                 let desc = if analysis.description.trim().is_empty() {
@@ -4581,18 +4926,39 @@ async fn handle_food_photo(
                 } else {
                     format!("{} ({})", analysis.description, caption_rest)
                 };
-                (desc, analysis.nutrition, format!("Gemini vision; barcode {} not in Open Food Facts", barcode))
+                (
+                    desc,
+                    analysis.nutrition,
+                    format!("Gemini vision; barcode {} not in Open Food Facts", barcode),
+                )
             }
             Err(e) => {
                 eprintln!("Open Food Facts lookup error: {:?}", e);
-                let desc = if caption_rest.is_empty() { analysis.description.clone() } else { format!("{} ({})", analysis.description, caption_rest) };
-                (desc, analysis.nutrition, "Gemini vision (OFF lookup failed)".to_string())
+                let desc = if caption_rest.is_empty() {
+                    analysis.description.clone()
+                } else {
+                    format!("{} ({})", analysis.description, caption_rest)
+                };
+                (
+                    desc,
+                    analysis.nutrition,
+                    "Gemini vision (OFF lookup failed)".to_string(),
+                )
             }
         }
     } else {
         let desc = if analysis.description.trim().is_empty() {
-            if caption_rest.is_empty() { "Food photo".to_string() } else { caption_rest.clone() }
-        } else if caption_rest.is_empty() || analysis.description.to_lowercase().contains(&caption_rest.to_lowercase()) {
+            if caption_rest.is_empty() {
+                "Food photo".to_string()
+            } else {
+                caption_rest.clone()
+            }
+        } else if caption_rest.is_empty()
+            || analysis
+                .description
+                .to_lowercase()
+                .contains(&caption_rest.to_lowercase())
+        {
             analysis.description.clone()
         } else {
             format!("{} ({})", analysis.description, caption_rest)
@@ -4600,8 +4966,16 @@ async fn handle_food_photo(
         (desc, analysis.nutrition, "Gemini vision".to_string())
     };
 
-    println!("Signal: food photo kind={:?} source={} member={}", analysis.kind, source_note, member_id);
-    send_signal(bot, chat_id, format!("Using {} for *{}*…", source_note, member_id)).await?;
+    println!(
+        "Signal: food photo kind={:?} source={} member={}",
+        analysis.kind, source_note, member_id
+    );
+    send_signal(
+        bot,
+        chat_id,
+        format!("Using {} for *{}*…", source_note, member_id),
+    )
+    .await?;
 
     let timing = if caption_rest.trim().is_empty() {
         resolve_food_log_timing(None, None)
@@ -4612,13 +4986,26 @@ async fn handle_food_photo(
                 resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
             }
             Err(e) => {
-                eprintln!("Food photo caption timing extract failed (using now): {:?}", e);
+                eprintln!(
+                    "Food photo caption timing extract failed (using now): {:?}",
+                    e
+                );
                 resolve_food_log_timing(None, None)
             }
         }
     };
 
-    persist_food_estimation(bot, chat_id, pool, config, &member_id, &description, &nutrition, &timing).await?;
+    persist_food_estimation(
+        bot,
+        chat_id,
+        pool,
+        config,
+        &member_id,
+        &description,
+        &nutrition,
+        &timing,
+    )
+    .await?;
     Ok(())
 }
 
@@ -4643,15 +5030,9 @@ async fn dispatch_free_text_intent(
 
     // Local Ollama classification can take a while — acknowledge immediately so the chat
     // doesn't look frozen (food logs especially felt stuck for ~1–2 minutes).
-    send_signal(&bot, chat_id, "Got it — working on that…")
-        .await?;
+    send_signal(&bot, chat_id, "Got it — working on that…").await?;
 
-    let member_ids: Vec<String> = config
-        .family
-        .members
-        .iter()
-        .map(|m| m.id.clone())
-        .collect();
+    let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
 
     let classification = {
         let _classify_nudge = ProgressNudge::spawn(
@@ -4676,7 +5057,10 @@ async fn dispatch_free_text_intent(
         }
     };
 
-    println!("Signal: classified free-text intent={:?}", classification.intent);
+    println!(
+        "Signal: classified free-text intent={:?}",
+        classification.intent
+    );
 
     match classification.into_user_intent() {
         UserIntent::Status => handle_status(bot, chat_id, pool, config, llm).await?,
@@ -4703,16 +5087,14 @@ async fn dispatch_free_text_intent(
             member_id,
             title,
             due_raw,
-        } => {
-            match resolve_task_target(scope, member_id, config) {
-                Ok(member_id) => {
-                    create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
-                }
-                Err(message) => {
-                    send_signal(bot, chat_id, message).await?;
-                }
+        } => match resolve_task_target(scope, member_id, config) {
+            Ok(member_id) => {
+                create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
             }
-        }
+            Err(message) => {
+                send_signal(bot, chat_id, message).await?;
+            }
+        },
         UserIntent::Memory { query } => {
             handle_memory(bot, chat_id, query, pool, config, llm, gemini_client).await?;
         }
@@ -4721,8 +5103,7 @@ async fn dispatch_free_text_intent(
                 sync_google_health_nutrition(bot, chat_id, pool, gemini_client, config).await
             {
                 eprintln!("Free-text sync failed: {:?}", e);
-                send_signal(&bot, chat_id, format!("❌ Sync failed: {}", e))
-                    .await?;
+                send_signal(&bot, chat_id, format!("❌ Sync failed: {}", e)).await?;
             }
         }
         UserIntent::Food {
@@ -4731,9 +5112,8 @@ async fn dispatch_free_text_intent(
             date,
             time,
         } => {
-            let family_member_id = member_id.unwrap_or_else(|| {
-                default_member_id(config, chat_id.lookup_aci()).to_string()
-            });
+            let family_member_id = member_id
+                .unwrap_or_else(|| default_member_id(config, chat_id.lookup_aci()).to_string());
             if reject_foreign_food_mutation(bot, chat_id, config, &family_member_id).await? {
                 return Ok(());
             }
@@ -4755,14 +5135,7 @@ async fn dispatch_free_text_intent(
             handle_networth(bot, chat_id, pool, config).await?;
         }
         UserIntent::Monthly { yyyy_mm } => {
-            handle_monthly(
-                bot,
-                chat_id,
-                yyyy_mm.unwrap_or_default(),
-                pool,
-                config,
-            )
-            .await?;
+            handle_monthly(bot, chat_id, yyyy_mm.unwrap_or_default(), pool, config).await?;
         }
         UserIntent::Budget => {
             handle_budget(bot, chat_id, String::new(), pool, config).await?;
@@ -4890,7 +5263,15 @@ async fn run_and_log_stock_research(
     philosophy: Option<&InvestmentPhilosophy>,
     targets: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    run_and_log_stock_research_multi(bot, &[chat_id.clone()], pool, researcher, philosophy, targets).await
+    run_and_log_stock_research_multi(
+        bot,
+        &[chat_id.clone()],
+        pool,
+        researcher,
+        philosophy,
+        targets,
+    )
+    .await
 }
 
 async fn run_and_log_stock_research_multi(
@@ -4925,32 +5306,45 @@ async fn run_and_log_stock_research_multi(
         }
     });
 
-    let report =
-        match run_stock_research_with_progress(pool, researcher, philosophy, targets, Some(progress_tx))
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = progress_task.await;
-                for chat_id in chat_ids {
-                    send_signal(&bot, chat_id, format!(
-                            "❌ Stock research failed after {}: {}",
-                            format_elapsed(started.elapsed().as_secs()),
-                            e
-                        ),)
-                    .await?;
-                }
-                return Err(anyhow::anyhow!("Stock research failed: {:?}", e));
+    let report = match run_stock_research_with_progress(
+        pool,
+        researcher,
+        philosophy,
+        targets,
+        Some(progress_tx),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = progress_task.await;
+            for chat_id in chat_ids {
+                send_signal(
+                    &bot,
+                    chat_id,
+                    format!(
+                        "❌ Stock research failed after {}: {}",
+                        format_elapsed(started.elapsed().as_secs()),
+                        e
+                    ),
+                )
+                .await?;
             }
-        };
+            return Err(anyhow::anyhow!("Stock research failed: {:?}", e));
+        }
+    };
 
     let _ = progress_task.await;
 
     for chat_id in chat_ids {
-        send_signal(&bot, chat_id, format!(
+        send_signal(
+            &bot,
+            chat_id,
+            format!(
                 "✅ Research complete in {}. Sending report…",
                 format_elapsed(started.elapsed().as_secs())
-            ),)
+            ),
+        )
         .await?;
     }
 
@@ -4958,9 +5352,7 @@ async fn run_and_log_stock_research_multi(
     let chunks = split_message(&report, 4000);
     for chunk in chunks {
         for chat_id in chat_ids {
-            if let Err(e) = send_signal(&bot, chat_id, &chunk)
-                .await
-            {
+            if let Err(e) = send_signal(&bot, chat_id, &chunk).await {
                 eprintln!(
                     "Signal: failed to send report chunk with Markdown format ({:?}). Falling back to plain text...",
                     e
@@ -4980,7 +5372,11 @@ async fn sync_google_health_nutrition(
     gemini_client: &GeminiClient,
     config: &AppConfig,
 ) -> Result<(), anyhow::Error> {
-    send_signal(&bot, chat_id, "🔄 Connecting to Google Health API and pulling today's health metrics...",)
+    send_signal(
+        &bot,
+        chat_id,
+        "🔄 Connecting to Google Health API and pulling today's health metrics...",
+    )
     .await?;
 
     match health_coach::sync_configured_members_today(pool, Some(gemini_client), config).await {
@@ -4993,8 +5389,7 @@ async fn sync_google_health_nutrition(
                         continue;
                     }
                 }
-                send_signal(&bot, chat_id, report.signal_text())
-                    .await?;
+                send_signal(&bot, chat_id, report.signal_text()).await?;
                 shown += 1;
             }
             if let Some(ref only) = only_id {
@@ -5006,20 +5401,27 @@ async fn sync_google_health_nutrition(
                         ),)
                     .await?;
                 } else if reports.len() > 1 {
-                    send_signal(&bot, chat_id, format!(
+                    send_signal(
+                        &bot,
+                        chat_id,
+                        format!(
                             "_Synced {} member(s); showing only your private metrics._",
                             reports.len()
-                        ),)
+                        ),
+                    )
                     .await?;
                 }
             } else if reports.is_empty() {
-                send_signal(&bot, chat_id, "_Sync finished — no member reports._")
-                    .await?;
+                send_signal(&bot, chat_id, "_Sync finished — no member reports._").await?;
             }
         }
         Err(e) => {
-            send_signal(&bot, chat_id, format!("❌ Google Health sync failed: {}", e))
-                .await?;
+            send_signal(
+                &bot,
+                chat_id,
+                format!("❌ Google Health sync failed: {}", e),
+            )
+            .await?;
         }
     }
 
@@ -5076,20 +5478,28 @@ async fn handle_login_calendar(
     let member = match config.family.members.iter().find(|m| m.id == member_id) {
         Some(m) => m,
         None => {
-            send_signal(&bot, chat_id, format!(
+            send_signal(
+                &bot,
+                chat_id,
+                format!(
                     "❌ Unknown member `{}`. Check `family.members` in config.yaml.",
                     member_id
-                ),)
+                ),
+            )
             .await?;
             return Ok(());
         }
     };
 
     if member.calendar.is_none() {
-        send_signal(&bot, chat_id, format!(
+        send_signal(
+            &bot,
+            chat_id,
+            format!(
                 "❌ Member `{}` has no `calendar:` block in config.yaml.",
                 member_id
-            ),)
+            ),
+        )
         .await?;
         return Ok(());
     }
@@ -5105,7 +5515,11 @@ async fn handle_login_calendar(
     let client_secret = match std::env::var("CHOTU_OAUTH_CLIENT_SECRET") {
         Ok(val) => val,
         Err(_) => {
-            send_signal(&bot, chat_id, "❌ Configure `CHOTU_OAUTH_CLIENT_SECRET` in `.env`.",)
+            send_signal(
+                &bot,
+                chat_id,
+                "❌ Configure `CHOTU_OAUTH_CLIENT_SECRET` in `.env`.",
+            )
             .await?;
             return Ok(());
         }
@@ -5131,8 +5545,7 @@ async fn handle_login_calendar(
         auth_url,
         member.id
     );
-    send_signal(&bot, chat_id, msg)
-        .await?;
+    send_signal(&bot, chat_id, msg).await?;
 
     let bot_clone = bot.clone();
     let chat_owned = chat_id.clone();
@@ -5158,25 +5571,41 @@ async fn handle_login_calendar(
                         if let Err(e) =
                             save_calendar_refresh_token(&member_id_owned, &tokens.refresh_token)
                         {
-                            let _ = send_signal(&bot_clone, &chat_owned, format!("❌ Failed to save calendar token: {}", e),)
-                                .await;
+                            let _ = send_signal(
+                                &bot_clone,
+                                &chat_owned,
+                                format!("❌ Failed to save calendar token: {}", e),
+                            )
+                            .await;
                             return;
                         }
-                        let _ = send_signal(&bot_clone, &chat_owned, format!(
-                                    "✅ *Calendar Authorization Successful!*\nSaved `{}` to `.env`.",
-                                    env_key
-                                ),)
-                            .await;
+                        let _ = send_signal(
+                            &bot_clone,
+                            &chat_owned,
+                            format!(
+                                "✅ *Calendar Authorization Successful!*\nSaved `{}` to `.env`.",
+                                env_key
+                            ),
+                        )
+                        .await;
                     }
                     Err(e) => {
-                        let _ = send_signal(&bot_clone, &chat_owned, format!("❌ Calendar token exchange failed: {}", e),)
-                            .await;
+                        let _ = send_signal(
+                            &bot_clone,
+                            &chat_owned,
+                            format!("❌ Calendar token exchange failed: {}", e),
+                        )
+                        .await;
                     }
                 }
             }
             Ok(Err(e)) => {
-                let _ = send_signal(&bot_clone, &chat_owned, format!("❌ Calendar OAuth listener error: {}", e))
-                    .await;
+                let _ = send_signal(
+                    &bot_clone,
+                    &chat_owned,
+                    format!("❌ Calendar OAuth listener error: {}", e),
+                )
+                .await;
             }
             Err(_) => {
                 let _ = send_signal(&bot_clone, &chat_owned, format!(
@@ -5218,8 +5647,7 @@ async fn handle_login_google_health(
     {
         Some(m) => m,
         None => {
-            send_signal(bot, chat_id, format!("❌ Unknown member `{member_id}`."))
-                .await?;
+            send_signal(bot, chat_id, format!("❌ Unknown member `{member_id}`.")).await?;
             return Ok(());
         }
     };
@@ -5241,8 +5669,7 @@ async fn handle_login_google_health(
                 2. Configure the OAuth Consent Screen (add each family member's email as a test user).\n\
                 3. Go to Credentials, create a client ID for a **Web Application**, and set the redirect URI to `http://localhost:8080/callback`.\n\
                 4. Paste the client credentials into your `.env` file as `FITBIT_CLIENT_ID` and `FITBIT_CLIENT_SECRET`, then restart the agent.";
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
             return Ok(());
         }
     };
@@ -5251,8 +5678,7 @@ async fn handle_login_google_health(
         Err(_) => {
             let msg = "❌ *Google Health Setup Required*\n\n\
                 Please configure `FITBIT_CLIENT_SECRET` in your `.env` file.";
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
             return Ok(());
         }
     };
@@ -5273,8 +5699,7 @@ async fn handle_login_google_health(
         member_name, member_name, auth_url, member_id, env_key
     );
 
-    send_signal(&bot, chat_id, setup_msg)
-        .await?;
+    send_signal(&bot, chat_id, setup_msg).await?;
 
     let bot_clone = bot.clone();
     let chat_owned = chat_id.clone();
@@ -5294,8 +5719,12 @@ async fn handle_login_google_health(
         match listener_result {
             Ok(Ok(code)) => {
                 println!("OAuth: Received authorization code. Exchanging for tokens...");
-                let _ = send_signal(&bot_clone, &chat_owned, "⏳ Received authorization code. Swapping for tokens...",)
-                    .await;
+                let _ = send_signal(
+                    &bot_clone,
+                    &chat_owned,
+                    "⏳ Received authorization code. Swapping for tokens...",
+                )
+                .await;
 
                 match exchange_google_code(
                     &client_id,
@@ -5318,8 +5747,7 @@ async fn handle_login_google_health(
                                      `/sync` and `/food {}` will use this account.",
                                     env_key_owned, member_id_owned, member_id_owned
                                 );
-                                let _ = send_signal(&bot_clone, &chat_owned, success_msg)
-                                    .await;
+                                let _ = send_signal(&bot_clone, &chat_owned, success_msg).await;
                                 println!(
                                     "OAuth: Google Health refresh token saved as {}",
                                     env_key_owned
@@ -5353,8 +5781,7 @@ async fn handle_login_google_health(
                      Try again with `/login health {}` or `/login code health {} <code>`.",
                     member_id_owned, member_id_owned
                 );
-                let _ = send_signal(&bot_clone, &chat_owned, timeout_msg)
-                    .await;
+                let _ = send_signal(&bot_clone, &chat_owned, timeout_msg).await;
                 println!("OAuth: Google Health redirect listener timed out");
             }
         }
@@ -5372,8 +5799,7 @@ async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::
                 1. Go to the [Google Cloud Console](https://console.cloud.google.com/), create a project and OAuth 2.0 Credentials.\n\
                 2. Set the Redirect URI to `http://localhost:8080/callback`.\n\
                 3. Paste the client credentials into your `.env` file and restart the agent.";
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
             return Ok(());
         }
     };
@@ -5382,8 +5808,7 @@ async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::
         Err(_) => {
             let msg = "❌ *Google Setup Required*\n\n\
                 Please configure `CHOTU_OAUTH_CLIENT_SECRET` in your `.env` file.";
-            send_signal(&bot, chat_id, msg)
-                .await?;
+            send_signal(&bot, chat_id, msg).await?;
             return Ok(());
         }
     };
@@ -5402,8 +5827,7 @@ async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::
         auth_url
     );
 
-    send_signal(&bot, chat_id, setup_msg)
-        .await?;
+    send_signal(&bot, chat_id, setup_msg).await?;
 
     let bot_clone = bot.clone();
     let chat_owned = chat_id.clone();
@@ -5419,8 +5843,12 @@ async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::
         match listener_result {
             Ok(Ok(code)) => {
                 println!("OAuth: Received Google authorization code. Exchanging for tokens...");
-                let _ = send_signal(&bot_clone, &chat_owned, "⏳ Received authorization code. Swapping for tokens...",)
-                    .await;
+                let _ = send_signal(
+                    &bot_clone,
+                    &chat_owned,
+                    "⏳ Received authorization code. Swapping for tokens...",
+                )
+                .await;
 
                 match exchange_google_code(
                     &client_id,
@@ -5435,8 +5863,7 @@ async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::
                             let success_msg = "✅ *Google/Gmail Authorization Successful!*\n\n\
                                     The new refresh token has been successfully written to your `.env` file.\n\
                                     Google statement/receipt email sync is now active!";
-                            let _ = send_signal(&bot_clone, &chat_owned, success_msg)
-                                .await;
+                            let _ = send_signal(&bot_clone, &chat_owned, success_msg).await;
                             println!("OAuth: Google refresh token successfully saved to .env");
                         }
                         Err(e) => {
@@ -5460,8 +5887,7 @@ async fn handle_login_google(bot: &Bot, chat_id: &ChatId) -> Result<(), anyhow::
             }
             Err(_) => {
                 let timeout_msg = "❌ *Google Login Timeout*\n\nThe login listener timed out after 5 minutes. Please try again with `/login gmail`.";
-                let _ = send_signal(&bot_clone, &chat_owned, timeout_msg)
-                    .await;
+                let _ = send_signal(&bot_clone, &chat_owned, timeout_msg).await;
                 println!("OAuth: Google redirect listener timed out");
             }
         }
@@ -5501,7 +5927,11 @@ async fn handle_manual_code(
     let service = match parts.next() {
         Some(s) => s.to_lowercase(),
         None => {
-            send_signal(&bot, chat_id, "⚠️ Usage: `/login code <gmail|health|calendar> ...`",)
+            send_signal(
+                &bot,
+                chat_id,
+                "⚠️ Usage: `/login code <gmail|health|calendar> ...`",
+            )
             .await?;
             return Ok(());
         }
@@ -5520,21 +5950,47 @@ async fn handle_manual_code(
         let client_id = std::env::var("CHOTU_OAUTH_CLIENT_ID")?;
         let client_secret = std::env::var("CHOTU_OAUTH_CLIENT_SECRET")?;
 
-        send_signal(&bot, chat_id, "⏳ Swapping manual code for Google/Gmail tokens...").await?;
-        match exchange_google_code(&client_id, &client_secret, &code, "http://localhost:8080/callback").await {
+        send_signal(
+            &bot,
+            chat_id,
+            "⏳ Swapping manual code for Google/Gmail tokens...",
+        )
+        .await?;
+        match exchange_google_code(
+            &client_id,
+            &client_secret,
+            &code,
+            "http://localhost:8080/callback",
+        )
+        .await
+        {
             Ok(tokens) => {
                 save_google_refresh_token(&tokens.refresh_token)?;
-                send_signal(&bot, chat_id, "✅ *Google/Gmail Authorization Successful!*\nRefresh token saved manually.").await?;
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "✅ *Google/Gmail Authorization Successful!*\nRefresh token saved manually.",
+                )
+                .await?;
             }
             Err(e) => {
-                send_signal(&bot, chat_id, format!("❌ Gmail Token exchange failed: {}", e)).await?;
+                send_signal(
+                    &bot,
+                    chat_id,
+                    format!("❌ Gmail Token exchange failed: {}", e),
+                )
+                .await?;
             }
         }
     } else if service == "fitbit" || service == "health" {
         let requested_member = match parts.next() {
             Some(member) => member,
             None => {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <your_member_id> <code_or_url>`",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "⚠️ Usage: `/login code health <your_member_id> <code_or_url>`",
+                )
                 .await?;
                 return Ok(());
             }
@@ -5542,7 +5998,11 @@ async fn handle_manual_code(
         let code_raw = match parts.next() {
             Some(code) => code.to_string(),
             None => {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/login code health <your_member_id> <code_or_url>`",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "⚠️ Usage: `/login code health <your_member_id> <code_or_url>`",
+                )
                 .await?;
                 return Ok(());
             }
@@ -5563,8 +6023,7 @@ async fn handle_manual_code(
         {
             Some(m) => m,
             None => {
-                send_signal(&bot, chat_id, format!("❌ Unknown member `{}`.", member_id))
-                    .await?;
+                send_signal(&bot, chat_id, format!("❌ Unknown member `{}`.", member_id)).await?;
                 return Ok(());
             }
         };
@@ -5580,8 +6039,12 @@ async fn handle_manual_code(
         let client_id = std::env::var("FITBIT_CLIENT_ID")?;
         let client_secret = std::env::var("FITBIT_CLIENT_SECRET")?;
 
-        send_signal(&bot, chat_id, "⏳ Swapping manual code for Google Health tokens...")
-            .await?;
+        send_signal(
+            &bot,
+            chat_id,
+            "⏳ Swapping manual code for Google Health tokens...",
+        )
+        .await?;
         match exchange_google_code(
             &client_id,
             &client_secret,
@@ -5592,14 +6055,22 @@ async fn handle_manual_code(
         {
             Ok(tokens) => {
                 save_health_refresh_token(&member_id, &tokens.refresh_token, is_primary)?;
-                send_signal(&bot, chat_id, format!(
+                send_signal(
+                    &bot,
+                    chat_id,
+                    format!(
                         "✅ *Google Health Authorization Successful!*\nSaved `{}`.",
                         env_key
-                    ),)
+                    ),
+                )
                 .await?;
             }
             Err(e) => {
-                send_signal(&bot, chat_id, format!("❌ Google Health Token exchange failed: {}", e),)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    format!("❌ Google Health Token exchange failed: {}", e),
+                )
                 .await?;
             }
         }
@@ -5607,7 +6078,11 @@ async fn handle_manual_code(
         let requested_member = match parts.next() {
             Some(member) => member,
             None => {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/login code calendar <your_member_id> <code_or_url>`",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "⚠️ Usage: `/login code calendar <your_member_id> <code_or_url>`",
+                )
                 .await?;
                 return Ok(());
             }
@@ -5620,14 +6095,17 @@ async fn handle_manual_code(
             }
         };
         if !config.family.members.iter().any(|m| m.id == member_id) {
-            send_signal(&bot, chat_id, format!("❌ Unknown member `{}`.", member_id),)
-            .await?;
+            send_signal(&bot, chat_id, format!("❌ Unknown member `{}`.", member_id)).await?;
             return Ok(());
         }
         let code_raw = match parts.next() {
             Some(c) => c,
             None => {
-                send_signal(&bot, chat_id, "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",)
+                send_signal(
+                    &bot,
+                    chat_id,
+                    "⚠️ Usage: `/login code calendar <member_id> <code_or_url>`",
+                )
                 .await?;
                 return Ok(());
             }
@@ -5636,8 +6114,12 @@ async fn handle_manual_code(
         let client_id = std::env::var("CHOTU_OAUTH_CLIENT_ID")?;
         let client_secret = std::env::var("CHOTU_OAUTH_CLIENT_SECRET")?;
 
-        send_signal(&bot, chat_id, "⏳ Swapping manual code for Calendar tokens...")
-            .await?;
+        send_signal(
+            &bot,
+            chat_id,
+            "⏳ Swapping manual code for Calendar tokens...",
+        )
+        .await?;
         match exchange_google_code(
             &client_id,
             &client_secret,
@@ -5655,12 +6137,20 @@ async fn handle_manual_code(
                 .await?;
             }
             Err(e) => {
-                send_signal(&bot, chat_id, format!("❌ Calendar token exchange failed: {}", e))
-                    .await?;
+                send_signal(
+                    &bot,
+                    chat_id,
+                    format!("❌ Calendar token exchange failed: {}", e),
+                )
+                .await?;
             }
         }
     } else {
-        send_signal(&bot, chat_id, "⚠️ Unknown service. Supported: `gmail`, `health`, `calendar`",)
+        send_signal(
+            &bot,
+            chat_id,
+            "⚠️ Unknown service. Supported: `gmail`, `health`, `calendar`",
+        )
         .await?;
     }
 
@@ -5673,7 +6163,12 @@ mod tests {
     use chrono::Utc;
     use std::collections::HashMap;
 
-    fn holding(ticker: &str, shares: f64, avg_cost: f64, currency: Option<&str>) -> chotu_common::PortfolioHolding {
+    fn holding(
+        ticker: &str,
+        shares: f64,
+        avg_cost: f64,
+        currency: Option<&str>,
+    ) -> chotu_common::PortfolioHolding {
         chotu_common::PortfolioHolding {
             ticker: ticker.to_string(),
             shares_owned: shares,
@@ -5693,8 +6188,14 @@ mod tests {
     #[test]
     fn strip_leading_food_command_from_captions() {
         assert_eq!(strip_leading_food_command("/food pray"), "pray");
-        assert_eq!(strip_leading_food_command("/FOOD pray leftover"), "pray leftover");
-        assert_eq!(strip_leading_food_command("  /food  praj oats "), "praj oats");
+        assert_eq!(
+            strip_leading_food_command("/FOOD pray leftover"),
+            "pray leftover"
+        );
+        assert_eq!(
+            strip_leading_food_command("  /food  praj oats "),
+            "praj oats"
+        );
         assert_eq!(strip_leading_food_command("/food"), "");
         assert_eq!(
             strip_leading_food_command("pray leftover rice"),
@@ -5771,7 +6272,9 @@ mod tests {
         assert!(matches!(parse_command("  /Food eggs"), Some(Command::Food(s)) if s == "eggs"));
         assert!(parse_command("/food@bot eggs").is_none());
         assert!(parse_command("food eggs").is_none());
-        assert!(matches!(parse_command("/tasks complete abcdef12"), Some(Command::Tasks(s)) if s == "complete abcdef12"));
+        assert!(
+            matches!(parse_command("/tasks complete abcdef12"), Some(Command::Tasks(s)) if s == "complete abcdef12")
+        );
     }
 
     #[test]
@@ -5786,7 +6289,9 @@ mod tests {
     fn inbound_direct(aci: &str, text: &str) -> SignalInbound {
         SignalInbound {
             sender_aci: aci.to_string(),
-            recipient: SignalRecipient::Direct { aci: aci.to_string() },
+            recipient: SignalRecipient::Direct {
+                aci: aci.to_string(),
+            },
             text: Some(text.to_string()),
             quote_timestamp: None,
             attachments: vec![],
@@ -5868,7 +6373,9 @@ mod tests {
         assert_eq!(direct.sender_aci, "aci-alex");
         let group = SignalInbound {
             sender_aci: "aci-alex".into(),
-            recipient: SignalRecipient::Group { group_id: "household".into() },
+            recipient: SignalRecipient::Group {
+                group_id: "household".into(),
+            },
             text: Some("/tasks".into()),
             quote_timestamp: None,
             attachments: vec![],
