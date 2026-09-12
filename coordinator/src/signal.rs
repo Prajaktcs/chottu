@@ -3973,7 +3973,7 @@ async fn handle_status(
     config: &AppConfig,
     llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Query daily financials and health summaries
     let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
