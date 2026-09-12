@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chotu_common::{ChotuLlm, HealthFamilySummary};
+use chotu_common::{day_bounds_utc_in, ChotuLlm, HealthFamilySummary};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -17,15 +17,17 @@ pub async fn get_daily_data(
     date: &str,
     config: &chotu_common::AppConfig,
 ) -> Result<(Vec<SimpleTx>, Vec<HealthFamilySummary>)> {
-    // Query financials
+    let (day_start, day_end) = day_bounds_utc_in(config.resolved_tz(), date)
+        .with_context(|| format!("Invalid reflection date or timezone bounds: {date}"))?;
     let txs = sqlx::query_as::<_, SimpleTx>(
         r#"
         SELECT merchant, amount, category, currency
         FROM financial_ledger
-        WHERE date(timestamp) = ?
+        WHERE timestamp >= ? AND timestamp < ?
         "#,
     )
-    .bind(date)
+    .bind(day_start)
+    .bind(day_end)
     .fetch_all(pool)
     .await
     .context("Failed to query daily financials")?;
@@ -377,6 +379,7 @@ fn escape_yaml_double_quoted(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn test_strip_think_blocks() {
@@ -405,6 +408,62 @@ mod tests {
     fn yaml_double_quote_escapes_member_id_metacharacters() {
         let escaped = escape_yaml_double_quoted("alex: #1\\home\"");
         assert_eq!(escaped, "alex: #1\\\\home\\\"");
+    }
+
+    #[tokio::test]
+    async fn daily_data_uses_configured_timezone_for_ledger_window() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE financial_ledger (
+                timestamp DATETIME NOT NULL,
+                merchant TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                currency TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE health_family_summary (date TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for (merchant, timestamp) in [
+            ("previous-local-day", "2026-09-07T03:30:00Z"),
+            ("target-local-day", "2026-09-07T04:30:00Z"),
+            ("next-local-day", "2026-09-08T04:30:00Z"),
+        ] {
+            let timestamp = DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&Utc);
+            sqlx::query(
+                "INSERT INTO financial_ledger
+                 (timestamp, merchant, amount, category, currency)
+                 VALUES (?, ?, 1.0, 'test', 'CAD')",
+            )
+            .bind(timestamp)
+            .bind(merchant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut config = chotu_common::AppConfig::default();
+        config.timezone = Some("America/Toronto".to_string());
+        let (txs, _) = get_daily_data(&pool, "2026-09-07", &config).await.unwrap();
+
+        assert_eq!(
+            txs.iter()
+                .map(|tx| tx.merchant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target-local-day"]
+        );
     }
 
     fn health_summary(member_id: &str) -> HealthFamilySummary {

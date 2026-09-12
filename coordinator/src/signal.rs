@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
@@ -277,6 +278,10 @@ async fn send_household_attempts(
 }
 
 const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
+const PORTFOLIO_BUILD_RETRY: Duration = Duration::from_secs(5 * 60);
+const REFLECTION_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
+const BRIEF_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
+const PORTFOLIO_DELIVERY_RETRY: Duration = Duration::from_secs(5 * 60);
 
 fn signal_error_is_retryable(err: &SignalError) -> bool {
     matches!(
@@ -354,15 +359,227 @@ async fn send_text_retry(
     .await
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ScheduledJob {
+    MorningBrief,
+    Portfolio,
+    Reflection,
+}
+
+impl ScheduledJob {
+    fn label(self) -> &'static str {
+        match self {
+            Self::MorningBrief => "morning brief",
+            Self::Portfolio => "portfolio overview",
+            Self::Reflection => "evening reflection",
+        }
+    }
+}
+
+/// In-memory success by job, local civil date, and recipient.
+#[derive(Debug, Default)]
+struct ScheduledDeliveries {
+    delivered: HashMap<(ScheduledJob, String), HashSet<ChatId>>,
+    due_on: HashMap<ScheduledJob, String>,
+    portfolio_body: Option<(String, String)>,
+    portfolio_build_retry_at: Option<(String, Instant)>,
+    portfolio_error_sent_on: Option<String>,
+    brief_retry_at: HashMap<ChatId, (String, Instant)>,
+    portfolio_retry_at: HashMap<ChatId, (String, Instant)>,
+    reflection_retry_at: HashMap<ChatId, (String, Instant)>,
+    reflection_error_sent_on: HashMap<ChatId, String>,
+}
+
+impl ScheduledDeliveries {
+    fn prune(&mut self, today: &str) {
+        self.due_on.retain(|_, date| date == today);
+        self.delivered.retain(|(_, date), _| date == today);
+        if self
+            .portfolio_body
+            .as_ref()
+            .is_none_or(|(date, _)| date != today)
+        {
+            self.portfolio_body = None;
+        }
+        if self
+            .portfolio_build_retry_at
+            .as_ref()
+            .is_none_or(|(date, _)| date != today)
+        {
+            self.portfolio_build_retry_at = None;
+        }
+        if self.portfolio_error_sent_on.as_deref() != Some(today) {
+            self.portfolio_error_sent_on = None;
+        }
+        self.brief_retry_at.retain(|_, (date, _)| date == today);
+        self.portfolio_retry_at.retain(|_, (date, _)| date == today);
+        self.reflection_retry_at
+            .retain(|_, (date, _)| date == today);
+        self.reflection_error_sent_on
+            .retain(|_, date| date == today);
+    }
+
+    fn portfolio_body(&self, today: &str) -> Option<&str> {
+        self.portfolio_body
+            .as_ref()
+            .and_then(|(date, body)| (date == today).then_some(body.as_str()))
+    }
+
+    fn cache_portfolio_body(&mut self, today: &str, body: String) {
+        self.portfolio_body = Some((today.to_string(), body));
+        self.portfolio_build_retry_at = None;
+    }
+
+    fn should_rebuild_portfolio(&self, today: &str, now: Instant) -> bool {
+        if self.portfolio_body(today).is_some() {
+            return false;
+        }
+        match &self.portfolio_build_retry_at {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn mark_portfolio_build_failed(&mut self, today: &str, now: Instant) {
+        self.portfolio_build_retry_at = Some((today.to_string(), now + PORTFOLIO_BUILD_RETRY));
+    }
+
+    fn take_portfolio_error_notice(&mut self, today: &str) -> bool {
+        if self.portfolio_error_sent_on.as_deref() == Some(today) {
+            return false;
+        }
+        self.portfolio_error_sent_on = Some(today.to_string());
+        true
+    }
+    fn should_retry_brief(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
+        match self.brief_retry_at.get(cid) {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn defer_brief_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
+        self.brief_retry_at
+            .insert(cid.clone(), (today.to_string(), now + BRIEF_FAILURE_RETRY));
+    }
+
+    fn should_retry_portfolio(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
+        match self.portfolio_retry_at.get(cid) {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn defer_portfolio_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
+        self.portfolio_retry_at.insert(
+            cid.clone(),
+            (today.to_string(), now + PORTFOLIO_DELIVERY_RETRY),
+        );
+    }
+
+    fn should_retry_reflection(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
+        match self.reflection_retry_at.get(cid) {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn defer_reflection_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
+        self.reflection_retry_at.insert(
+            cid.clone(),
+            (today.to_string(), now + REFLECTION_FAILURE_RETRY),
+        );
+    }
+
+    fn should_send_reflection_error(&self, today: &str, cid: &ChatId) -> bool {
+        self.reflection_error_sent_on.get(cid).map(String::as_str) != Some(today)
+    }
+
+    fn mark_reflection_error_sent(&mut self, today: &str, cid: &ChatId) {
+        self.reflection_error_sent_on
+            .insert(cid.clone(), today.to_string());
+    }
+
+    /// Recipients still owed this job. The day's attempt starts when the clock matches
+    /// and at least one target exists; outstanding recipients keep retrying afterward.
+    fn outstanding(
+        &mut self,
+        job: ScheduledJob,
+        today: &str,
+        targets: &[ChatId],
+        clock_matches: bool,
+    ) -> Vec<ChatId> {
+        self.prune(today);
+        if clock_matches && !targets.is_empty() {
+            self.due_on.insert(job, today.to_string());
+        }
+        if self.due_on.get(&job).map(String::as_str) != Some(today) {
+            return Vec::new();
+        }
+        let delivered = self.delivered.get(&(job, today.to_string()));
+        targets
+            .iter()
+            .filter(|cid| delivered.is_none_or(|set| !set.contains(*cid)))
+            .cloned()
+            .collect()
+    }
+
+    fn mark_delivered(&mut self, job: ScheduledJob, today: &str, cid: ChatId) {
+        self.delivered
+            .entry((job, today.to_string()))
+            .or_default()
+            .insert(cid);
+    }
+}
+
+async fn send_scheduled_recipients(
+    bot: &Bot,
+    recipients: &[ChatId],
+    text: &str,
+    attempts: u32,
+    label: &str,
+) -> Vec<ChatId> {
+    let mut ok = Vec::new();
+    for cid in recipients {
+        if send_text_retry(bot, cid, text, attempts, label)
+            .await
+            .is_ok()
+        {
+            ok.push(cid.clone());
+        }
+    }
+    ok
+}
+
+fn log_scheduled_job(
+    job: ScheduledJob,
+    clock: chotu_common::ClockTime,
+    tz_name: &str,
+    retry: bool,
+) {
+    if retry {
+        println!("Signal: retrying scheduled {}.", job.label());
+    } else {
+        println!(
+            "Signal: scheduled {} ({:02}:{:02} {}).",
+            job.label(),
+            clock.hour,
+            clock.minute,
+            tz_name
+        );
+    }
+}
+
 async fn push_scheduled_brief(
     bot: &Bot,
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    date: chrono::NaiveDate,
 ) -> Result<(), SignalError> {
     let _ = send_signal(bot, chat_id, "Building morning brief...").await;
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
-    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
+    let report = crate::brief::compose_morning_brief(pool, config, for_member, date).await;
     send_markdown_retry(
         bot,
         chat_id,
@@ -470,9 +687,7 @@ pub async fn start_signal_client(
     let sched_states = conversation_states.clone();
     let sched_config = shared_config.clone();
     tokio::spawn(async move {
-        let mut last_brief = String::new();
-        let mut last_portfolio = String::new();
-        let mut last_reflect = String::new();
+        let mut deliveries = ScheduledDeliveries::default();
         loop {
             let cfg = sched_config.as_ref();
             let now = cfg.now_in_tz();
@@ -481,90 +696,140 @@ pub async fn start_signal_client(
             let tz_name = cfg.resolved_timezone_name();
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::morning_brief) {
-                if clock.matches(now) && date_str != last_brief && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled morning brief ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    let mut any_ok = false;
-                    for cid in &targets {
-                        if push_scheduled_brief(&sched_bot, cid, &sched_pool, &cfg)
-                            .await
-                            .is_ok()
+                let matches = clock.matches(now);
+                let due = deliveries.outstanding(
+                    ScheduledJob::MorningBrief,
+                    &date_str,
+                    &targets,
+                    matches,
+                );
+                let retry_check_at = Instant::now();
+                let due: Vec<_> = due
+                    .into_iter()
+                    .filter(|cid| deliveries.should_retry_brief(&date_str, cid, retry_check_at))
+                    .collect();
+                if !due.is_empty() {
+                    log_scheduled_job(ScheduledJob::MorningBrief, clock, &tz_name, !matches);
+                    for cid in due {
+                        if push_scheduled_brief(
+                            &sched_bot,
+                            &cid,
+                            &sched_pool,
+                            cfg,
+                            now.date_naive(),
+                        )
+                        .await
+                        .is_ok()
                         {
-                            any_ok = true;
+                            deliveries.mark_delivered(ScheduledJob::MorningBrief, &date_str, cid);
+                        } else {
+                            deliveries.defer_brief_retry(&date_str, &cid, Instant::now());
                         }
-                    }
-                    if any_ok {
-                        last_brief = date_str.clone();
                     }
                 }
             }
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::portfolio) {
-                if clock.matches(now) && date_str != last_portfolio && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled portfolio overview ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    match build_networth_summary(&sched_pool, &cfg).await {
-                        Ok(msg) => {
-                            if send_household_attempts(
-                                &sched_bot,
-                                &cfg,
-                                msg,
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                            )
-                            .await
-                            {
-                                last_portfolio = date_str.clone();
+                let matches = clock.matches(now);
+                let due =
+                    deliveries.outstanding(ScheduledJob::Portfolio, &date_str, &targets, matches);
+                let retry_check_at = Instant::now();
+                let due: Vec<_> = due
+                    .into_iter()
+                    .filter(|cid| deliveries.should_retry_portfolio(&date_str, cid, retry_check_at))
+                    .collect();
+                if !due.is_empty() {
+                    if deliveries.should_rebuild_portfolio(&date_str, Instant::now()) {
+                        match build_networth_summary(&sched_pool, cfg).await {
+                            Ok(msg) => deliveries.cache_portfolio_body(&date_str, msg),
+                            Err(e) => {
+                                eprintln!(
+                                    "Signal: failed to build scheduled portfolio overview: {}",
+                                    e
+                                );
+                                if deliveries.take_portfolio_error_notice(&date_str) {
+                                    let err_msg = format!("Portfolio overview failed: {}", e);
+                                    let _ = send_scheduled_recipients(
+                                        &sched_bot,
+                                        &due,
+                                        &err_msg,
+                                        SCHEDULED_SIGNAL_ATTEMPTS,
+                                        "scheduled portfolio overview error",
+                                    )
+                                    .await;
+                                }
+                                deliveries.mark_portfolio_build_failed(&date_str, Instant::now());
                             }
                         }
-                        Err(e) => {
-                            eprintln!(
-                                "Signal: failed to build scheduled portfolio overview: {}",
-                                e
-                            );
-                            let _ = send_household_attempts(
-                                &sched_bot,
-                                &cfg,
-                                format!("Portfolio overview failed: {}", e),
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                            )
-                            .await;
+                    }
+                    if let Some(msg) = deliveries.portfolio_body(&date_str).map(str::to_string) {
+                        log_scheduled_job(ScheduledJob::Portfolio, clock, &tz_name, !matches);
+                        let succeeded: HashSet<_> = send_scheduled_recipients(
+                            &sched_bot,
+                            &due,
+                            &msg,
+                            SCHEDULED_SIGNAL_ATTEMPTS,
+                            "scheduled portfolio overview",
+                        )
+                        .await
+                        .into_iter()
+                        .collect();
+                        for cid in due {
+                            if succeeded.contains(&cid) {
+                                deliveries.mark_delivered(ScheduledJob::Portfolio, &date_str, cid);
+                            } else {
+                                deliveries.defer_portfolio_retry(&date_str, &cid, Instant::now());
+                            }
                         }
                     }
                 }
             }
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::reflection) {
-                if clock.matches(now) && date_str != last_reflect && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled evening reflection ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    let mut any_ok = false;
-                    for cid in &targets {
-                        let scope = caller_scope(cfg, cid, cid.lookup_aci())
+                let matches = clock.matches(now);
+                let due =
+                    deliveries.outstanding(ScheduledJob::Reflection, &date_str, &targets, matches);
+                let retry_check_at = Instant::now();
+                let due: Vec<_> = due
+                    .into_iter()
+                    .filter(|cid| {
+                        deliveries.should_retry_reflection(&date_str, cid, retry_check_at)
+                    })
+                    .collect();
+                if !due.is_empty() {
+                    log_scheduled_job(ScheduledJob::Reflection, clock, &tz_name, !matches);
+                    for cid in due {
+                        let scope = caller_scope(cfg, &cid, cid.lookup_aci())
                             .expect("scheduled reflection targets are authorized");
-                        if handle_reflect_trigger(
+                        let send_failure_notice =
+                            deliveries.should_send_reflection_error(&date_str, &cid);
+                        let outcome = handle_reflect_trigger(
                             &sched_bot,
-                            cid,
+                            &cid,
                             &sched_pool,
                             &sched_llm,
                             sched_states.clone(),
                             cfg,
                             &scope,
+                            now.date_naive(),
                             SCHEDULED_SIGNAL_ATTEMPTS,
+                            send_failure_notice,
                         )
-                        .await
-                        .is_ok()
-                        {
-                            any_ok = true;
+                        .await;
+                        match outcome {
+                            Ok(ReflectionPromptDelivery::Delivered) => {
+                                deliveries.mark_delivered(ScheduledJob::Reflection, &date_str, cid);
+                            }
+                            Ok(ReflectionPromptDelivery::NotDelivered) => {
+                                deliveries.defer_reflection_retry(&date_str, &cid, Instant::now());
+                                if send_failure_notice {
+                                    deliveries.mark_reflection_error_sent(&date_str, &cid);
+                                }
+                            }
+                            Err(_) => {
+                                deliveries.defer_reflection_retry(&date_str, &cid, Instant::now());
+                            }
                         }
-                    }
-                    if any_ok {
-                        last_reflect = date_str;
                     }
                 }
             }
@@ -778,7 +1043,19 @@ async fn handle_command(
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1).await?;
+            handle_reflect_trigger(
+                &bot,
+                &chat_id,
+                &pool,
+                &llm,
+                states,
+                config,
+                &scope,
+                config.now_in_tz().date_naive(),
+                1,
+                true,
+            )
+            .await?;
         }
         Command::Chat => {
             send_signal(
@@ -1067,7 +1344,7 @@ async fn log_food_for_member(
     timing_utterance: &str,
 ) -> Result<(), SignalError> {
     let food_time = effective_food_time(timing_utterance, food_time);
-    let timing = resolve_food_log_timing(food_date, food_time.as_deref());
+    let timing = resolve_food_log_timing(food_date, food_time.as_deref(), config.resolved_tz());
 
     send_signal(
         &bot,
@@ -3425,8 +3702,14 @@ async fn handle_brief(
 
     // Linked DMs get private calendar/tasks/nutrition/training; household chat stays family-wide.
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
-    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
-    send_signal(&bot, chat_id, report).await?;
+    let report = crate::brief::compose_morning_brief(
+        pool,
+        config,
+        for_member,
+        config.now_in_tz().date_naive(),
+    )
+    .await;
+    send_signal(bot, chat_id, report).await?;
     Ok(())
 }
 
@@ -3740,7 +4023,7 @@ async fn handle_status(
     config: &AppConfig,
     llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Query daily financials and health summaries
     let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
@@ -4682,6 +4965,11 @@ async fn poll_spend_budget_alerts(
     Ok(())
 }
 
+enum ReflectionPromptDelivery {
+    Delivered,
+    NotDelivered,
+}
+
 async fn handle_reflect_trigger(
     bot: &Bot,
     chat_id: &ChatId,
@@ -4690,9 +4978,11 @@ async fn handle_reflect_trigger(
     states: StateMap,
     config: &AppConfig,
     scope: &CallerScope,
+    date: chrono::NaiveDate,
     prompt_attempts: u32,
-) -> Result<(), SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    send_failure_notice: bool,
+) -> Result<ReflectionPromptDelivery, SignalError> {
+    let date_str = date.format("%Y-%m-%d").to_string();
 
     let ping = send_signal(
         &bot,
@@ -4711,15 +5001,17 @@ async fn handle_reflect_trigger(
         Ok(data) => data,
         Err(e) => {
             eprintln!("Reflect prompt query error: {:?}", e);
-            send_plain_retry(
-                bot,
-                chat_id,
-                "Failed to retrieve today's logs from database.",
-                prompt_attempts,
-                "evening reflection db error",
-            )
-            .await?;
-            return Ok(());
+            if send_failure_notice {
+                send_plain_retry(
+                    bot,
+                    chat_id,
+                    "Failed to retrieve today's logs from database.",
+                    prompt_attempts,
+                    "evening reflection db error",
+                )
+                .await?;
+            }
+            return Ok(ReflectionPromptDelivery::NotDelivered);
         }
     };
     crate::reflection::filter_health_for_member(&mut healths, scope.member_id());
@@ -4759,21 +5051,23 @@ async fn handle_reflect_trigger(
                     member_id: scope.member_id().map(str::to_string),
                 },
             );
+            Ok(ReflectionPromptDelivery::Delivered)
         }
         Err(e) => {
             eprintln!("Failed to generate reflection prompt: {:?}", e);
-            send_plain_retry(
-                bot,
-                chat_id,
-                format!("❌ Failed to generate reflection prompt: {}", e),
-                prompt_attempts,
-                "evening reflection llm error",
-            )
-            .await?;
+            if send_failure_notice {
+                send_plain_retry(
+                    bot,
+                    chat_id,
+                    format!("❌ Failed to generate reflection prompt: {}", e),
+                    prompt_attempts,
+                    "evening reflection llm error",
+                )
+                .await?;
+            }
+            Ok(ReflectionPromptDelivery::NotDelivered)
         }
     }
-
-    Ok(())
 }
 
 async fn handle_message(
@@ -5151,19 +5445,23 @@ async fn handle_food_photo(
     .await?;
 
     let timing = if caption_rest.trim().is_empty() {
-        resolve_food_log_timing(None, None)
+        resolve_food_log_timing(None, None, config.resolved_tz())
     } else {
         match llm.extract_food_log_context(&caption_rest).await {
             Ok(ctx) => {
                 let food_time = effective_food_time(&caption_rest, ctx.food_time.as_deref());
-                resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
+                resolve_food_log_timing(
+                    ctx.food_date.as_deref(),
+                    food_time.as_deref(),
+                    config.resolved_tz(),
+                )
             }
             Err(e) => {
                 eprintln!(
                     "Food photo caption timing extract failed (using now): {:?}",
                     e
                 );
-                resolve_food_log_timing(None, None)
+                resolve_food_log_timing(None, None, config.resolved_tz())
             }
         }
     };
@@ -6805,5 +7103,169 @@ mod tests {
         assert!(!ok);
         assert_eq!(delivered, 0);
         assert_eq!(reminder_mappings(&pool).await, Vec::<(String, i64)>::new());
+    }
+
+    fn scheduled_sample_targets() -> (ChatId, ChatId, Vec<ChatId>) {
+        let alex = SignalRecipient::Direct {
+            aci: "aci-alex".to_string(),
+        };
+        let jordan = SignalRecipient::Direct {
+            aci: "aci-jordan".to_string(),
+        };
+        (alex.clone(), jordan.clone(), vec![alex, jordan])
+    }
+
+    #[test]
+    fn scheduled_jobs_retry_only_failed_recipients() {
+        let date = "2026-09-09";
+        let (alex, jordan, targets) = scheduled_sample_targets();
+        for job in [
+            ScheduledJob::MorningBrief,
+            ScheduledJob::Portfolio,
+            ScheduledJob::Reflection,
+        ] {
+            let mut deliveries = ScheduledDeliveries::default();
+            assert_eq!(deliveries.outstanding(job, date, &targets, true), targets);
+            deliveries.mark_delivered(job, date, alex.clone());
+
+            assert_eq!(
+                deliveries.outstanding(job, date, &targets, true),
+                vec![jordan.clone()]
+            );
+            assert_eq!(
+                deliveries.outstanding(job, date, &targets, false),
+                vec![jordan.clone()]
+            );
+
+            deliveries.mark_delivered(job, date, jordan.clone());
+            assert!(deliveries.outstanding(job, date, &targets, true).is_empty());
+            assert!(deliveries
+                .outstanding(job, date, &targets, false)
+                .is_empty());
+
+            assert_eq!(
+                deliveries.outstanding(job, "2026-09-10", &targets, true),
+                targets
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_jobs_do_not_start_without_targets() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let (_, _, targets) = scheduled_sample_targets();
+        assert!(deliveries
+            .outstanding(ScheduledJob::MorningBrief, "2026-09-09", &[], true)
+            .is_empty());
+        assert!(deliveries
+            .outstanding(ScheduledJob::MorningBrief, "2026-09-09", &targets, false)
+            .is_empty());
+    }
+
+    #[test]
+    fn scheduled_portfolio_body_is_cached_for_the_due_day() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (_, _, targets) = scheduled_sample_targets();
+        assert!(deliveries.portfolio_body(date).is_none());
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, true);
+        deliveries.cache_portfolio_body(date, "networth".into());
+        assert_eq!(deliveries.portfolio_body(date), Some("networth"));
+
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, false);
+        assert_eq!(deliveries.portfolio_body(date), Some("networth"));
+
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, "2026-09-10", &targets, true);
+        assert!(deliveries.portfolio_body("2026-09-10").is_none());
+    }
+
+    #[test]
+    fn scheduled_portfolio_rebuilds_after_backoff() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (_, _, targets) = scheduled_sample_targets();
+        let now = Instant::now();
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, true);
+
+        assert!(deliveries.should_rebuild_portfolio(date, now));
+        deliveries.mark_portfolio_build_failed(date, now);
+        assert!(!deliveries.should_rebuild_portfolio(date, now));
+        assert!(deliveries.should_rebuild_portfolio(date, now + PORTFOLIO_BUILD_RETRY));
+
+        deliveries.cache_portfolio_body(date, "networth".into());
+        assert!(!deliveries.should_rebuild_portfolio(date, now + PORTFOLIO_BUILD_RETRY));
+
+        let next = "2026-09-10";
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, next, &targets, true);
+        assert!(deliveries.should_rebuild_portfolio(next, now));
+    }
+
+    #[test]
+    fn scheduled_portfolio_error_notice_is_once_per_day() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (_, _, targets) = scheduled_sample_targets();
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, true);
+        assert!(deliveries.take_portfolio_error_notice(date));
+        assert!(!deliveries.take_portfolio_error_notice(date));
+
+        let next = "2026-09-10";
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, next, &targets, true);
+        assert!(deliveries.take_portfolio_error_notice(next));
+    }
+
+    #[test]
+    fn scheduled_brief_failures_back_off_per_recipient() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+        let now = Instant::now();
+
+        deliveries.defer_brief_retry(date, &alex, now);
+        assert!(!deliveries.should_retry_brief(date, &alex, now));
+        assert!(deliveries.should_retry_brief(date, &jordan, now));
+        assert!(deliveries.should_retry_brief(date, &alex, now + BRIEF_FAILURE_RETRY));
+        assert!(deliveries.should_retry_brief("2026-09-10", &alex, now));
+    }
+
+    #[test]
+    fn scheduled_portfolio_delivery_failures_back_off_per_recipient() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+        let now = Instant::now();
+
+        deliveries.defer_portfolio_retry(date, &alex, now);
+        assert!(!deliveries.should_retry_portfolio(date, &alex, now));
+        assert!(deliveries.should_retry_portfolio(date, &jordan, now));
+        assert!(deliveries.should_retry_portfolio(date, &alex, now + PORTFOLIO_DELIVERY_RETRY));
+        assert!(deliveries.should_retry_portfolio("2026-09-10", &alex, now));
+    }
+
+    #[test]
+    fn scheduled_reflection_failures_back_off_per_recipient() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+        let now = Instant::now();
+
+        deliveries.defer_reflection_retry(date, &alex, now);
+        assert!(!deliveries.should_retry_reflection(date, &alex, now));
+        assert!(deliveries.should_retry_reflection(date, &jordan, now));
+        assert!(deliveries.should_retry_reflection(date, &alex, now + REFLECTION_FAILURE_RETRY));
+        assert!(deliveries.should_retry_reflection("2026-09-10", &alex, now));
+    }
+
+    #[test]
+    fn scheduled_reflection_error_notice_is_once_per_recipient_and_day() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+
+        assert!(deliveries.should_send_reflection_error(date, &alex));
+        deliveries.mark_reflection_error_sent(date, &alex);
+        assert!(!deliveries.should_send_reflection_error(date, &alex));
+        assert!(deliveries.should_send_reflection_error(date, &jordan));
+        assert!(deliveries.should_send_reflection_error("2026-09-10", &alex));
     }
 }
