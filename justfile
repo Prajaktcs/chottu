@@ -58,9 +58,13 @@ run: setup
     #!/usr/bin/env bash
     set -e
 
-    if [ -z "$SIGNAL_CLI_SOCKET" ] || [ -z "$SIGNAL_CLI_DATA_DIR" ] || [ -z "$SIGNAL_ACCOUNT" ] || [ -z "$GEMINI_API_KEY" ]; then
-        echo "WARNING: SIGNAL_CLI_SOCKET, SIGNAL_CLI_DATA_DIR, SIGNAL_ACCOUNT, and GEMINI_API_KEY must be configured in your environment or .env file."
+    if [ -z "$SIGNAL_CLI_SOCKET" ] || [ -z "$GEMINI_API_KEY" ]; then
+        echo "WARNING: SIGNAL_CLI_SOCKET and GEMINI_API_KEY must be configured in your environment or .env file."
         echo "Please edit the .env file and add your credentials first."
+        exit 1
+    fi
+    if ! command -v lsof >/dev/null 2>&1; then
+        echo "lsof is required to probe the signal-cli Unix socket."
         exit 1
     fi
 
@@ -71,9 +75,26 @@ run: setup
             wait "$signal_cli_pid" 2>/dev/null || true
         fi
     }
-    trap cleanup EXIT INT TERM
+    socket_ready() {
+        [ -S "$SIGNAL_CLI_SOCKET" ] && lsof -a -U "$SIGNAL_CLI_SOCKET" >/dev/null 2>&1
+    }
+    trap cleanup EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
 
-    if [ ! -S "$SIGNAL_CLI_SOCKET" ]; then
+    if ! socket_ready; then
+        if [ -e "$SIGNAL_CLI_SOCKET" ] && [ ! -S "$SIGNAL_CLI_SOCKET" ]; then
+            echo "SIGNAL_CLI_SOCKET exists but is not a Unix socket: $SIGNAL_CLI_SOCKET"
+            exit 1
+        fi
+        if [ -S "$SIGNAL_CLI_SOCKET" ]; then
+            echo "Removing stale signal-cli socket: $SIGNAL_CLI_SOCKET"
+            rm -f "$SIGNAL_CLI_SOCKET"
+        fi
+        if [ -z "$SIGNAL_CLI_DATA_DIR" ] || [ -z "$SIGNAL_ACCOUNT" ]; then
+            echo "SIGNAL_CLI_DATA_DIR and SIGNAL_ACCOUNT are required to start signal-cli."
+            exit 1
+        fi
         if ! command -v signal-cli >/dev/null 2>&1; then
             echo "signal-cli is not installed. Install it with: brew install signal-cli"
             exit 1
@@ -85,15 +106,15 @@ run: setup
         signal_cli_pid=$!
 
         for _ in {1..100}; do
-            [ -S "$SIGNAL_CLI_SOCKET" ] && break
+            socket_ready && break
             if ! kill -0 "$signal_cli_pid" 2>/dev/null; then
                 wait "$signal_cli_pid"
             fi
             sleep 0.1
         done
 
-        if [ ! -S "$SIGNAL_CLI_SOCKET" ]; then
-            echo "signal-cli did not create its Unix socket: $SIGNAL_CLI_SOCKET"
+        if ! socket_ready; then
+            echo "signal-cli did not become ready on: $SIGNAL_CLI_SOCKET"
             exit 1
         fi
     fi
