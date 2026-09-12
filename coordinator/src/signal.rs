@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use sqlx::SqlitePool;
@@ -277,6 +278,7 @@ async fn send_household_attempts(
 }
 
 const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
+const PORTFOLIO_BUILD_RETRY: Duration = Duration::from_secs(5 * 60);
 
 fn signal_error_is_retryable(err: &SignalError) -> bool {
     matches!(
@@ -377,6 +379,8 @@ struct ScheduledDeliveries {
     delivered: HashMap<(ScheduledJob, String), HashSet<ChatId>>,
     due_on: HashMap<ScheduledJob, String>,
     portfolio_body: Option<(String, String)>,
+    portfolio_build_retry_at: Option<(String, Instant)>,
+    portfolio_error_sent_on: Option<String>,
 }
 
 impl ScheduledDeliveries {
@@ -390,6 +394,16 @@ impl ScheduledDeliveries {
         {
             self.portfolio_body = None;
         }
+        if self
+            .portfolio_build_retry_at
+            .as_ref()
+            .is_none_or(|(date, _)| date != today)
+        {
+            self.portfolio_build_retry_at = None;
+        }
+        if self.portfolio_error_sent_on.as_deref() != Some(today) {
+            self.portfolio_error_sent_on = None;
+        }
     }
 
     fn portfolio_body(&self, today: &str) -> Option<&str> {
@@ -400,6 +414,29 @@ impl ScheduledDeliveries {
 
     fn cache_portfolio_body(&mut self, today: &str, body: String) {
         self.portfolio_body = Some((today.to_string(), body));
+        self.portfolio_build_retry_at = None;
+    }
+
+    fn should_rebuild_portfolio(&self, today: &str, now: Instant) -> bool {
+        if self.portfolio_body(today).is_some() {
+            return false;
+        }
+        match &self.portfolio_build_retry_at {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn mark_portfolio_build_failed(&mut self, today: &str, now: Instant) {
+        self.portfolio_build_retry_at = Some((today.to_string(), now + PORTFOLIO_BUILD_RETRY));
+    }
+
+    fn take_portfolio_error_notice(&mut self, today: &str) -> bool {
+        if self.portfolio_error_sent_on.as_deref() == Some(today) {
+            return false;
+        }
+        self.portfolio_error_sent_on = Some(today.to_string());
+        true
     }
 
     /// Recipients still owed this job. The day's attempt starts when the clock matches
@@ -622,7 +659,7 @@ pub async fn start_signal_client(
                 let due =
                     deliveries.outstanding(ScheduledJob::Portfolio, &date_str, &targets, matches);
                 if !due.is_empty() {
-                    if deliveries.portfolio_body(&date_str).is_none() && matches {
+                    if deliveries.should_rebuild_portfolio(&date_str, Instant::now()) {
                         match build_networth_summary(&sched_pool, cfg).await {
                             Ok(msg) => deliveries.cache_portfolio_body(&date_str, msg),
                             Err(e) => {
@@ -630,15 +667,18 @@ pub async fn start_signal_client(
                                     "Signal: failed to build scheduled portfolio overview: {}",
                                     e
                                 );
-                                let err_msg = format!("Portfolio overview failed: {}", e);
-                                let _ = send_scheduled_recipients(
-                                    &sched_bot,
-                                    &due,
-                                    &err_msg,
-                                    SCHEDULED_SIGNAL_ATTEMPTS,
-                                    "scheduled portfolio overview error",
-                                )
-                                .await;
+                                if deliveries.take_portfolio_error_notice(&date_str) {
+                                    let err_msg = format!("Portfolio overview failed: {}", e);
+                                    let _ = send_scheduled_recipients(
+                                        &sched_bot,
+                                        &due,
+                                        &err_msg,
+                                        SCHEDULED_SIGNAL_ATTEMPTS,
+                                        "scheduled portfolio overview error",
+                                    )
+                                    .await;
+                                }
+                                deliveries.mark_portfolio_build_failed(&date_str, Instant::now());
                             }
                         }
                     }
@@ -6997,5 +7037,40 @@ mod tests {
 
         let _ = deliveries.outstanding(ScheduledJob::Portfolio, "2026-09-10", &targets, true);
         assert!(deliveries.portfolio_body("2026-09-10").is_none());
+    }
+
+    #[test]
+    fn scheduled_portfolio_rebuilds_after_backoff() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (_, _, targets) = scheduled_sample_targets();
+        let now = Instant::now();
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, true);
+
+        assert!(deliveries.should_rebuild_portfolio(date, now));
+        deliveries.mark_portfolio_build_failed(date, now);
+        assert!(!deliveries.should_rebuild_portfolio(date, now));
+        assert!(deliveries.should_rebuild_portfolio(date, now + PORTFOLIO_BUILD_RETRY));
+
+        deliveries.cache_portfolio_body(date, "networth".into());
+        assert!(!deliveries.should_rebuild_portfolio(date, now + PORTFOLIO_BUILD_RETRY));
+
+        let next = "2026-09-10";
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, next, &targets, true);
+        assert!(deliveries.should_rebuild_portfolio(next, now));
+    }
+
+    #[test]
+    fn scheduled_portfolio_error_notice_is_once_per_day() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (_, _, targets) = scheduled_sample_targets();
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, date, &targets, true);
+        assert!(deliveries.take_portfolio_error_notice(date));
+        assert!(!deliveries.take_portfolio_error_notice(date));
+
+        let next = "2026-09-10";
+        let _ = deliveries.outstanding(ScheduledJob::Portfolio, next, &targets, true);
+        assert!(deliveries.take_portfolio_error_notice(next));
     }
 }
