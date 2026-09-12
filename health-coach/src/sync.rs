@@ -1019,7 +1019,7 @@ pub async fn sync_primary_today(
     gemini_client: Option<&GeminiClient>,
     config: &AppConfig,
 ) -> Result<HealthSyncReport> {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date = config.now_in_tz().format("%Y-%m-%d").to_string();
     let member_id = config
         .family
         .members
@@ -1035,7 +1035,7 @@ pub async fn sync_configured_members_today(
     gemini_client: Option<&GeminiClient>,
     config: &AppConfig,
 ) -> Result<Vec<HealthSyncReport>> {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date = config.now_in_tz().format("%Y-%m-%d").to_string();
     let mut reports = Vec::new();
     let mut errors = Vec::new();
 
