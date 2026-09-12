@@ -708,19 +708,20 @@ pub async fn start_signal_client(
                     for cid in due {
                         let scope = caller_scope(cfg, &cid, cid.lookup_aci())
                             .expect("scheduled reflection targets are authorized");
-                        if handle_reflect_trigger(
-                            &sched_bot,
-                            &cid,
-                            &sched_pool,
-                            &sched_llm,
-                            sched_states.clone(),
-                            cfg,
-                            &scope,
-                            SCHEDULED_SIGNAL_ATTEMPTS,
-                        )
-                        .await
-                        .is_ok()
-                        {
+                        if matches!(
+                            handle_reflect_trigger(
+                                &sched_bot,
+                                &cid,
+                                &sched_pool,
+                                &sched_llm,
+                                sched_states.clone(),
+                                cfg,
+                                &scope,
+                                SCHEDULED_SIGNAL_ATTEMPTS,
+                            )
+                            .await,
+                            Ok(ReflectionPromptDelivery::Delivered)
+                        ) {
                             deliveries.mark_delivered(ScheduledJob::Reflection, &date_str, cid);
                         }
                     }
@@ -4840,6 +4841,11 @@ async fn poll_spend_budget_alerts(
     Ok(())
 }
 
+enum ReflectionPromptDelivery {
+    Delivered,
+    NotDelivered,
+}
+
 async fn handle_reflect_trigger(
     bot: &Bot,
     chat_id: &ChatId,
@@ -4849,7 +4855,7 @@ async fn handle_reflect_trigger(
     config: &AppConfig,
     scope: &CallerScope,
     prompt_attempts: u32,
-) -> Result<(), SignalError> {
+) -> Result<ReflectionPromptDelivery, SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let ping = send_signal(
@@ -4877,7 +4883,7 @@ async fn handle_reflect_trigger(
                 "evening reflection db error",
             )
             .await?;
-            return Ok(());
+            return Ok(ReflectionPromptDelivery::NotDelivered);
         }
     };
     crate::reflection::filter_health_for_member(&mut healths, scope.member_id());
@@ -4917,6 +4923,7 @@ async fn handle_reflect_trigger(
                     member_id: scope.member_id().map(str::to_string),
                 },
             );
+            Ok(ReflectionPromptDelivery::Delivered)
         }
         Err(e) => {
             eprintln!("Failed to generate reflection prompt: {:?}", e);
@@ -4928,10 +4935,9 @@ async fn handle_reflect_trigger(
                 "evening reflection llm error",
             )
             .await?;
+            Ok(ReflectionPromptDelivery::NotDelivered)
         }
     }
-
-    Ok(())
 }
 
 async fn handle_message(
