@@ -483,7 +483,11 @@ pub async fn format_brief_calendar_section(
     today: &str,
     for_member_id: Option<&str>,
 ) -> String {
-    let Some((day_start_utc, day_end_utc)) = local_day_bounds_utc(today) else {
+    let Some(date) = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok() else {
+        return "_Could not resolve today's date bounds._\n".to_string();
+    };
+    let Some((day_start_utc, day_end_utc)) = naive_day_bounds_utc_in(&config.resolved_tz(), date)
+    else {
         return "_Could not resolve today's date bounds._\n".to_string();
     };
 

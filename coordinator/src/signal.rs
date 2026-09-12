@@ -280,6 +280,7 @@ async fn send_household_attempts(
 const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
 const PORTFOLIO_BUILD_RETRY: Duration = Duration::from_secs(5 * 60);
 const REFLECTION_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
+const BRIEF_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
 
 fn signal_error_is_retryable(err: &SignalError) -> bool {
     matches!(
@@ -382,6 +383,7 @@ struct ScheduledDeliveries {
     portfolio_body: Option<(String, String)>,
     portfolio_build_retry_at: Option<(String, Instant)>,
     portfolio_error_sent_on: Option<String>,
+    brief_retry_at: HashMap<ChatId, (String, Instant)>,
     reflection_retry_at: HashMap<ChatId, (String, Instant)>,
     reflection_error_sent_on: HashMap<ChatId, String>,
 }
@@ -407,6 +409,7 @@ impl ScheduledDeliveries {
         if self.portfolio_error_sent_on.as_deref() != Some(today) {
             self.portfolio_error_sent_on = None;
         }
+        self.brief_retry_at.retain(|_, (date, _)| date == today);
         self.reflection_retry_at
             .retain(|_, (date, _)| date == today);
         self.reflection_error_sent_on
@@ -445,6 +448,18 @@ impl ScheduledDeliveries {
         self.portfolio_error_sent_on = Some(today.to_string());
         true
     }
+    fn should_retry_brief(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
+        match self.brief_retry_at.get(cid) {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn defer_brief_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
+        self.brief_retry_at
+            .insert(cid.clone(), (today.to_string(), now + BRIEF_FAILURE_RETRY));
+    }
+
     fn should_retry_reflection(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
         match self.reflection_retry_at.get(cid) {
             Some((date, retry_at)) if date == today => now >= *retry_at,
@@ -671,6 +686,11 @@ pub async fn start_signal_client(
                     &targets,
                     matches,
                 );
+                let retry_check_at = Instant::now();
+                let due: Vec<_> = due
+                    .into_iter()
+                    .filter(|cid| deliveries.should_retry_brief(&date_str, cid, retry_check_at))
+                    .collect();
                 if !due.is_empty() {
                     log_scheduled_job(ScheduledJob::MorningBrief, clock, &tz_name, !matches);
                     for cid in due {
@@ -685,6 +705,8 @@ pub async fn start_signal_client(
                         .is_ok()
                         {
                             deliveries.mark_delivered(ScheduledJob::MorningBrief, &date_str, cid);
+                        } else {
+                            deliveries.defer_brief_retry(&date_str, &cid, Instant::now());
                         }
                     }
                 }
@@ -1294,7 +1316,7 @@ async fn log_food_for_member(
     timing_utterance: &str,
 ) -> Result<(), SignalError> {
     let food_time = effective_food_time(timing_utterance, food_time);
-    let timing = resolve_food_log_timing(food_date, food_time.as_deref());
+    let timing = resolve_food_log_timing(food_date, food_time.as_deref(), config.resolved_tz());
 
     send_signal(
         &bot,
@@ -5395,19 +5417,23 @@ async fn handle_food_photo(
     .await?;
 
     let timing = if caption_rest.trim().is_empty() {
-        resolve_food_log_timing(None, None)
+        resolve_food_log_timing(None, None, config.resolved_tz())
     } else {
         match llm.extract_food_log_context(&caption_rest).await {
             Ok(ctx) => {
                 let food_time = effective_food_time(&caption_rest, ctx.food_time.as_deref());
-                resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
+                resolve_food_log_timing(
+                    ctx.food_date.as_deref(),
+                    food_time.as_deref(),
+                    config.resolved_tz(),
+                )
             }
             Err(e) => {
                 eprintln!(
                     "Food photo caption timing extract failed (using now): {:?}",
                     e
                 );
-                resolve_food_log_timing(None, None)
+                resolve_food_log_timing(None, None, config.resolved_tz())
             }
         }
     };
@@ -7158,6 +7184,20 @@ mod tests {
         let next = "2026-09-10";
         let _ = deliveries.outstanding(ScheduledJob::Portfolio, next, &targets, true);
         assert!(deliveries.take_portfolio_error_notice(next));
+    }
+
+    #[test]
+    fn scheduled_brief_failures_back_off_per_recipient() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+        let now = Instant::now();
+
+        deliveries.defer_brief_retry(date, &alex, now);
+        assert!(!deliveries.should_retry_brief(date, &alex, now));
+        assert!(deliveries.should_retry_brief(date, &jordan, now));
+        assert!(deliveries.should_retry_brief(date, &alex, now + BRIEF_FAILURE_RETRY));
+        assert!(deliveries.should_retry_brief("2026-09-10", &alex, now));
     }
 
     #[test]
