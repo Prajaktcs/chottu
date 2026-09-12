@@ -20,7 +20,9 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 
 Direct/group authorization is context-specific and configuration is static for the process lifetime. A linked sender in the wrong group is rejected.
 
-Start the daemon before `just run`:
+`just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon.
+
+To manage the daemon separately, start it before `just run`:
 
 ```sh
 signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" daemon \
@@ -29,7 +31,7 @@ signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" daemon \
 
 One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`finishLink`). Chotu has no runtime identity-linking command. Configure each member ACI in `config.yaml` before startup, keep the daemon data directory private, and upgrade signal-cli at least every 90 days.
 
-`just run` exits immediately if `SIGNAL_CLI_SOCKET` is missing/not a socket or `GEMINI_API_KEY` is missing, so the supervisor (Signal, Health Coach, Streamer, Janitor) never starts.
+`just run` exits immediately if `SIGNAL_CLI_SOCKET` or `GEMINI_API_KEY` is missing. It also rejects a non-socket path and replaces a stale socket before starting signal-cli, so the supervisor (Signal, Health Coach, Streamer, Janitor) only starts after a daemon is listening.
 
 ---
 
