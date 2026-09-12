@@ -86,6 +86,8 @@ schedules:
 
 currency: "CAD"
 email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
+# Set to false to stop the Streamer from connecting to IMAP or pulling email.
+email_sync_enabled: true
 
 # Optional: two core values that shape evening /reflect prompts (alongside health logs).
 # Prefer exactly two anchors; nest courage/humility as tools. Integrity = alignment sensor.

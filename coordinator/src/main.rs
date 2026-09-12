@@ -22,8 +22,9 @@ async fn main() -> Result<()> {
     );
 
     // Run non-blocking startup OAuth checks only after configuration and storage are valid.
+    let email_sync_enabled = config.email_sync_enabled;
     tokio::spawn(async move {
-        if let Err(e) = perform_startup_oauth_checks().await {
+        if let Err(e) = perform_startup_oauth_checks(email_sync_enabled).await {
             eprintln!("Error in startup OAuth checks: {:?}", e);
         }
     });
@@ -182,7 +183,7 @@ mod tests {
     }
 }
 
-async fn perform_startup_oauth_checks() -> Result<()> {
+async fn perform_startup_oauth_checks(email_sync_enabled: bool) -> Result<()> {
     use chotu_common::{
         exchange_google_code, save_google_health_refresh_token, save_google_refresh_token,
         start_redirect_listener,
@@ -259,6 +260,11 @@ async fn perform_startup_oauth_checks() -> Result<()> {
                 }
             }
         }
+    }
+
+    if !email_sync_enabled {
+        println!("Email sync is disabled; skipping Gmail OAuth startup check.");
+        return Ok(());
     }
 
     // 2. Google / Gmail Check
