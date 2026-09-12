@@ -543,10 +543,11 @@ async fn push_scheduled_brief(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    date: chrono::NaiveDate,
 ) -> Result<(), SignalError> {
     let _ = send_signal(bot, chat_id, "Building morning brief...").await;
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
-    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
+    let report = crate::brief::compose_morning_brief(pool, config, for_member, date).await;
     send_markdown_retry(
         bot,
         chat_id,
@@ -673,9 +674,15 @@ pub async fn start_signal_client(
                 if !due.is_empty() {
                     log_scheduled_job(ScheduledJob::MorningBrief, clock, &tz_name, !matches);
                     for cid in due {
-                        if push_scheduled_brief(&sched_bot, &cid, &sched_pool, cfg)
-                            .await
-                            .is_ok()
+                        if push_scheduled_brief(
+                            &sched_bot,
+                            &cid,
+                            &sched_pool,
+                            cfg,
+                            now.date_naive(),
+                        )
+                        .await
+                        .is_ok()
                         {
                             deliveries.mark_delivered(ScheduledJob::MorningBrief, &date_str, cid);
                         }
@@ -732,15 +739,18 @@ pub async fn start_signal_client(
                 let matches = clock.matches(now);
                 let due =
                     deliveries.outstanding(ScheduledJob::Reflection, &date_str, &targets, matches);
+                let retry_check_at = Instant::now();
+                let due: Vec<_> = due
+                    .into_iter()
+                    .filter(|cid| {
+                        deliveries.should_retry_reflection(&date_str, cid, retry_check_at)
+                    })
+                    .collect();
                 if !due.is_empty() {
                     log_scheduled_job(ScheduledJob::Reflection, clock, &tz_name, !matches);
                     for cid in due {
                         let scope = caller_scope(cfg, &cid, cid.lookup_aci())
                             .expect("scheduled reflection targets are authorized");
-                        let attempt_started = Instant::now();
-                        if !deliveries.should_retry_reflection(&date_str, &cid, attempt_started) {
-                            continue;
-                        }
                         let send_failure_notice =
                             deliveries.should_send_reflection_error(&date_str, &cid);
                         let outcome = handle_reflect_trigger(
@@ -751,6 +761,7 @@ pub async fn start_signal_client(
                             sched_states.clone(),
                             cfg,
                             &scope,
+                            now.date_naive(),
                             SCHEDULED_SIGNAL_ATTEMPTS,
                             send_failure_notice,
                         )
@@ -760,13 +771,13 @@ pub async fn start_signal_client(
                                 deliveries.mark_delivered(ScheduledJob::Reflection, &date_str, cid);
                             }
                             Ok(ReflectionPromptDelivery::NotDelivered) => {
-                                deliveries.defer_reflection_retry(&date_str, &cid, attempt_started);
+                                deliveries.defer_reflection_retry(&date_str, &cid, Instant::now());
                                 if send_failure_notice {
                                     deliveries.mark_reflection_error_sent(&date_str, &cid);
                                 }
                             }
                             Err(_) => {
-                                deliveries.defer_reflection_retry(&date_str, &cid, attempt_started);
+                                deliveries.defer_reflection_retry(&date_str, &cid, Instant::now());
                             }
                         }
                     }
@@ -982,8 +993,19 @@ async fn handle_command(
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1, true)
-                .await?;
+            handle_reflect_trigger(
+                &bot,
+                &chat_id,
+                &pool,
+                &llm,
+                states,
+                config,
+                &scope,
+                config.now_in_tz().date_naive(),
+                1,
+                true,
+            )
+            .await?;
         }
         Command::Chat => {
             send_signal(
@@ -3630,8 +3652,13 @@ async fn handle_brief(
 
     // Linked DMs get private calendar/tasks/nutrition/training; household chat stays family-wide.
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
-    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
-    send_signal(&bot, chat_id, report).await?;
+    let report = crate::brief::compose_morning_brief(
+        pool,
+        config,
+        for_member,
+        config.now_in_tz().date_naive(),
+    )
+    .await;
     Ok(())
 }
 
@@ -4900,10 +4927,11 @@ async fn handle_reflect_trigger(
     states: StateMap,
     config: &AppConfig,
     scope: &CallerScope,
+    date: chrono::NaiveDate,
     prompt_attempts: u32,
     send_failure_notice: bool,
 ) -> Result<ReflectionPromptDelivery, SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = date.format("%Y-%m-%d").to_string();
 
     let ping = send_signal(
         &bot,
