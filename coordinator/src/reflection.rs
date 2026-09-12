@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
-use chotu_common::{ChotuLlm, HealthFamilySummary};
-use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use chotu_common::{day_bounds_utc_in, ChotuLlm, HealthFamilySummary};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -13,43 +12,13 @@ pub struct SimpleTx {
     pub currency: String,
 }
 
-fn configured_day_bounds_utc(
-    date: &str,
-    config: &chotu_common::AppConfig,
-) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
-    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .with_context(|| format!("Invalid reflection date: {date}"))?;
-    let next_date = date
-        .succ_opt()
-        .context("Reflection date has no following day")?;
-    let timezone = config.resolved_tz();
-    let start = timezone
-        .from_local_datetime(
-            &date
-                .and_hms_opt(0, 0, 0)
-                .context("Invalid reflection day start")?,
-        )
-        .single()
-        .context("Reflection day start is ambiguous or nonexistent")?
-        .with_timezone(&Utc);
-    let end = timezone
-        .from_local_datetime(
-            &next_date
-                .and_hms_opt(0, 0, 0)
-                .context("Invalid reflection day end")?,
-        )
-        .single()
-        .context("Reflection day end is ambiguous or nonexistent")?
-        .with_timezone(&Utc);
-    Ok((start, end))
-}
-
 pub async fn get_daily_data(
     pool: &SqlitePool,
     date: &str,
     config: &chotu_common::AppConfig,
 ) -> Result<(Vec<SimpleTx>, Vec<HealthFamilySummary>)> {
-    let (day_start, day_end) = configured_day_bounds_utc(date, config)?;
+    let (day_start, day_end) = day_bounds_utc_in(config.resolved_tz(), date)
+        .with_context(|| format!("Invalid reflection date or timezone bounds: {date}"))?;
     let txs = sqlx::query_as::<_, SimpleTx>(
         r#"
         SELECT merchant, amount, category, currency
@@ -410,6 +379,7 @@ fn escape_yaml_double_quoted(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn test_strip_think_blocks() {

@@ -281,6 +281,7 @@ const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
 const PORTFOLIO_BUILD_RETRY: Duration = Duration::from_secs(5 * 60);
 const REFLECTION_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
 const BRIEF_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
+const PORTFOLIO_DELIVERY_RETRY: Duration = Duration::from_secs(5 * 60);
 
 fn signal_error_is_retryable(err: &SignalError) -> bool {
     matches!(
@@ -384,6 +385,7 @@ struct ScheduledDeliveries {
     portfolio_build_retry_at: Option<(String, Instant)>,
     portfolio_error_sent_on: Option<String>,
     brief_retry_at: HashMap<ChatId, (String, Instant)>,
+    portfolio_retry_at: HashMap<ChatId, (String, Instant)>,
     reflection_retry_at: HashMap<ChatId, (String, Instant)>,
     reflection_error_sent_on: HashMap<ChatId, String>,
 }
@@ -410,6 +412,7 @@ impl ScheduledDeliveries {
             self.portfolio_error_sent_on = None;
         }
         self.brief_retry_at.retain(|_, (date, _)| date == today);
+        self.portfolio_retry_at.retain(|_, (date, _)| date == today);
         self.reflection_retry_at
             .retain(|_, (date, _)| date == today);
         self.reflection_error_sent_on
@@ -458,6 +461,20 @@ impl ScheduledDeliveries {
     fn defer_brief_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
         self.brief_retry_at
             .insert(cid.clone(), (today.to_string(), now + BRIEF_FAILURE_RETRY));
+    }
+
+    fn should_retry_portfolio(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
+        match self.portfolio_retry_at.get(cid) {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn defer_portfolio_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
+        self.portfolio_retry_at.insert(
+            cid.clone(),
+            (today.to_string(), now + PORTFOLIO_DELIVERY_RETRY),
+        );
     }
 
     fn should_retry_reflection(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
@@ -716,6 +733,11 @@ pub async fn start_signal_client(
                 let matches = clock.matches(now);
                 let due =
                     deliveries.outstanding(ScheduledJob::Portfolio, &date_str, &targets, matches);
+                let retry_check_at = Instant::now();
+                let due: Vec<_> = due
+                    .into_iter()
+                    .filter(|cid| deliveries.should_retry_portfolio(&date_str, cid, retry_check_at))
+                    .collect();
                 if !due.is_empty() {
                     if deliveries.should_rebuild_portfolio(&date_str, Instant::now()) {
                         match build_networth_summary(&sched_pool, cfg).await {
@@ -742,7 +764,7 @@ pub async fn start_signal_client(
                     }
                     if let Some(msg) = deliveries.portfolio_body(&date_str).map(str::to_string) {
                         log_scheduled_job(ScheduledJob::Portfolio, clock, &tz_name, !matches);
-                        for cid in send_scheduled_recipients(
+                        let succeeded: HashSet<_> = send_scheduled_recipients(
                             &sched_bot,
                             &due,
                             &msg,
@@ -750,8 +772,14 @@ pub async fn start_signal_client(
                             "scheduled portfolio overview",
                         )
                         .await
-                        {
-                            deliveries.mark_delivered(ScheduledJob::Portfolio, &date_str, cid);
+                        .into_iter()
+                        .collect();
+                        for cid in due {
+                            if succeeded.contains(&cid) {
+                                deliveries.mark_delivered(ScheduledJob::Portfolio, &date_str, cid);
+                            } else {
+                                deliveries.defer_portfolio_retry(&date_str, &cid, Instant::now());
+                            }
                         }
                     }
                 }
@@ -7198,6 +7226,20 @@ mod tests {
         assert!(deliveries.should_retry_brief(date, &jordan, now));
         assert!(deliveries.should_retry_brief(date, &alex, now + BRIEF_FAILURE_RETRY));
         assert!(deliveries.should_retry_brief("2026-09-10", &alex, now));
+    }
+
+    #[test]
+    fn scheduled_portfolio_delivery_failures_back_off_per_recipient() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+        let now = Instant::now();
+
+        deliveries.defer_portfolio_retry(date, &alex, now);
+        assert!(!deliveries.should_retry_portfolio(date, &alex, now));
+        assert!(deliveries.should_retry_portfolio(date, &jordan, now));
+        assert!(deliveries.should_retry_portfolio(date, &alex, now + PORTFOLIO_DELIVERY_RETRY));
+        assert!(deliveries.should_retry_portfolio("2026-09-10", &alex, now));
     }
 
     #[test]

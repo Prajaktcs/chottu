@@ -88,6 +88,14 @@ pub fn local_day_bounds_utc(date_yyyy_mm_dd: &str) -> Option<(DateTime<Utc>, Dat
     let naive = NaiveDate::parse_from_str(date_yyyy_mm_dd, "%Y-%m-%d").ok()?;
     local_naive_day_bounds_utc(naive)
 }
+/// Civil day `[start, end)` in UTC for an explicit IANA timezone.
+pub fn day_bounds_utc_in(
+    timezone: chrono_tz::Tz,
+    date_yyyy_mm_dd: &str,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let naive = NaiveDate::parse_from_str(date_yyyy_mm_dd, "%Y-%m-%d").ok()?;
+    naive_day_bounds_utc_in(&timezone, naive)
+}
 
 fn local_naive_day_bounds_utc(naive: NaiveDate) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     naive_day_bounds_utc_in(&Local, naive)
@@ -483,14 +491,9 @@ pub async fn format_brief_calendar_section(
     today: &str,
     for_member_id: Option<&str>,
 ) -> String {
-    let Some(date) = NaiveDate::parse_from_str(today, "%Y-%m-%d").ok() else {
+    let Some((day_start_utc, day_end_utc)) = day_bounds_utc_in(config.resolved_tz(), today) else {
         return "_Could not resolve today's date bounds._\n".to_string();
     };
-    let Some((day_start_utc, day_end_utc)) = naive_day_bounds_utc_in(&config.resolved_tz(), date)
-    else {
-        return "_Could not resolve today's date bounds._\n".to_string();
-    };
-
     let fetch = fetch_family_events(config, day_start_utc, day_end_utc, for_member_id).await;
 
     if !fetch.any_client {

@@ -20,7 +20,7 @@ pub mod spend_budget;
 pub mod yahoo_profile;
 
 pub use agenda::{
-    compose_calendar_agenda, escape_md, fetch_family_events, find_conflicts,
+    compose_calendar_agenda, day_bounds_utc_in, escape_md, fetch_family_events, find_conflicts,
     format_brief_calendar_section, local_day_bounds_utc, member_in_calendar_scope, truncate,
     week_bounds_utc, CalendarConflict, CalendarWindow, FamilyCalendarError, FamilyEventsFetch,
 };
