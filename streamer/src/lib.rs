@@ -7,6 +7,12 @@ mod imap_client;
 /// Main entry point to run the Streamer Agent (live IMAP or offline simulation).
 pub async fn run(pool: SqlitePool, llm: ChotuLlm, config: chotu_common::AppConfig) -> Result<()> {
     println!("Streamer Agent initiated.");
+    if !config.email_sync_enabled {
+        println!("Email sync is disabled in config.yaml; IMAP will not be contacted.");
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+        }
+    }
 
     // Check if live IMAP environment credentials are set
     let has_credentials = std::env::var("CHOTU_OAUTH_REFRESH_TOKEN").is_ok()

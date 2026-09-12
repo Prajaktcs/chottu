@@ -102,6 +102,10 @@ Enable Google Health API; add each family Google account as a consent-screen tes
 | `CHOTU_OAUTH_REFRESH_TOKEN` | Written by `/login gmail` |
 | `CHOTU_IMAP_SERVER` / `CHOTU_IMAP_PORT` | Optional; default `imap.gmail.com` / `993` |
 
+Set `email_sync_enabled: false` in `config.yaml` and restart Chotu to stop the
+Streamer before Gmail OAuth or IMAP connection. Existing installs default to
+`true` when the setting is omitted.
+
 ### Calendar (per adult)
 
 | Env | Role |

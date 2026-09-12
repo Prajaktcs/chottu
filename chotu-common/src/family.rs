@@ -601,6 +601,10 @@ pub struct TargetAllocation {
     pub buckets: Vec<AllocationBucket>,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// Household monthly spend limits by ledger category (e.g. Food, Shopping).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SpendBudgets {
@@ -620,6 +624,9 @@ pub struct AppConfig {
     pub spend_budgets: Option<SpendBudgets>,
     pub currency: Option<String>,
     pub email_classifier_prompt_path: Option<String>,
+    /// Whether the Streamer connects to IMAP and pulls incoming email.
+    #[serde(default = "default_true")]
+    pub email_sync_enabled: bool,
     /// IANA tz database name (e.g. `America/Toronto`). Agent wall clock; DB stores UTC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
@@ -649,6 +656,7 @@ impl Default for AppConfig {
             spend_budgets: None,
             currency: None,
             email_classifier_prompt_path: None,
+            email_sync_enabled: true,
             timezone: Some(DEFAULT_TIMEZONE.to_string()),
             schedules: None,
         }
@@ -1078,6 +1086,7 @@ family:
 
 currency: "CAD"
 email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
+email_sync_enabled: false
 
 spend_budgets:
   categories:
@@ -1109,6 +1118,7 @@ target_allocation:
             loaded.email_classifier_prompt_path,
             Some("prompts/email_classifier_system_prompt.txt".to_string())
         );
+        assert!(!loaded.email_sync_enabled);
         // Alex should have a calendar configured
         assert!(loaded.family.members[0].calendar.is_some());
         let cal = loaded.family.members[0].calendar.as_ref().unwrap();
@@ -1188,6 +1198,7 @@ schedules:
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", yaml).unwrap();
         let loaded = load_config(tmp.path()).expect("valid config");
+        assert!(loaded.email_sync_enabled);
         assert_eq!(loaded.resolved_timezone_name(), "America/Toronto");
         let s = loaded.schedules.as_ref().unwrap();
         assert_eq!(s.morning_brief().unwrap().hour, 7);
