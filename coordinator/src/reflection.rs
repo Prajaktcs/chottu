@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chotu_common::{ChotuLlm, HealthFamilySummary};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -12,20 +13,52 @@ pub struct SimpleTx {
     pub currency: String,
 }
 
+fn configured_day_bounds_utc(
+    date: &str,
+    config: &chotu_common::AppConfig,
+) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .with_context(|| format!("Invalid reflection date: {date}"))?;
+    let next_date = date
+        .succ_opt()
+        .context("Reflection date has no following day")?;
+    let timezone = config.resolved_tz();
+    let start = timezone
+        .from_local_datetime(
+            &date
+                .and_hms_opt(0, 0, 0)
+                .context("Invalid reflection day start")?,
+        )
+        .single()
+        .context("Reflection day start is ambiguous or nonexistent")?
+        .with_timezone(&Utc);
+    let end = timezone
+        .from_local_datetime(
+            &next_date
+                .and_hms_opt(0, 0, 0)
+                .context("Invalid reflection day end")?,
+        )
+        .single()
+        .context("Reflection day end is ambiguous or nonexistent")?
+        .with_timezone(&Utc);
+    Ok((start, end))
+}
+
 pub async fn get_daily_data(
     pool: &SqlitePool,
     date: &str,
     config: &chotu_common::AppConfig,
 ) -> Result<(Vec<SimpleTx>, Vec<HealthFamilySummary>)> {
-    // Query financials
+    let (day_start, day_end) = configured_day_bounds_utc(date, config)?;
     let txs = sqlx::query_as::<_, SimpleTx>(
         r#"
         SELECT merchant, amount, category, currency
         FROM financial_ledger
-        WHERE date(timestamp) = ?
+        WHERE timestamp >= ? AND timestamp < ?
         "#,
     )
-    .bind(date)
+    .bind(day_start)
+    .bind(day_end)
     .fetch_all(pool)
     .await
     .context("Failed to query daily financials")?;
@@ -405,6 +438,62 @@ mod tests {
     fn yaml_double_quote_escapes_member_id_metacharacters() {
         let escaped = escape_yaml_double_quoted("alex: #1\\home\"");
         assert_eq!(escaped, "alex: #1\\\\home\\\"");
+    }
+
+    #[tokio::test]
+    async fn daily_data_uses_configured_timezone_for_ledger_window() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE financial_ledger (
+                timestamp DATETIME NOT NULL,
+                merchant TEXT NOT NULL,
+                amount REAL NOT NULL,
+                category TEXT NOT NULL,
+                currency TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("CREATE TABLE health_family_summary (date TEXT NOT NULL)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        for (merchant, timestamp) in [
+            ("previous-local-day", "2026-09-07T03:30:00Z"),
+            ("target-local-day", "2026-09-07T04:30:00Z"),
+            ("next-local-day", "2026-09-08T04:30:00Z"),
+        ] {
+            let timestamp = DateTime::parse_from_rfc3339(timestamp)
+                .unwrap()
+                .with_timezone(&Utc);
+            sqlx::query(
+                "INSERT INTO financial_ledger
+                 (timestamp, merchant, amount, category, currency)
+                 VALUES (?, ?, 1.0, 'test', 'CAD')",
+            )
+            .bind(timestamp)
+            .bind(merchant)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut config = chotu_common::AppConfig::default();
+        config.timezone = Some("America/Toronto".to_string());
+        let (txs, _) = get_daily_data(&pool, "2026-09-07", &config).await.unwrap();
+
+        assert_eq!(
+            txs.iter()
+                .map(|tx| tx.merchant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target-local-day"]
+        );
     }
 
     fn health_summary(member_id: &str) -> HealthFamilySummary {
