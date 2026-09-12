@@ -3659,6 +3659,7 @@ async fn handle_brief(
         config.now_in_tz().date_naive(),
     )
     .await;
+    send_signal(bot, chat_id, report).await?;
     Ok(())
 }
 
