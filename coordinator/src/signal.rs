@@ -279,6 +279,7 @@ async fn send_household_attempts(
 
 const SCHEDULED_SIGNAL_ATTEMPTS: u32 = 3;
 const PORTFOLIO_BUILD_RETRY: Duration = Duration::from_secs(5 * 60);
+const REFLECTION_FAILURE_RETRY: Duration = Duration::from_secs(5 * 60);
 
 fn signal_error_is_retryable(err: &SignalError) -> bool {
     matches!(
@@ -381,6 +382,8 @@ struct ScheduledDeliveries {
     portfolio_body: Option<(String, String)>,
     portfolio_build_retry_at: Option<(String, Instant)>,
     portfolio_error_sent_on: Option<String>,
+    reflection_retry_at: HashMap<ChatId, (String, Instant)>,
+    reflection_error_sent_on: HashMap<ChatId, String>,
 }
 
 impl ScheduledDeliveries {
@@ -404,6 +407,10 @@ impl ScheduledDeliveries {
         if self.portfolio_error_sent_on.as_deref() != Some(today) {
             self.portfolio_error_sent_on = None;
         }
+        self.reflection_retry_at
+            .retain(|_, (date, _)| date == today);
+        self.reflection_error_sent_on
+            .retain(|_, date| date == today);
     }
 
     fn portfolio_body(&self, today: &str) -> Option<&str> {
@@ -437,6 +444,28 @@ impl ScheduledDeliveries {
         }
         self.portfolio_error_sent_on = Some(today.to_string());
         true
+    }
+    fn should_retry_reflection(&self, today: &str, cid: &ChatId, now: Instant) -> bool {
+        match self.reflection_retry_at.get(cid) {
+            Some((date, retry_at)) if date == today => now >= *retry_at,
+            _ => true,
+        }
+    }
+
+    fn defer_reflection_retry(&mut self, today: &str, cid: &ChatId, now: Instant) {
+        self.reflection_retry_at.insert(
+            cid.clone(),
+            (today.to_string(), now + REFLECTION_FAILURE_RETRY),
+        );
+    }
+
+    fn should_send_reflection_error(&self, today: &str, cid: &ChatId) -> bool {
+        self.reflection_error_sent_on.get(cid).map(String::as_str) != Some(today)
+    }
+
+    fn mark_reflection_error_sent(&mut self, today: &str, cid: &ChatId) {
+        self.reflection_error_sent_on
+            .insert(cid.clone(), today.to_string());
     }
 
     /// Recipients still owed this job. The day's attempt starts when the clock matches
@@ -708,21 +737,37 @@ pub async fn start_signal_client(
                     for cid in due {
                         let scope = caller_scope(cfg, &cid, cid.lookup_aci())
                             .expect("scheduled reflection targets are authorized");
-                        if matches!(
-                            handle_reflect_trigger(
-                                &sched_bot,
-                                &cid,
-                                &sched_pool,
-                                &sched_llm,
-                                sched_states.clone(),
-                                cfg,
-                                &scope,
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                            )
-                            .await,
-                            Ok(ReflectionPromptDelivery::Delivered)
-                        ) {
-                            deliveries.mark_delivered(ScheduledJob::Reflection, &date_str, cid);
+                        let attempt_started = Instant::now();
+                        if !deliveries.should_retry_reflection(&date_str, &cid, attempt_started) {
+                            continue;
+                        }
+                        let send_failure_notice =
+                            deliveries.should_send_reflection_error(&date_str, &cid);
+                        let outcome = handle_reflect_trigger(
+                            &sched_bot,
+                            &cid,
+                            &sched_pool,
+                            &sched_llm,
+                            sched_states.clone(),
+                            cfg,
+                            &scope,
+                            SCHEDULED_SIGNAL_ATTEMPTS,
+                            send_failure_notice,
+                        )
+                        .await;
+                        match outcome {
+                            Ok(ReflectionPromptDelivery::Delivered) => {
+                                deliveries.mark_delivered(ScheduledJob::Reflection, &date_str, cid);
+                            }
+                            Ok(ReflectionPromptDelivery::NotDelivered) => {
+                                deliveries.defer_reflection_retry(&date_str, &cid, attempt_started);
+                                if send_failure_notice {
+                                    deliveries.mark_reflection_error_sent(&date_str, &cid);
+                                }
+                            }
+                            Err(_) => {
+                                deliveries.defer_reflection_retry(&date_str, &cid, attempt_started);
+                            }
                         }
                     }
                 }
@@ -937,7 +982,8 @@ async fn handle_command(
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1).await?;
+            handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1, true)
+                .await?;
         }
         Command::Chat => {
             send_signal(
@@ -4855,6 +4901,7 @@ async fn handle_reflect_trigger(
     config: &AppConfig,
     scope: &CallerScope,
     prompt_attempts: u32,
+    send_failure_notice: bool,
 ) -> Result<ReflectionPromptDelivery, SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
@@ -4875,14 +4922,16 @@ async fn handle_reflect_trigger(
         Ok(data) => data,
         Err(e) => {
             eprintln!("Reflect prompt query error: {:?}", e);
-            send_plain_retry(
-                bot,
-                chat_id,
-                "Failed to retrieve today's logs from database.",
-                prompt_attempts,
-                "evening reflection db error",
-            )
-            .await?;
+            if send_failure_notice {
+                send_plain_retry(
+                    bot,
+                    chat_id,
+                    "Failed to retrieve today's logs from database.",
+                    prompt_attempts,
+                    "evening reflection db error",
+                )
+                .await?;
+            }
             return Ok(ReflectionPromptDelivery::NotDelivered);
         }
     };
@@ -4927,14 +4976,16 @@ async fn handle_reflect_trigger(
         }
         Err(e) => {
             eprintln!("Failed to generate reflection prompt: {:?}", e);
-            send_plain_retry(
-                bot,
-                chat_id,
-                format!("❌ Failed to generate reflection prompt: {}", e),
-                prompt_attempts,
-                "evening reflection llm error",
-            )
-            .await?;
+            if send_failure_notice {
+                send_plain_retry(
+                    bot,
+                    chat_id,
+                    format!("❌ Failed to generate reflection prompt: {}", e),
+                    prompt_attempts,
+                    "evening reflection llm error",
+                )
+                .await?;
+            }
             Ok(ReflectionPromptDelivery::NotDelivered)
         }
     }
@@ -7078,5 +7129,32 @@ mod tests {
         let next = "2026-09-10";
         let _ = deliveries.outstanding(ScheduledJob::Portfolio, next, &targets, true);
         assert!(deliveries.take_portfolio_error_notice(next));
+    }
+
+    #[test]
+    fn scheduled_reflection_failures_back_off_per_recipient() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+        let now = Instant::now();
+
+        deliveries.defer_reflection_retry(date, &alex, now);
+        assert!(!deliveries.should_retry_reflection(date, &alex, now));
+        assert!(deliveries.should_retry_reflection(date, &jordan, now));
+        assert!(deliveries.should_retry_reflection(date, &alex, now + REFLECTION_FAILURE_RETRY));
+        assert!(deliveries.should_retry_reflection("2026-09-10", &alex, now));
+    }
+
+    #[test]
+    fn scheduled_reflection_error_notice_is_once_per_recipient_and_day() {
+        let mut deliveries = ScheduledDeliveries::default();
+        let date = "2026-09-09";
+        let (alex, jordan, _) = scheduled_sample_targets();
+
+        assert!(deliveries.should_send_reflection_error(date, &alex));
+        deliveries.mark_reflection_error_sent(date, &alex);
+        assert!(!deliveries.should_send_reflection_error(date, &alex));
+        assert!(deliveries.should_send_reflection_error(date, &jordan));
+        assert!(deliveries.should_send_reflection_error("2026-09-10", &alex));
     }
 }
