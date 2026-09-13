@@ -45,6 +45,32 @@ setup:
     else
         echo ".env file already exists."
     fi
+    missing_runtime_helper=false
+    for command in nc plutil; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            echo "Missing runtime prerequisite: $command (required by just run)." >&2
+            missing_runtime_helper=true
+        fi
+    done
+    if [ "$missing_runtime_helper" = true ]; then
+        echo "nc and plutil ship with macOS; restore them with a macOS update or reinstall, then rerun just setup." >&2
+        exit 1
+    fi
+    plutil_probe='{"jsonrpc":"2.0","id":1,"result":[]}'
+    plutil_probe_jsonrpc="$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract jsonrpc xml1 -o - - 2>/dev/null || true)"
+    plutil_probe_id="$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract id xml1 -o - - 2>/dev/null || true)"
+    plutil_probe_result="$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract result xml1 -o - - 2>/dev/null || true)"
+    plist_root=$'<plist version="1.0">\n'
+    if [[ "$plutil_probe_jsonrpc" != *"$plist_root<string>2.0</string>"* ]] \
+        || [[ "$plutil_probe_id" != *"$plist_root<integer>1</integer>"* ]] \
+        || [[ "$plutil_probe_result" != *"$plist_root<array/>"* ]]; then
+        echo "Installed plutil lacks the JSON support required by just run." >&2
+        echo "Update macOS, then rerun just setup." >&2
+        exit 1
+    fi
 
 # Pull required local Ollama models
 prereqs:
@@ -63,9 +89,10 @@ run: setup
         echo "Please edit the .env file and add your credentials first."
         exit 1
     fi
-    for command in jq nc shlock; do
+    for command in nc plutil; do
         if ! command -v "$command" >/dev/null 2>&1; then
-            echo "$command is required to manage the signal-cli Unix socket."
+            echo "just run requires $command to probe SIGNAL_CLI_SOCKET." >&2
+            echo "$command ships with macOS; restore it with a macOS update or reinstall, then retry." >&2
             exit 1
         fi
     done
@@ -73,30 +100,85 @@ run: setup
     signal_cli_pid=""
     run_lock="${SIGNAL_CLI_SOCKET}.run.lock"
     lock_held=false
+    lock_owner() {
+        if [ -d "$run_lock" ] && [ ! -L "$run_lock" ]; then
+            cat "$run_lock/pid" 2>/dev/null || true
+        fi
+    }
     cleanup() {
         if [ -n "$signal_cli_pid" ]; then
             kill "$signal_cli_pid" 2>/dev/null || true
             wait "$signal_cli_pid" 2>/dev/null || true
         fi
-        if [ "$lock_held" = true ]; then
-            rm -f "$run_lock"
+        if [ "$lock_held" = true ] && [ "$(lock_owner)" = "$$" ]; then
+            rm -f "$run_lock/pid"
+            rmdir "$run_lock" 2>/dev/null || true
         fi
     }
     socket_ready() {
         [ -S "$SIGNAL_CLI_SOCKET" ] || return 1
-        local response
+        local response jsonrpc_xml response_id_xml result_xml plist_root
         response="$(printf '%s\n' '{"jsonrpc":"2.0","method":"getUserStatus","params":{},"id":1}' \
             | nc -U -w 1 "$SIGNAL_CLI_SOCKET" 2>/dev/null || true)"
-        printf '%s\n' "$response" \
-            | jq -e '.jsonrpc == "2.0" and .id == 1 and (.result | type == "array")' \
-                >/dev/null 2>&1
+        [ -n "$response" ] || return 1
+        jsonrpc_xml="$(printf '%s\n' "$response" \
+            | plutil -extract jsonrpc xml1 -o - - 2>/dev/null || true)"
+        response_id_xml="$(printf '%s\n' "$response" \
+            | plutil -extract id xml1 -o - - 2>/dev/null || true)"
+        result_xml="$(printf '%s\n' "$response" \
+            | plutil -extract result xml1 -o - - 2>/dev/null || true)"
+        plist_root=$'<plist version="1.0">\n'
+        [[ "$jsonrpc_xml" == *"$plist_root<string>2.0</string>"* ]] \
+            && [[ "$response_id_xml" == *"$plist_root<integer>1</integer>"* ]] \
+            && { [[ "$result_xml" == *"$plist_root<array/>"* ]] \
+                || [[ "$result_xml" == *"$plist_root<array>"* ]]; }
     }
     acquire_run_lock() {
-        if ! shlock -p $$ -f "$run_lock"; then
+        local lock_pid=""
+        if mkdir "$run_lock" 2>/dev/null; then
+            if ! printf '%s\n' "$$" > "$run_lock/pid"; then
+                rm -f "$run_lock/pid"
+                rmdir "$run_lock" 2>/dev/null || true
+                echo "Cannot write run lock owner: $run_lock/pid" >&2
+                exit 1
+            fi
+            lock_held=true
+            return
+        fi
+        if [ -L "$run_lock" ] || { [ -e "$run_lock" ] && [ ! -d "$run_lock" ]; }; then
+            echo "Cannot use run lock: $run_lock" >&2
+            echo "Remove it if no just run process is active, then retry." >&2
+            exit 1
+        fi
+        if [ ! -e "$run_lock" ]; then
+            echo "Cannot create run lock: $run_lock" >&2
+            echo "Ensure its parent directory exists and is writable, then retry." >&2
+            exit 1
+        fi
+        for _ in 1 2 3 4; do
+            lock_pid="$(lock_owner)"
+            [ -n "$lock_pid" ] && break
+            sleep 0.1
+        done
+        case "$lock_pid" in
+            '')
+                echo "Run lock has no owner PID: $run_lock" >&2
+                echo "Remove it if no just run process is active, then retry." >&2
+                exit 1
+                ;;
+            *[!0-9]*)
+                echo "Cannot read the owner PID from run lock: $run_lock" >&2
+                echo "Remove it if no just run process is active, then retry." >&2
+                exit 1
+                ;;
+        esac
+        if kill -0 "$lock_pid" 2>/dev/null; then
             echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
             exit 1
         fi
-        lock_held=true
+        echo "Stale run lock: $run_lock (owner PID $lock_pid is not running)." >&2
+        echo "Remove the lock directory, then retry." >&2
+        exit 1
     }
     trap cleanup EXIT
     trap 'exit 130' INT

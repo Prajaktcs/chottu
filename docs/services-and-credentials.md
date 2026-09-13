@@ -17,6 +17,7 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 | Gemini | `GEMINI_API_KEY` | **Required for `just run`** (Signal coordinator won’t start without it) |
 | Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
 | Authorized direct messages | `config.yaml` → `family.members[].signal_aci` | Per-contact **ACI** UUID for each allowed DM; distinct from `SIGNAL_ACCOUNT`. Restart after changes |
+| Runtime socket tools | `nc`, `plutil` | Standard macOS commands checked by `just setup`; required to probe and reuse the signal-cli socket |
 
 Direct/group authorization is context-specific and configuration is static for the process lifetime. A linked sender in the wrong group is rejected.
 
@@ -33,6 +34,8 @@ signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" -o json listGr
 ```
 
 `just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon. Only one `just run` process may use a configured socket at a time; a concurrent invocation exits without disturbing the active coordinator or daemon.
+
+`just setup` verifies that `nc` and `plutil` are available and that `plutil` supports the JSON operations used by the socket probe. Both commands ship with macOS and need no separate package installation. If either command is missing or incompatible, install current macOS updates, then rerun `just setup`. `just run` names the failed prerequisite before attempting to probe or reuse a daemon; it does not require `jq` or `shlock`.
 
 To manage the daemon separately, start it before `just run`:
 
