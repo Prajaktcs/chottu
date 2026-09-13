@@ -20,7 +20,9 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 
 Direct/group authorization is context-specific and configuration is static for the process lifetime. A linked sender in the wrong group is rejected.
 
-Start the daemon before `just run`:
+`just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon. Only one `just run` process may use a configured socket at a time; a concurrent invocation exits without disturbing the active coordinator or daemon.
+
+To manage the daemon separately, start it before `just run`:
 
 ```sh
 signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" daemon \
@@ -29,7 +31,7 @@ signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" daemon \
 
 One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`finishLink`). Chotu has no runtime identity-linking command. Configure each member ACI in `config.yaml` before startup, keep the daemon data directory private, and upgrade signal-cli at least every 90 days.
 
-`just run` exits immediately if `SIGNAL_CLI_SOCKET` is missing/not a socket or `GEMINI_API_KEY` is missing, so the supervisor (Signal, Health Coach, Streamer, Janitor) never starts.
+`just run` exits immediately if `SIGNAL_CLI_SOCKET` or `GEMINI_API_KEY` is missing. It also rejects a non-socket path and replaces a stale socket before starting signal-cli, so the supervisor (Signal, Health Coach, Streamer, Janitor) only starts after a daemon is listening.
 
 ---
 
@@ -149,8 +151,8 @@ Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 ## Setup order (practical)
 
 1. Rust + Ollama models + `just setup` (+ `just prereqs` to pull models)
-2. Link signal-cli as a secondary device and start the documented daemon
-3. Set each allowed member's `signal_aci` in `config.yaml`; optionally set `SIGNAL_GROUP_ID`; set `SIGNAL_CLI_SOCKET` and `GEMINI_API_KEY`; then `just run`
+2. Link signal-cli as a secondary device; starting the documented daemon separately is optional
+3. Set each allowed member's `signal_aci` in `config.yaml`; optionally set `SIGNAL_GROUP_ID`; set `SIGNAL_ACCOUNT`, `SIGNAL_CLI_DATA_DIR`, `SIGNAL_CLI_SOCKET`, and `GEMINI_API_KEY`; then `just run`
 4. Google OAuth clients → run `/login health …`, `/login gmail`, or `/login calendar …` from an authorized DM (Health/Calendar are self-only; groups cannot mutate OAuth)
 5. Optionally set `OLLAMA_MODEL=qwen3.5:9b` (and pull that model) for better triage
 6. Add OpenRouter (+ Finnhub) when you want `/research`
