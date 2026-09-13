@@ -27,6 +27,11 @@ pub(crate) enum DeliveryOutcome {
     Delivered,
     Retry,
 }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingDelivery {
+    pub(crate) local_date: String,
+    pub(crate) recipient: SignalRecipient,
+}
 
 fn recipient_parts(recipient: &SignalRecipient) -> (&'static str, &str) {
     match recipient {
@@ -52,6 +57,14 @@ async fn register_recipients(
     recipients: &[SignalRecipient],
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    sqlx::query(
+        "DELETE FROM scheduled_signal_deliveries \
+         WHERE job = ? AND local_date <> ? AND delivered_at IS NULL",
+    )
+    .bind(job.as_str())
+    .bind(local_date)
+    .execute(&mut *tx)
+    .await?;
     for recipient in recipients {
         let (kind, id) = recipient_parts(recipient);
         sqlx::query(
@@ -79,28 +92,32 @@ pub(crate) async fn due_recipients(
     current_targets: &[SignalRecipient],
     schedule_matches: bool,
     now_epoch: i64,
-) -> Result<Vec<SignalRecipient>, sqlx::Error> {
+) -> Result<Vec<PendingDelivery>, sqlx::Error> {
     if schedule_matches && !current_targets.is_empty() {
         register_recipients(pool, job, local_date, current_targets).await?;
     }
 
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT recipient_kind, recipient_id \
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT local_date, recipient_kind, recipient_id \
          FROM scheduled_signal_deliveries \
-         WHERE job = ? AND local_date = ? AND delivered_at IS NULL \
+         WHERE job = ? AND delivered_at IS NULL \
            AND (retry_after_epoch IS NULL OR retry_after_epoch <= ?) \
-         ORDER BY recipient_kind, recipient_id",
+         ORDER BY local_date, recipient_kind, recipient_id",
     )
     .bind(job.as_str())
-    .bind(local_date)
     .bind(now_epoch)
     .fetch_all(pool)
     .await?;
 
     rows.into_iter()
-        .map(|(kind, id)| recipient_from_parts(&kind, id))
-        .filter_map(|recipient| match recipient {
-            Ok(recipient) if current_targets.contains(&recipient) => Some(Ok(recipient)),
+        .map(|(local_date, kind, id)| {
+            recipient_from_parts(&kind, id).map(|recipient| PendingDelivery {
+                local_date,
+                recipient,
+            })
+        })
+        .filter_map(|delivery| match delivery {
+            Ok(delivery) if current_targets.contains(&delivery.recipient) => Some(Ok(delivery)),
             Ok(_) => None,
             Err(error) => Some(Err(error)),
         })
@@ -156,21 +173,20 @@ async fn record_outcome(
 pub(crate) async fn deliver_recipients<F, Fut>(
     pool: &SqlitePool,
     job: ScheduledJob,
-    local_date: &str,
-    recipients: Vec<SignalRecipient>,
+    recipients: Vec<PendingDelivery>,
     mut deliver: F,
 ) -> Result<(), sqlx::Error>
 where
-    F: FnMut(SignalRecipient) -> Fut,
+    F: FnMut(PendingDelivery) -> Fut,
     Fut: Future<Output = DeliveryOutcome>,
 {
-    for recipient in recipients {
-        let outcome = deliver(recipient.clone()).await;
+    for delivery in recipients {
+        let outcome = deliver(delivery.clone()).await;
         record_outcome(
             pool,
             job,
-            local_date,
-            &recipient,
+            &delivery.local_date,
+            &delivery.recipient,
             outcome,
             chrono::Utc::now().timestamp(),
         )
@@ -222,9 +238,9 @@ mod tests {
             .unwrap();
         let sent = Mutex::new(Vec::new());
 
-        deliver_recipients(&pool, job, "2026-09-13", first_due, |recipient| {
-            sent.lock().unwrap().push(recipient.clone());
-            let outcome = if recipient == alex {
+        deliver_recipients(&pool, job, first_due, |delivery| {
+            sent.lock().unwrap().push(delivery.recipient.clone());
+            let outcome = if delivery.recipient == alex {
                 DeliveryOutcome::Delivered
             } else {
                 DeliveryOutcome::Retry
@@ -251,12 +267,20 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
+        assert!(
+            due_recipients(&pool, job, "2026-09-14", &targets, false, retry_after - 1,)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
         sent.lock().unwrap().clear();
-        let retry_due = due_recipients(&pool, job, "2026-09-13", &targets, false, retry_after)
+        let retry_due = due_recipients(&pool, job, "2026-09-14", &targets, false, retry_after)
             .await
             .unwrap();
-        deliver_recipients(&pool, job, "2026-09-13", retry_due, |recipient| {
-            sent.lock().unwrap().push(recipient);
+        assert_eq!(retry_due[0].local_date, "2026-09-13");
+        deliver_recipients(&pool, job, retry_due, |delivery| {
+            sent.lock().unwrap().push(delivery.recipient);
             async { DeliveryOutcome::Delivered }
         })
         .await
@@ -266,7 +290,7 @@ mod tests {
         assert!(due_recipients(
             &pool,
             job,
-            "2026-09-13",
+            "2026-09-14",
             &targets,
             false,
             retry_after + RETRY_DELAY_SECONDS,
@@ -289,5 +313,50 @@ mod tests {
     #[tokio::test]
     async fn reflection_partial_failure_retries_only_failed_recipient() {
         assert_partial_failure_retries_only_failed_recipient(ScheduledJob::Reflection).await;
+    }
+    #[tokio::test]
+    async fn next_schedule_supersedes_an_older_pending_run() {
+        let pool = delivery_pool().await;
+        let target = SignalRecipient::Direct {
+            aci: "aci-alex".to_string(),
+        };
+        let targets = vec![target];
+        let first = due_recipients(
+            &pool,
+            ScheduledJob::MorningBrief,
+            "2026-09-13",
+            &targets,
+            true,
+            1_000,
+        )
+        .await
+        .unwrap();
+        deliver_recipients(&pool, ScheduledJob::MorningBrief, first, |_| async {
+            DeliveryOutcome::Retry
+        })
+        .await
+        .unwrap();
+
+        let next = due_recipients(
+            &pool,
+            ScheduledJob::MorningBrief,
+            "2026-09-14",
+            &targets,
+            true,
+            2_000,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].local_date, "2026-09-14");
+        let old_pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM scheduled_signal_deliveries \
+             WHERE local_date = '2026-09-13' AND delivered_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(old_pending, 0);
     }
 }

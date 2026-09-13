@@ -3,7 +3,7 @@
 use chotu_common::{
     escape_md, format_brief_calendar_section, truncate, AppConfig, HealthFamilySummary,
 };
-use chrono::{Duration, Local};
+use chrono::{Duration, Local, NaiveDate};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -32,12 +32,18 @@ pub async fn compose_morning_brief(
     config: &AppConfig,
     for_member_id: Option<&str>,
 ) -> String {
-    let now = Local::now();
-    let today = now.format("%Y-%m-%d").to_string();
-    let yesterday = (now.date_naive() - Duration::days(1))
-        .format("%Y-%m-%d")
-        .to_string();
-    let weekday = now.format("%A, %b %d, %Y");
+    compose_morning_brief_for_date(pool, config, for_member_id, Local::now().date_naive()).await
+}
+
+pub(crate) async fn compose_morning_brief_for_date(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    for_member_id: Option<&str>,
+    date: NaiveDate,
+) -> String {
+    let today = date.format("%Y-%m-%d").to_string();
+    let yesterday = (date - Duration::days(1)).format("%Y-%m-%d").to_string();
+    let weekday = date.format("%A, %b %d, %Y");
 
     let mut out = format!("☀️ *Morning Brief* — {}\n", weekday);
     if let Some(mid) = for_member_id {
@@ -64,9 +70,7 @@ pub async fn compose_morning_brief(
     out.push_str(&format_nutrition_section(pool, config, &yesterday, for_member_id).await);
 
     out.push_str("\n🏋️ *Training*\n");
-    out.push_str(
-        &format_training_section(pool, config, now.date_naive(), &yesterday, for_member_id).await,
-    );
+    out.push_str(&format_training_section(pool, config, date, &yesterday, for_member_id).await);
 
     out
 }

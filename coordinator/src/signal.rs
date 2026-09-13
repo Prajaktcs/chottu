@@ -360,10 +360,16 @@ async fn push_scheduled_brief(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    local_date: &str,
 ) -> Result<(), SignalError> {
+    let date = chrono::NaiveDate::parse_from_str(local_date, "%Y-%m-%d").map_err(|error| {
+        SignalError::Protocol(format!(
+            "invalid scheduled morning brief date {local_date}: {error}"
+        ))
+    })?;
     let _ = send_signal(bot, chat_id, "Building morning brief...").await;
     let for_member = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
-    let report = crate::brief::compose_morning_brief(pool, config, for_member).await;
+    let report = crate::brief::compose_morning_brief_for_date(pool, config, for_member, date).await;
     send_markdown_retry(
         bot,
         chat_id,
@@ -498,9 +504,10 @@ pub async fn start_signal_client(
                         if let Err(error) = scheduled_delivery::deliver_recipients(
                             &sched_pool,
                             ScheduledJob::MorningBrief,
-                            &date_str,
                             due,
-                            |chat_id| {
+                            |delivery| {
+                                let chat_id = delivery.recipient;
+                                let local_date = delivery.local_date;
                                 let bot = sched_bot.clone();
                                 let pool = sched_pool.clone();
                                 let config = sched_config.clone();
@@ -510,6 +517,7 @@ pub async fn start_signal_client(
                                         &chat_id,
                                         &pool,
                                         config.as_ref(),
+                                        &local_date,
                                     )
                                     .await
                                     {
@@ -567,9 +575,9 @@ pub async fn start_signal_client(
                         if let Err(error) = scheduled_delivery::deliver_recipients(
                             &sched_pool,
                             ScheduledJob::Portfolio,
-                            &date_str,
                             due,
-                            |chat_id| {
+                            |delivery| {
+                                let chat_id = delivery.recipient;
                                 let bot = sched_bot.clone();
                                 let summary = summary.clone();
                                 async move {
@@ -642,9 +650,10 @@ pub async fn start_signal_client(
                         if let Err(error) = scheduled_delivery::deliver_recipients(
                             &sched_pool,
                             ScheduledJob::Reflection,
-                            &date_str,
                             due,
-                            |chat_id| {
+                            |delivery| {
+                                let chat_id = delivery.recipient;
+                                let local_date = delivery.local_date;
                                 let bot = sched_bot.clone();
                                 let pool = sched_pool.clone();
                                 let llm = sched_llm.clone();
@@ -668,6 +677,7 @@ pub async fn start_signal_client(
                                         states,
                                         config.as_ref(),
                                         &scope,
+                                        local_date,
                                         SCHEDULED_SIGNAL_ATTEMPTS,
                                     )
                                     .await
@@ -909,8 +919,11 @@ async fn handle_command(
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            let _ = handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1)
-                .await?;
+            let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let _ = handle_reflect_trigger(
+                &bot, &chat_id, &pool, &llm, states, config, &scope, date_str, 1,
+            )
+            .await?;
         }
         Command::Chat => {
             send_signal(
@@ -4822,10 +4835,9 @@ async fn handle_reflect_trigger(
     states: StateMap,
     config: &AppConfig,
     scope: &CallerScope,
+    date_str: String,
     prompt_attempts: u32,
 ) -> Result<DeliveryOutcome, SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-
     let ping = send_signal(
         &bot,
         chat_id,
