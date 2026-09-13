@@ -63,7 +63,7 @@ run: setup
         echo "Please edit the .env file and add your credentials first."
         exit 1
     fi
-    for command in nc shlock; do
+    for command in jq nc shlock; do
         if ! command -v "$command" >/dev/null 2>&1; then
             echo "$command is required to manage the signal-cli Unix socket."
             exit 1
@@ -71,15 +71,15 @@ run: setup
     done
 
     signal_cli_pid=""
-    startup_lock="${SIGNAL_CLI_SOCKET}.startup.lock"
+    run_lock="${SIGNAL_CLI_SOCKET}.run.lock"
     lock_held=false
     cleanup() {
-        if [ "$lock_held" = true ]; then
-            rm -f "$startup_lock"
-        fi
         if [ -n "$signal_cli_pid" ]; then
             kill "$signal_cli_pid" 2>/dev/null || true
             wait "$signal_cli_pid" 2>/dev/null || true
+        fi
+        if [ "$lock_held" = true ]; then
+            rm -f "$run_lock"
         fi
     }
     socket_ready() {
@@ -87,69 +87,57 @@ run: setup
         local response
         response="$(printf '%s\n' '{"jsonrpc":"2.0","method":"getUserStatus","params":{},"id":1}' \
             | nc -U -w 1 "$SIGNAL_CLI_SOCKET" 2>/dev/null || true)"
-        case "$response" in
-            *'"jsonrpc":"2.0"'*'"result":'*'"id":1'*) return 0 ;;
-            *) return 1 ;;
-        esac
+        printf '%s\n' "$response" \
+            | jq -e '.jsonrpc == "2.0" and .id == 1 and (.result | type == "array")' \
+                >/dev/null 2>&1
     }
-    acquire_startup_lock() {
-        for _ in {1..100}; do
-            if shlock -p $$ -f "$startup_lock"; then
-                lock_held=true
-                return
-            fi
-            sleep 0.1
-        done
-        echo "Timed out waiting for signal-cli startup lock: $startup_lock"
-        exit 1
-    }
-    release_startup_lock() {
-        rm -f "$startup_lock"
-        lock_held=false
+    acquire_run_lock() {
+        if ! shlock -p $$ -f "$run_lock"; then
+            echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
+            exit 1
+        fi
+        lock_held=true
     }
     trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
 
+    acquire_run_lock
     if ! socket_ready; then
-        acquire_startup_lock
-        if ! socket_ready; then
-            if [ -e "$SIGNAL_CLI_SOCKET" ] && [ ! -S "$SIGNAL_CLI_SOCKET" ]; then
-                echo "SIGNAL_CLI_SOCKET exists but is not a Unix socket: $SIGNAL_CLI_SOCKET"
-                exit 1
-            fi
-            if [ -S "$SIGNAL_CLI_SOCKET" ]; then
-                echo "Removing stale signal-cli socket: $SIGNAL_CLI_SOCKET"
-                rm -f "$SIGNAL_CLI_SOCKET"
-            fi
-            if [ -z "$SIGNAL_CLI_DATA_DIR" ] || [ -z "$SIGNAL_ACCOUNT" ]; then
-                echo "SIGNAL_CLI_DATA_DIR and SIGNAL_ACCOUNT are required to start signal-cli."
-                exit 1
-            fi
-            if ! command -v signal-cli >/dev/null 2>&1; then
-                echo "signal-cli is not installed. Install it with: brew install signal-cli"
-                exit 1
-            fi
-
-            echo "Starting signal-cli daemon on $SIGNAL_CLI_SOCKET..."
-            signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" --account "$SIGNAL_ACCOUNT" daemon \
-                --receive-mode=manual --socket "$SIGNAL_CLI_SOCKET" &
-            signal_cli_pid=$!
-
-            for _ in {1..100}; do
-                socket_ready && break
-                if ! kill -0 "$signal_cli_pid" 2>/dev/null; then
-                    wait "$signal_cli_pid"
-                fi
-                sleep 0.1
-            done
-
-            if ! socket_ready; then
-                echo "signal-cli did not become ready on: $SIGNAL_CLI_SOCKET"
-                exit 1
-            fi
+        if [ -e "$SIGNAL_CLI_SOCKET" ] && [ ! -S "$SIGNAL_CLI_SOCKET" ]; then
+            echo "SIGNAL_CLI_SOCKET exists but is not a Unix socket: $SIGNAL_CLI_SOCKET"
+            exit 1
         fi
-        release_startup_lock
+        if [ -S "$SIGNAL_CLI_SOCKET" ]; then
+            echo "Removing stale signal-cli socket: $SIGNAL_CLI_SOCKET"
+            rm -f "$SIGNAL_CLI_SOCKET"
+        fi
+        if [ -z "$SIGNAL_CLI_DATA_DIR" ] || [ -z "$SIGNAL_ACCOUNT" ]; then
+            echo "SIGNAL_CLI_DATA_DIR and SIGNAL_ACCOUNT are required to start signal-cli."
+            exit 1
+        fi
+        if ! command -v signal-cli >/dev/null 2>&1; then
+            echo "signal-cli is not installed. Install it with: brew install signal-cli"
+            exit 1
+        fi
+
+        echo "Starting signal-cli daemon on $SIGNAL_CLI_SOCKET..."
+        signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" --account "$SIGNAL_ACCOUNT" daemon \
+            --receive-mode=manual --socket "$SIGNAL_CLI_SOCKET" &
+        signal_cli_pid=$!
+
+        for _ in {1..100}; do
+            socket_ready && break
+            if ! kill -0 "$signal_cli_pid" 2>/dev/null; then
+                wait "$signal_cli_pid"
+            fi
+            sleep 0.1
+        done
+
+        if ! socket_ready; then
+            echo "signal-cli did not become ready on: $SIGNAL_CLI_SOCKET"
+            exit 1
+        fi
     fi
 
     cargo run -p coordinator
