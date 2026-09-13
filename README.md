@@ -18,7 +18,7 @@ Two lines I will not cross: **privacy**, and **how far AI is allowed to go**.
 
 AI is good at a targeted job. It is bad at knowing when to stop, and at noticing it does not have enough information and should ask. That is the human part. If you need real financial advice, medical advice, or a coach for your own life, go to a person who does that work. This system is here to help you track, and to offer suggestions. It is not here to steer you, or to replace those people — or the rest of human connection.
 
-The same split applies to how the code gets written. This repo is built with heavy coding assistance (primarily Cursor). That is not an autonomous agent shipping unreviewed diffs.
+The same split applies to how the code gets written. This repo is built with heavy coding assistance. That is not an autonomous agent shipping unreviewed diffs.
 
 | Who | Owns |
 | :--- | :--- |
