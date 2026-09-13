@@ -315,6 +315,7 @@ CREATE TABLE task_chat_due_reminder_deliveries (
 ```
 
 The same provider column and text IDs apply to replacements for `scheduled_signal_deliveries` and `email_task_signal_deliveries`.
+Delivery outboxes use `pending`, `sending`, `delivered`, and terminal `failed` states. Only transient transport failures return to `pending`; authentication, configuration, protocol, and permanent request failures move to `failed`.
 
 ### Expand and rollback sequence
 

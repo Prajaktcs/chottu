@@ -1122,7 +1122,12 @@ fn validate_direct_id(provider: ChatProvider, id: &str) -> Result<(), String> {
                 .map(|_| ())
                 .map_err(|_| "expected a Signal ACI UUID".into())
         }
-        ChatProvider::Telegram => validate_telegram_id(id),
+        ChatProvider::Telegram => {
+            let value = parse_telegram_id(id)?;
+            (value > 0)
+                .then_some(())
+                .ok_or_else(|| "expected a positive Telegram private-chat id".into())
+        }
     }
 }
 
@@ -1137,7 +1142,12 @@ fn validate_household_id(provider: ChatProvider, id: &str) -> Result<(), String>
                 .then_some(())
                 .ok_or_else(|| "expected a non-empty base64 Signal group id".into())
         }
-        ChatProvider::Telegram => validate_telegram_id(id),
+        ChatProvider::Telegram => {
+            let value = parse_telegram_id(id)?;
+            (value < 0)
+                .then_some(())
+                .ok_or_else(|| "expected a negative Telegram group or supergroup id".into())
+        }
     }
 }
 
@@ -1148,9 +1158,8 @@ fn nonblank_id(id: &str) -> Result<&str, String> {
         .ok_or_else(|| "id must not be blank".into())
 }
 
-fn validate_telegram_id(id: &str) -> Result<(), String> {
+fn parse_telegram_id(id: &str) -> Result<i64, String> {
     id.parse::<i64>()
-        .map(|_| ())
         .map_err(|_| "expected a signed decimal integer".into())
 }
 
@@ -1769,6 +1778,16 @@ family:
                 .unwrap_err()
                 .contains("signed decimal")
         );
+    }
+
+    #[test]
+    fn telegram_chat_kind_requires_matching_id_sign() {
+        assert!(validate_direct_id(ChatProvider::Telegram, "101").is_ok());
+        assert!(validate_direct_id(ChatProvider::Telegram, "-101").is_err());
+        assert!(validate_direct_id(ChatProvider::Telegram, "0").is_err());
+        assert!(validate_household_id(ChatProvider::Telegram, "-100303").is_ok());
+        assert!(validate_household_id(ChatProvider::Telegram, "101").is_err());
+        assert!(validate_household_id(ChatProvider::Telegram, "0").is_err());
     }
 
     #[test]

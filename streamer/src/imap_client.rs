@@ -1222,7 +1222,7 @@ async fn schedule_delivery_retry(
          SET state = 'pending', attempts = ?, next_attempt_at = ?, \
              lease_expires_at = NULL, last_error = ? \
          WHERE task_id = ? AND provider = ? AND target_kind = ? AND target_id = ? \
-           AND state != 'delivered'",
+           AND state IN ('pending', 'sending')",
     )
     .bind(attempts)
     .bind(next_attempt_at)
@@ -1244,6 +1244,43 @@ async fn schedule_delivery_retry(
         .bind(attempts)
         .bind(next_attempt_at)
         .bind(&last_error)
+        .bind(&delivery.task_id)
+        .bind(&delivery.target_kind)
+        .bind(&delivery.target_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn fail_delivery(
+    pool: &SqlitePool,
+    delivery: &PendingDelivery,
+    attempts: i64,
+    error: &str,
+) -> Result<()> {
+    let last_error: String = error.chars().take(1000).collect();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "UPDATE email_task_chat_deliveries \
+         SET state = 'failed', attempts = ?, lease_expires_at = NULL, last_error = ? \
+         WHERE task_id = ? AND provider = ? AND target_kind = ? AND target_id = ? \
+           AND state = 'sending'",
+    )
+    .bind(attempts)
+    .bind(&last_error)
+    .bind(&delivery.task_id)
+    .bind(delivery.provider.as_str())
+    .bind(&delivery.target_kind)
+    .bind(&delivery.target_id)
+    .execute(&mut *tx)
+    .await?;
+    if delivery.provider == ChatProvider::Signal {
+        sqlx::query(
+            "DELETE FROM email_task_signal_deliveries \
+             WHERE task_id = ? AND target_kind = ? AND target_id = ?",
+        )
         .bind(&delivery.task_id)
         .bind(&delivery.target_kind)
         .bind(&delivery.target_id)
@@ -1379,7 +1416,7 @@ async fn drain_pending_chat_deliveries(
                     );
                 }
             }
-            Ok(Err(error)) => {
+            Ok(Err(error)) if error.is_retryable() => {
                 schedule_delivery_retry(
                     pool,
                     &delivery,
@@ -1387,6 +1424,19 @@ async fn drain_pending_chat_deliveries(
                     &format!("chat send failed: {error}"),
                 )
                 .await?;
+            }
+            Ok(Err(error)) => {
+                fail_delivery(
+                    pool,
+                    &delivery,
+                    attempts,
+                    &format!("chat send failed permanently: {error}"),
+                )
+                .await?;
+                eprintln!(
+                    "Chat reminder {} permanently failed for {recipient}: {error}",
+                    delivery.task_id
+                );
             }
             Err(_) => {
                 schedule_delivery_retry(
@@ -1866,5 +1916,55 @@ mod chat_delivery_tests {
         .await
         .unwrap();
         assert_eq!(row, ("pending".into(), 1, "transport unavailable".into()));
+    }
+    #[tokio::test]
+    async fn permanent_delivery_failure_is_terminal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let pool = init_db(dir.path().join("failed.db").to_str().unwrap())
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO tasks (id, created_at, updated_at, title, status, source)
+             VALUES ('task-failed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'buy milk', 'open', 'inferred')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO email_task_chat_deliveries
+             (task_id, provider, target_kind, target_id, state, attempts, next_attempt_at)
+             VALUES ('task-failed', 'telegram', 'direct', '101', 'sending', 1, 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let delivery = PendingDelivery {
+            provider: ChatProvider::Telegram,
+            task_id: "task-failed".into(),
+            target_kind: "direct".into(),
+            target_id: "101".into(),
+            attempts: 0,
+            title: "buy milk".into(),
+        };
+
+        fail_delivery(&pool, &delivery, 1, "chat send failed permanently")
+            .await
+            .unwrap();
+
+        let state: (String, String) = sqlx::query_as(
+            "SELECT state, last_error FROM email_task_chat_deliveries
+             WHERE task_id = 'task-failed' AND provider = 'telegram'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            state,
+            ("failed".into(), "chat send failed permanently".into())
+        );
+        assert!(pending_chat_deliveries(&pool, ChatProvider::Telegram)
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

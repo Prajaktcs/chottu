@@ -3,7 +3,7 @@ use std::{fmt, str::FromStr};
 use tokio::sync::mpsc;
 
 use crate::{
-    signal::{SignalClient, SignalError, SignalInbound, SignalRecipient},
+    signal::{SignalClient, SignalError, SignalInbound, SignalRecipient, CHOTU_SIGNAL_PREFIX},
     telegram::TelegramAdapter,
 };
 
@@ -211,7 +211,7 @@ impl ChatClient {
 
     pub const fn max_text_chars(&self) -> usize {
         match self {
-            Self::Signal(_) => 4_000,
+            Self::Signal(_) => 4_000 - CHOTU_SIGNAL_PREFIX.len(),
             Self::Telegram(_) => 4_096,
         }
     }
@@ -259,6 +259,25 @@ impl ChatClient {
         text: &str,
     ) -> Result<ChatMessageId, ChatError> {
         self.ensure_provider(recipient)?;
+        let limit = self.max_text_chars();
+        if text.encode_utf16().count() <= limit {
+            return self.send_text_once(recipient, text).await;
+        }
+
+        let mut last_message_id = None;
+        for chunk in split_text(text, limit) {
+            last_message_id = Some(self.send_text_once(recipient, chunk).await?);
+        }
+        last_message_id.ok_or_else(|| {
+            ChatError::Protocol("chat text splitting produced no outbound messages".into())
+        })
+    }
+
+    async fn send_text_once(
+        &self,
+        recipient: &ChatAddress,
+        text: &str,
+    ) -> Result<ChatMessageId, ChatError> {
         match self {
             Self::Signal(client) => client
                 .send_text(&signal_recipient(recipient)?, text)
@@ -295,6 +314,24 @@ impl ChatClient {
             )))
         }
     }
+}
+
+fn split_text(text: &str, limit: usize) -> Vec<&str> {
+    debug_assert!(limit > 0);
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut units = 0;
+    for (index, character) in text.char_indices() {
+        let character_units = character.len_utf16();
+        if units + character_units > limit {
+            chunks.push(&text[start..index]);
+            start = index;
+            units = 0;
+        }
+        units += character_units;
+    }
+    chunks.push(&text[start..]);
+    chunks
 }
 
 fn required_env(name: &str, provider: ChatProvider) -> Result<String, ChatError> {
@@ -387,5 +424,15 @@ mod tests {
         let signal = ChatAddress::direct(ChatProvider::Signal, "42");
         let telegram = ChatAddress::direct(ChatProvider::Telegram, "42");
         assert_ne!(signal, telegram);
+    }
+    #[test]
+    fn oversized_text_is_split_without_loss() {
+        let text = format!("{}🦀{}", "a".repeat(4_095), "b".repeat(10));
+        let chunks = split_text(&text, 4_096);
+        assert_eq!(chunks.concat(), text);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.encode_utf16().count() <= 4_096));
     }
 }

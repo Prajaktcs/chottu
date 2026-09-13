@@ -61,6 +61,9 @@ run: setup
     set -e
 
     provider="${CHOTU_CHAT_PROVIDER:-signal}"
+    provider="${provider#"${provider%%[![:space:]]*}"}"
+    provider="${provider%"${provider##*[![:space:]]}"}"
+    provider="$(printf '%s' "$provider" | tr '[:upper:]' '[:lower:]')"
     if [ -z "${GEMINI_API_KEY:-}" ]; then
         echo "GEMINI_API_KEY must be configured in your environment or .env file."
         exit 1

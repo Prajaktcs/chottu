@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -14,6 +16,8 @@ use crate::chat::{
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const LONG_POLL_SECONDS: u64 = 50;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(LONG_POLL_SECONDS + 10);
 
 #[derive(Clone)]
 pub struct TelegramAdapter {
@@ -46,7 +50,11 @@ impl TelegramAdapter {
         }
         let provisional = Self {
             inner: Arc::new(TelegramInner {
-                client: reqwest::Client::new(),
+                client: reqwest::Client::builder()
+                    .connect_timeout(CONNECT_TIMEOUT)
+                    .timeout(REQUEST_TIMEOUT)
+                    .build()
+                    .map_err(classify_reqwest)?,
                 api_base: api_base.into().trim_end_matches('/').to_string(),
                 token,
                 username: String::new(),
@@ -475,13 +483,27 @@ mod tests {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 2048];
-                loop {
+                let header_end = loop {
                     let count = stream.read(&mut buffer).await.unwrap();
                     assert!(count > 0, "client closed before sending HTTP headers");
                     request.extend_from_slice(&buffer[..count]);
-                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
+                    if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break end + 4;
                     }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("content-length: ")
+                            .or_else(|| line.strip_prefix("Content-Length: "))
+                    })
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "client closed before sending HTTP body");
+                    request.extend_from_slice(&buffer[..count]);
                 }
                 let request = String::from_utf8_lossy(&request);
                 let request_line = request.lines().next().unwrap();
@@ -604,6 +626,11 @@ mod tests {
                 br#"{"ok":true,"result":{"message_id":55}}"#,
             ),
             (
+                "/botTEST/sendMessage",
+                200,
+                br#"{"ok":true,"result":{"message_id":56}}"#,
+            ),
+            (
                 "/botTEST/getFile",
                 200,
                 br#"{"ok":true,"result":{"file_path":"photos/test.jpg"}}"#,
@@ -615,13 +642,18 @@ mod tests {
         let adapter = TelegramAdapter::connect_with_base_url("TEST".into(), base_url)
             .await
             .unwrap();
-        let message_id = adapter
-            .send_text(&ChatAddress::direct(ChatProvider::Telegram, "101"), "hello")
+        let client = crate::chat::ChatClient::Telegram(adapter);
+        let recipient = ChatAddress::direct(ChatProvider::Telegram, "101");
+        let message_id = client
+            .send_text(&recipient, &"x".repeat(4_097))
             .await
             .unwrap();
-        let image = adapter.download_attachment("photo-id").await.unwrap();
+        let image = client
+            .download_attachment(&recipient, "photo-id")
+            .await
+            .unwrap();
 
-        assert_eq!(message_id, ChatMessageId("55".into()));
+        assert_eq!(message_id, ChatMessageId("56".into()));
         assert_eq!(image, b"image-bytes");
         server.await.unwrap();
     }
