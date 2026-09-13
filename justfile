@@ -56,9 +56,11 @@ setup:
         echo "nc and plutil ship with macOS; restore them with a macOS update or reinstall, then rerun just setup." >&2
         exit 1
     fi
-    plutil_probe='{"jsonrpc":"2.0","result":[]}'
+    plutil_probe='{"jsonrpc":"2.0","id":1,"result":[]}'
     if [ "$(printf '%s\n' "$plutil_probe" \
         | plutil -extract jsonrpc raw -o - - 2>/dev/null || true)" != "2.0" ] \
+        || [ "$(printf '%s\n' "$plutil_probe" \
+        | plutil -type id - 2>/dev/null || true)" != "integer" ] \
         || [ "$(printf '%s\n' "$plutil_probe" \
         | plutil -type result - 2>/dev/null || true)" != "array" ]; then
         echo "Installed plutil lacks the JSON support required by just run." >&2
@@ -112,7 +114,7 @@ run: setup
     }
     socket_ready() {
         [ -S "$SIGNAL_CLI_SOCKET" ] || return 1
-        local response jsonrpc response_id result_type
+        local response jsonrpc response_id response_id_type result_type
         response="$(printf '%s\n' '{"jsonrpc":"2.0","method":"getUserStatus","params":{},"id":1}' \
             | nc -U -w 1 "$SIGNAL_CLI_SOCKET" 2>/dev/null || true)"
         [ -n "$response" ] || return 1
@@ -120,14 +122,17 @@ run: setup
             | plutil -extract jsonrpc raw -o - - 2>/dev/null || true)"
         response_id="$(printf '%s\n' "$response" \
             | plutil -extract id raw -o - - 2>/dev/null || true)"
+        response_id_type="$(printf '%s\n' "$response" \
+            | plutil -type id - 2>/dev/null || true)"
         result_type="$(printf '%s\n' "$response" \
             | plutil -type result - 2>/dev/null || true)"
         [ "$jsonrpc" = "2.0" ] \
             && [ "$response_id" = "1" ] \
+            && [ "$response_id_type" = "integer" ] \
             && [ "$result_type" = "array" ]
     }
     acquire_run_lock() {
-        local lock_pid stale_lock
+        local lock_pid stale_lock empty_lock_retries=0
         while true; do
             if (set -o noclobber; printf '%s\n' "$$" > "$run_lock") 2>/dev/null; then
                 lock_held=true
@@ -145,7 +150,17 @@ run: setup
                 exit 1
             fi
             case "$lock_pid" in
-                ''|*[!0-9]*)
+                '')
+                    empty_lock_retries=$((empty_lock_retries + 1))
+                    if [ "$empty_lock_retries" -le 3 ]; then
+                        sleep 0.1
+                        continue
+                    fi
+                    echo "Run lock has no owner PID: $run_lock" >&2
+                    echo "Remove it if no just run process is active, then retry." >&2
+                    exit 1
+                    ;;
+                *[!0-9]*)
                     echo "Cannot read the owner PID from run lock: $run_lock" >&2
                     echo "Remove it if no just run process is active, then retry." >&2
                     exit 1
@@ -155,6 +170,7 @@ run: setup
                 echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
                 exit 1
             fi
+            empty_lock_retries=0
             stale_lock="${run_lock}.stale.$$"
             if mv "$run_lock" "$stale_lock" 2>/dev/null; then
                 rm -f "$stale_lock"
