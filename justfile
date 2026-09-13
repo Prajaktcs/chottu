@@ -63,9 +63,10 @@ setup:
         | plutil -extract id xml1 -o - - 2>/dev/null || true)"
     plutil_probe_result="$(printf '%s\n' "$plutil_probe" \
         | plutil -extract result xml1 -o - - 2>/dev/null || true)"
-    if [[ "$plutil_probe_jsonrpc" != *"<string>2.0</string>"* ]] \
-        || [[ "$plutil_probe_id" != *"<integer>1</integer>"* ]] \
-        || [[ "$plutil_probe_result" != *"<array/>"* ]]; then
+    plist_root=$'<plist version="1.0">\n'
+    if [[ "$plutil_probe_jsonrpc" != *"$plist_root<string>2.0</string>"* ]] \
+        || [[ "$plutil_probe_id" != *"$plist_root<integer>1</integer>"* ]] \
+        || [[ "$plutil_probe_result" != *"$plist_root<array/>"* ]]; then
         echo "Installed plutil lacks the JSON support required by just run." >&2
         echo "Update macOS, then rerun just setup." >&2
         exit 1
@@ -116,7 +117,7 @@ run: setup
     }
     socket_ready() {
         [ -S "$SIGNAL_CLI_SOCKET" ] || return 1
-        local response jsonrpc_xml response_id_xml result_xml
+        local response jsonrpc_xml response_id_xml result_xml plist_root
         response="$(printf '%s\n' '{"jsonrpc":"2.0","method":"getUserStatus","params":{},"id":1}' \
             | nc -U -w 1 "$SIGNAL_CLI_SOCKET" 2>/dev/null || true)"
         [ -n "$response" ] || return 1
@@ -126,14 +127,17 @@ run: setup
             | plutil -extract id xml1 -o - - 2>/dev/null || true)"
         result_xml="$(printf '%s\n' "$response" \
             | plutil -extract result xml1 -o - - 2>/dev/null || true)"
-        [[ "$jsonrpc_xml" == *"<string>2.0</string>"* ]] \
-            && [[ "$response_id_xml" == *"<integer>1</integer>"* ]] \
-            && { [[ "$result_xml" == *"<array/>"* ]] || [[ "$result_xml" == *"<array>"* ]]; }
+        plist_root=$'<plist version="1.0">\n'
+        [[ "$jsonrpc_xml" == *"$plist_root<string>2.0</string>"* ]] \
+            && [[ "$response_id_xml" == *"$plist_root<integer>1</integer>"* ]] \
+            && { [[ "$result_xml" == *"$plist_root<array/>"* ]] \
+                || [[ "$result_xml" == *"$plist_root<array>"* ]]; }
     }
     acquire_run_lock() {
         local lock_pid=""
         if mkdir "$run_lock" 2>/dev/null; then
             if ! printf '%s\n' "$$" > "$run_lock/pid"; then
+                rm -f "$run_lock/pid"
                 rmdir "$run_lock" 2>/dev/null || true
                 echo "Cannot write run lock owner: $run_lock/pid" >&2
                 exit 1
