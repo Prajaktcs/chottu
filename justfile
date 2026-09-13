@@ -56,6 +56,15 @@ setup:
         echo "nc and plutil ship with macOS; restore them with a macOS update or reinstall, then rerun just setup." >&2
         exit 1
     fi
+    plutil_probe='{"jsonrpc":"2.0","result":[]}'
+    if [ "$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract jsonrpc raw -o - - 2>/dev/null || true)" != "2.0" ] \
+        || [ "$(printf '%s\n' "$plutil_probe" \
+        | plutil -type result - 2>/dev/null || true)" != "array" ]; then
+        echo "Installed plutil lacks the JSON support required by just run." >&2
+        echo "Update macOS, then rerun just setup." >&2
+        exit 1
+    fi
 
 # Pull required local Ollama models
 prereqs:
@@ -85,12 +94,19 @@ run: setup
     signal_cli_pid=""
     run_lock="${SIGNAL_CLI_SOCKET}.run.lock"
     lock_held=false
+    lock_owner() {
+        if [ -L "$run_lock" ]; then
+            readlink "$run_lock" 2>/dev/null || true
+        elif [ -f "$run_lock" ]; then
+            cat "$run_lock" 2>/dev/null || true
+        fi
+    }
     cleanup() {
         if [ -n "$signal_cli_pid" ]; then
             kill "$signal_cli_pid" 2>/dev/null || true
             wait "$signal_cli_pid" 2>/dev/null || true
         fi
-        if [ "$lock_held" = true ] && [ "$(readlink "$run_lock" 2>/dev/null || true)" = "$$" ]; then
+        if [ "$lock_held" = true ] && [ "$(lock_owner)" = "$$" ]; then
             rm -f "$run_lock"
         fi
     }
@@ -113,16 +129,16 @@ run: setup
     acquire_run_lock() {
         local lock_pid stale_lock
         while true; do
-            if ln -s "$$" "$run_lock" 2>/dev/null; then
+            if (set -o noclobber; printf '%s\n' "$$" > "$run_lock") 2>/dev/null; then
                 lock_held=true
                 return
             fi
-            if [ -L "$run_lock" ]; then
-                lock_pid="$(readlink "$run_lock" 2>/dev/null || true)"
-            elif [ -f "$run_lock" ]; then
-                lock_pid="$(cat "$run_lock" 2>/dev/null || true)"
+            if [ -L "$run_lock" ] || [ -f "$run_lock" ]; then
+                lock_pid="$(lock_owner)"
             elif [ ! -e "$run_lock" ]; then
-                continue
+                echo "Cannot create run lock: $run_lock" >&2
+                echo "Ensure its parent directory exists and is writable, then retry." >&2
+                exit 1
             else
                 echo "Cannot use run lock: $run_lock" >&2
                 echo "Remove it if no just run process is active, then retry." >&2
