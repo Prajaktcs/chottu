@@ -916,6 +916,26 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("current-main.db");
         let old_pool = create_populated_current_main_db(db_path.to_str().unwrap()).await;
+        sqlx::migrate!()
+            .run_to(20260913000000, &old_pool)
+            .await
+            .unwrap();
+        for statement in [
+            "INSERT INTO task_signal_messages
+             (task_id, recipient_kind, recipient_id, message_timestamp)
+             VALUES ('task-main', 'direct', 'aci-1', 42)",
+            "INSERT INTO task_due_reminder_deliveries
+             (task_id, recipient_kind, recipient_id)
+             VALUES ('task-main', 'direct', 'aci-1')",
+            "INSERT INTO scheduled_signal_deliveries
+             (job, local_date, recipient_kind, recipient_id, delivered_at)
+             VALUES ('morning_brief', '2026-09-14', 'group', 'group-1', CURRENT_TIMESTAMP)",
+            "INSERT INTO email_task_signal_deliveries
+             (task_id, target_kind, target_id, state, attempts, next_attempt_at, message_timestamp)
+             VALUES ('task-main', 'direct', 'aci-1', 'delivered', 1, 0, 42)",
+        ] {
+            sqlx::query(statement).execute(&old_pool).await.unwrap();
+        }
         old_pool.close().await;
 
         let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
@@ -942,6 +962,39 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(delivery_table.0, 1);
+        let chat_mapping: (String, String, String, String) = sqlx::query_as(
+            "SELECT provider, conversation_kind, conversation_id, message_id
+             FROM task_chat_messages WHERE task_id = 'task-main'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            chat_mapping,
+            (
+                "signal".into(),
+                "direct".into(),
+                "aci-1".into(),
+                "42".into()
+            )
+        );
+        for (table, query) in [
+            (
+                "task_chat_due_reminder_deliveries",
+                "SELECT COUNT(*) FROM task_chat_due_reminder_deliveries",
+            ),
+            (
+                "scheduled_chat_deliveries",
+                "SELECT COUNT(*) FROM scheduled_chat_deliveries",
+            ),
+            (
+                "email_task_chat_deliveries",
+                "SELECT COUNT(*) FROM email_task_chat_deliveries",
+            ),
+        ] {
+            let count: i64 = sqlx::query_scalar(query).fetch_one(&pool).await.unwrap();
+            assert_eq!(count, 1, "{table} should contain its Signal backfill");
+        }
         pool.close().await;
 
         let second_pool = init_db(db_path.to_str().unwrap()).await.unwrap();

@@ -1,10 +1,21 @@
+# Chat authorization is provider-scoped. Add only the IDs you use.
+# Signal household IDs are base64 group IDs; Telegram household IDs are signed chat IDs.
+chat:
+  household_ids: {}
+  # household_ids:
+  #   signal: aG91c2Vob2xk
+  #   telegram: "-1001234567890"
+
 family:
   members:
     - id: alex
       name: Alex
       role: adult
-      # Signal ACI authorized for this member DM. Set before startup; restart after changes.
-      # signal_aci: 00000000-0000-0000-0000-000000000001
+      # Direct-message identities. IDs for inactive providers may be omitted.
+      chat_ids: {}
+      # chat_ids:
+      #   signal: 00000000-0000-0000-0000-000000000001
+      #   telegram: "123456789"
       calendar:
         provider: google
         email: your.email@gmail.com   # Google account for this member's calendar
@@ -18,7 +29,7 @@ family:
         steps: 10000   # daily step push (late sync ~11pm ET nudges if under)
       # Optional long-horizon fitness outcome + training policy.
       # Keep real goals in your private config.yaml (gitignored) — never commit
-      # personal health details. Linked Signal DMs only see *your* nutrition/training.
+      # personal health details. Linked direct chats only see *your* nutrition/training.
       fitness_goals:
         intent: "example outcome (replace locally)"
         target_date: "2027-06-01"
@@ -46,7 +57,10 @@ family:
     - id: jordan
       name: Jordan
       role: adult
-      # signal_aci: 00000000-0000-0000-0000-000000000002
+      chat_ids: {}
+      # chat_ids:
+      #   signal: 00000000-0000-0000-0000-000000000002
+      #   telegram: "987654321"
       calendar:
         provider: google
         email: other.email@gmail.com
@@ -56,20 +70,20 @@ family:
     - id: sam
       name: Sam
       role: kid
-      # no calendar / nutrition_goals / fitness_goals / signal_aci = no calendar / goals / personal DM
+      # no calendar / nutrition_goals / fitness_goals / chat IDs = no calendar / goals / personal DM
 
 # Note: Per-member Google Calendar refresh tokens are stored in .env, not here.
-# After running /login calendar <member_id> in Signal, the following will be
-# automatically added to your .env:
+# After running /login calendar <member_id> in an authorized direct chat, the
+# following will be automatically added to your .env:
 #   CALENDAR_REFRESH_TOKEN_ALEX=...
 #   CALENDAR_REFRESH_TOKEN_JORDAN=...
 #
-# Per-member Signal DMs: operator-configure each allowed ACI as `signal_aci`
-# before startup. There is no runtime identity mutation command; restart Chotu
-# after any ACI change. Direct messages require an exact configured ACI.
-# `SIGNAL_GROUP_ID` is the optional household group and authorizes only that
-# exact group, regardless of sender linkage. Household pushes fan out to all
-# configured member DMs plus that group.
+# Configure the active transport with CHOTU_CHAT_PROVIDER=signal|telegram
+# (default: signal). Signal uses SIGNAL_CLI_SOCKET and optional legacy
+# SIGNAL_GROUP_ID. Telegram uses TELEGRAM_BOT_TOKEN. Provider IDs live under
+# each member's `chat_ids` and `chat.household_ids`; direct messages and groups
+# require exact matches. There is no runtime identity mutation command.
+# Restart Chotu after changing authorization.
 #
 # IANA tz database name (https://www.iana.org/time-zones), e.g. America/Toronto.
 # The agent uses this for civil clocks (schedules, "3pm", calendar 09:00 blocks).
@@ -103,8 +117,8 @@ email_sync_enabled: true
 #     - "Ego autopsy — what was ego protecting?"
 
 # Optional household category spend budgets (base currency). `/budget set`
-# overrides these; 80%/100% Signal alerts fan out to linked DMs (and
-# SIGNAL_GROUP_ID if set).
+# overrides these; 80%/100% chat alerts fan out to linked DMs and the configured
+# household conversation for the active provider.
 spend_budgets:
   categories:
     Food: 800

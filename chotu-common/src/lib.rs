@@ -1,5 +1,6 @@
 pub mod agenda;
 pub mod calendar;
+pub mod chat;
 pub mod database;
 pub mod due_parse;
 pub mod family;
@@ -17,6 +18,7 @@ pub mod quotes;
 pub mod schedule;
 pub mod signal;
 pub mod spend_budget;
+pub mod telegram;
 pub mod yahoo_profile;
 
 pub use agenda::{
@@ -29,6 +31,10 @@ pub use calendar::{
     schedule_timed_block, CalendarError, CalendarEvent, GoogleCalendarClient,
     TASK_CALENDAR_DURATION_MINUTES,
 };
+pub use chat::{
+    ChatAddress, ChatAttachment, ChatClient, ChatError, ChatInbound, ChatMessageId, ChatProvider,
+    ChatReceiver, ConversationKind,
+};
 pub use database::{
     complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
 };
@@ -37,14 +43,14 @@ pub use due_parse::{
     parse_due_phrase_tz, split_task_add_args, ParsedDue,
 };
 pub use family::{
-    config_path, default_member_id, ensure_food_mutation_allowed, fetch_exchange_rates,
-    has_any_signal_link, has_signal_delivery, health_refresh_token_env_key,
-    is_signal_conversation_allowed, load_config, member_for_signal_aci,
-    resolve_health_refresh_token, set_member_signal_aci, signal_aci_for_member,
-    signal_delivery_targets, AllocationBucket, AppConfig, BucketHolding, CalendarConfig, CoreValue,
-    CoreValues, FamilyMember, FamilySection, FitnessEquipment, FitnessFocus, FitnessGoals,
-    FitnessWeeklyTargets, HealthCondition, InvestmentPhilosophy, NutritionGoals, SpendBudgets,
-    TargetAllocation,
+    chat_address_for_member, chat_delivery_targets, config_path, default_member_id,
+    ensure_food_mutation_allowed, fetch_exchange_rates, has_any_chat_link, has_chat_delivery,
+    health_refresh_token_env_key, is_chat_conversation_allowed, load_config,
+    load_config_for_provider, member_for_chat_id, resolve_health_refresh_token, set_member_chat_id,
+    AllocationBucket, AppConfig, BucketHolding, CalendarConfig, ChatConfig, CoreValue, CoreValues,
+    FamilyMember, FamilySection, FitnessEquipment, FitnessFocus, FitnessGoals,
+    FitnessWeeklyTargets, HealthCondition, InvestmentPhilosophy, NutritionGoals, ProviderIds,
+    SpendBudgets, TargetAllocation,
 };
 pub use finnhub::{
     cap_band_from_millions, finnhub_symbol_candidates, CapBand, CompanyProfile, FinnhubClient,
@@ -96,10 +102,6 @@ pub use quotes::{
 pub use schedule::{
     now_in_tz, parse_hhmm, parse_iana_timezone, resolve_timezone_name, resolve_tz, AgentSchedules,
     ClockTime, DEFAULT_TIMEZONE,
-};
-pub use signal::{
-    SignalAttachment, SignalClient, SignalError, SignalInbound, SignalRecipient,
-    CHOTU_SIGNAL_PREFIX,
 };
 pub use spend_budget::{
     clear_budget_override, compute_budget_progress, current_budget_month, display_category,

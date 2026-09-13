@@ -1,6 +1,10 @@
 # Signal vs Telegram: what you keep / miss
 
-Chotu’s chat transport is now **Signal via `signal-cli`** (Unix-socket JSON-RPC), not Telegram/Teloxide. Commands and household logic mostly carried over; the gaps below are the ones that matter day to day.
+> **Historical note:** this page describes the earlier Telegram-to-Signal migration.
+> Chotu now supports either provider through the shared chat boundary; use the
+> current [setup guide](./commands/setup.md) for active behavior.
+
+At the time, Chotu’s chat transport had moved to **Signal via `signal-cli`** (Unix-socket JSON-RPC), not Telegram/Teloxide. The comparison below is retained as migration history.
 
 ## You keep
 

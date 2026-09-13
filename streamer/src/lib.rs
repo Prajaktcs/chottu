@@ -5,7 +5,12 @@ use sqlx::SqlitePool;
 mod imap_client;
 
 /// Main entry point to run the Streamer Agent (live IMAP or offline simulation).
-pub async fn run(pool: SqlitePool, llm: ChotuLlm, config: chotu_common::AppConfig) -> Result<()> {
+pub async fn run(
+    pool: SqlitePool,
+    llm: ChotuLlm,
+    config: chotu_common::AppConfig,
+    chat: chotu_common::ChatClient,
+) -> Result<()> {
     println!("Streamer Agent initiated.");
     if !config.email_sync_enabled {
         println!("Email sync is disabled in config.yaml; IMAP will not be contacted.");
@@ -20,7 +25,7 @@ pub async fn run(pool: SqlitePool, llm: ChotuLlm, config: chotu_common::AppConfi
 
     if has_credentials {
         println!("Live OAuth2 IMAP credentials detected. Starting live streamer...");
-        imap_client::start_streamer(pool, llm, config).await?;
+        imap_client::start_streamer(pool, llm, config, chat).await?;
     } else {
         println!("CHOTU_OAUTH_REFRESH_TOKEN or CHOTU_EMAIL_USER not found in environment.");
         println!("Defaulting to offline Streamer Agent Simulation...\n");

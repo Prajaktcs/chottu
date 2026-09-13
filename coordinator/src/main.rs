@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use chotu_common::ChotuLlm;
+use chotu_common::{ChatClient, ChatProvider, ChotuLlm};
 
 mod brief;
+mod chat;
 mod reflection;
 mod scheduled_delivery;
-mod signal;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -12,10 +12,14 @@ async fn main() -> Result<()> {
 
     println!("=== Booting Project Chotu Supervisor ===");
 
+    let provider = ChatProvider::from_env().context("invalid chat provider selection")?;
     let db_path = std::env::var("DATABASE_PATH").unwrap_or_else(|_| "chotu.db".to_string());
     let config_path =
         std::env::var("CHOTU_CONFIG_PATH").unwrap_or_else(|_| "config.yaml".to_string());
-    let (config, pool) = load_config_then_init_db(&config_path, &db_path).await?;
+    let (config, pool) = load_config_then_init_db(&config_path, &db_path, provider).await?;
+    let chat_client = ChatClient::connect(provider)
+        .await
+        .with_context(|| format!("failed to start {provider} chat transport"))?;
     std::env::set_var("CHOTU_TIMEZONE", config.resolved_timezone_name());
     println!(
         "Agent timezone: {} (IANA tz database; instants in SQLite stay UTC)",
@@ -52,8 +56,11 @@ async fn main() -> Result<()> {
     let streamer_pool = pool.clone();
     let streamer_llm = llm.clone();
     let streamer_config = config.clone();
+    let streamer_chat = chat_client.clone();
     let streamer_task = tokio::spawn(async move {
-        if let Err(e) = streamer::run(streamer_pool, streamer_llm, streamer_config).await {
+        if let Err(e) =
+            streamer::run(streamer_pool, streamer_llm, streamer_config, streamer_chat).await
+        {
             eprintln!("Error in Streamer Agent task: {:?}", e);
             return Err(e);
         }
@@ -74,8 +81,11 @@ async fn main() -> Result<()> {
     // Health Coach Agent task
     let health_coach_pool = pool.clone();
     let health_coach_config = config.clone();
+    let health_coach_chat = chat_client.clone();
     let health_coach_task = tokio::spawn(async move {
-        if let Err(e) = health_coach::run(health_coach_pool, health_coach_config).await {
+        if let Err(e) =
+            health_coach::run(health_coach_pool, health_coach_config, health_coach_chat).await
+        {
             eprintln!("Error in Health Coach Agent task: {:?}", e);
             return Err(e);
         }
@@ -86,6 +96,7 @@ async fn main() -> Result<()> {
     let coordinator_pool = pool.clone();
     let coordinator_llm = llm.clone();
     let coordinator_config = config.clone();
+    let coordinator_chat = chat_client;
     let coordinator_task = tokio::spawn(async move {
         println!("Coordinator Agent initiated.");
         // Verify connection by running a query
@@ -94,15 +105,16 @@ async fn main() -> Result<()> {
             .await?;
         println!("Coordinator Agent verified DB connection: {}", row.0);
 
-        println!("Coordinator Agent: starting Signal client...");
+        println!("Coordinator Agent: starting {provider} chat client...");
         let gemini_key = std::env::var("GEMINI_API_KEY")
             .context("GEMINI_API_KEY environment variable is required")?;
 
-        signal::start_signal_client(
+        chat::start_chat_client(
             coordinator_pool,
             coordinator_llm,
             gemini_key,
             coordinator_config,
+            coordinator_chat,
         )
         .await?;
 
@@ -135,9 +147,10 @@ async fn main() -> Result<()> {
 async fn load_config_then_init_db(
     config_path: &str,
     db_path: &str,
+    provider: ChatProvider,
 ) -> Result<(chotu_common::AppConfig, sqlx::SqlitePool)> {
     println!("Loading configuration from: {}", config_path);
-    let config = chotu_common::load_config(config_path)
+    let config = chotu_common::load_config_for_provider(config_path, provider)
         .map_err(anyhow::Error::msg)
         .context("Failed to load configuration")?;
 
@@ -166,9 +179,12 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            load_config_then_init_db(config_path.to_str().unwrap(), db_path.to_str().unwrap())
-                .await;
+        let result = load_config_then_init_db(
+            config_path.to_str().unwrap(),
+            db_path.to_str().unwrap(),
+            ChatProvider::Signal,
+        )
+        .await;
 
         let error = result.expect_err("legacy configuration must fail hard");
         assert!(
@@ -235,7 +251,7 @@ async fn perform_startup_oauth_checks(email_sync_enabled: bool) -> Result<()> {
                     .await
                     {
                         Ok(tokens) => {
-                            // Startup flow is primary-only; Signal `/login health <id>`
+                            // Startup flow is primary-only; chat `/login health <id>`
                             // is the multi-member path.
                             save_google_health_refresh_token(&tokens.refresh_token)?;
                             println!("\n================================================================");

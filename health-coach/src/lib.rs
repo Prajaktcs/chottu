@@ -42,7 +42,11 @@ const DEFAULT_STEPS_GOAL: i32 = 10_000;
 /// Owns scheduled Google Health sync from `config.yaml` `schedules`
 /// (`health_evening_sync`, `health_late_steps`) in the agent IANA `timezone`.
 /// Blank slots are not scheduled.
-pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()> {
+pub async fn run(
+    pool: SqlitePool,
+    config: chotu_common::AppConfig,
+    chat: chotu_common::ChatClient,
+) -> Result<()> {
     println!("Health Coach Agent starting (Google Health sync owner)...");
 
     if !credentials_configured() {
@@ -117,8 +121,13 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Evening sync complete for {} — {} kcal, {} steps",
                                 report.member_id, report.calories, report.steps
                             );
-                            notify_member_signal(&report.signal_text(), &config, &report.member_id)
-                                .await;
+                            notify_member_chat(
+                                &chat,
+                                &report.signal_text(),
+                                &config,
+                                &report.member_id,
+                            )
+                            .await;
                         }
                         last_evening_sync_date = date_str.clone();
                     }
@@ -143,7 +152,8 @@ pub async fn run(pool: SqlitePool, config: chotu_common::AppConfig) -> Result<()
                                 "Health Coach: Late sync complete for {} — {}/{} steps",
                                 report.member_id, report.steps, goal
                             );
-                            notify_member_signal(
+                            notify_member_chat(
+                                &chat,
                                 &steps_nudge_text(report, goal),
                                 &config,
                                 &report.member_id,
@@ -196,33 +206,22 @@ fn steps_nudge_text(report: &HealthSyncReport, goal: i32) -> String {
     }
 }
 
-/// Deliver a member's health sync only to their linked DM (never other adults' chats).
-async fn notify_member_signal(message: &str, config: &chotu_common::AppConfig, member_id: &str) {
-    let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
-        Ok(path) if !path.trim().is_empty() => path,
-        _ => return,
-    };
-    // Privacy: only the member's linked DM. Never fall back to SIGNAL_GROUP_ID /
-    // household fan-out — that would leak per-member syncs into the shared chat.
-    let targets = if let Some(aci) = chotu_common::signal_aci_for_member(config, member_id) {
-        vec![chotu_common::SignalRecipient::Direct { aci }]
-    } else {
-        Vec::new()
-    };
-    if targets.is_empty() {
+/// Deliver a member's health sync only to their selected-provider direct chat.
+async fn notify_member_chat(
+    chat: &chotu_common::ChatClient,
+    message: &str,
+    config: &chotu_common::AppConfig,
+    member_id: &str,
+) {
+    // Privacy: never fall back to the household group.
+    let Some(recipient) = chotu_common::chat_address_for_member(config, chat.provider(), member_id)
+    else {
         return;
-    }
-    let client = match chotu_common::SignalClient::connect(&socket).await {
-        Ok(client) => client,
-        Err(error) => {
-            eprintln!("Health Coach: SIGNAL_CLI_SOCKET is unreachable ({socket}): {error:?}");
-            return;
-        }
     };
-    for recipient in targets {
-        if let Err(error) = client.send_text(&recipient, message).await {
-            eprintln!("Health Coach: failed to push sync notification to {recipient}: {error:?}");
-        }
+    if let Err(error) = chat.send_text(&recipient, message).await {
+        eprintln!(
+            "Health Coach: failed to push private sync notification to {recipient}: {error:?}"
+        );
     }
 }
 

@@ -35,7 +35,7 @@ What leaves is temporary: processing and extraction the mini cannot do yet. A fo
 
 ## How it runs
 
-The baseline this was built for is a Mac mini: local Ollama, SQLite, a Signal interface via `signal-cli`, optional API calls for the jobs the mini cannot do. Run `just setup`, fill `.env` and `config.yaml`, link signal-cli once, then use `just run`; it starts and stops the Signal daemon with the coordinator. How each command behaves is in [`docs/README.md`](docs/README.md). How the process is shaped is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+The baseline this was built for is a Mac mini: local Ollama, SQLite, and a selectable Signal (`signal-cli`) or Telegram chat interface, plus optional API calls for jobs the mini cannot do. Run `just setup`, fill `.env` and `config.yaml`, choose `CHOTU_CHAT_PROVIDER`, then use `just run`; provider-specific setup is in [`docs/commands/setup.md`](docs/commands/setup.md). How each command behaves is in [`docs/README.md`](docs/README.md). How the process is shaped is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 ## If you want to contribute
 

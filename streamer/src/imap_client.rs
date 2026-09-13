@@ -2,9 +2,10 @@ use anyhow::{Context, Result};
 use async_imap::extensions::idle::IdleResponse;
 use chotu_common::{
     format_xoauth2_string, looks_like_non_transaction_alert, refresh_oauth2_token,
-    validate_ledger_amount, ActionItemExtraction, AppConfig, ChotuLlm, EmailClassification,
-    EmailMetadata, LedgerExtraction, MemoryIndex, PersonalReferenceExtraction,
-    TravelItineraryExtraction, UpcomingBillExtraction,
+    validate_ledger_amount, ActionItemExtraction, AppConfig, ChatAddress, ChatClient,
+    ChatMessageId, ChatProvider, ChotuLlm, ConversationKind, EmailClassification, EmailMetadata,
+    LedgerExtraction, MemoryIndex, PersonalReferenceExtraction, TravelItineraryExtraction,
+    UpcomingBillExtraction,
 };
 use futures::StreamExt;
 use native_tls::TlsConnector;
@@ -12,13 +13,11 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-const SIGNAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const SIGNAL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
-const SIGNAL_DELIVERY_LEASE_SECS: i64 = 30;
-/// Keep worst-case drain (batch * send timeout + connect) under the 300s IMAP
-/// IDLE keepalive so a silent Signal daemon cannot stall email processing.
-const SIGNAL_DELIVERY_BATCH_SIZE: i64 = 8;
-const SIGNAL_DRAIN_BUDGET: Duration = Duration::from_secs(90);
+const CHAT_SEND_TIMEOUT: Duration = Duration::from_secs(15);
+const CHAT_DELIVERY_LEASE_SECS: i64 = 30;
+/// Keep worst-case drain under the IMAP IDLE keepalive.
+const CHAT_DELIVERY_BATCH_SIZE: i64 = 8;
+const CHAT_DRAIN_BUDGET: Duration = Duration::from_secs(90);
 const IMAP_IDLE_KEEPALIVE: Duration = Duration::from_secs(300);
 
 struct Xoauth2Authenticator {
@@ -33,7 +32,12 @@ impl async_imap::Authenticator for Xoauth2Authenticator {
     }
 }
 
-pub async fn start_streamer(pool: SqlitePool, llm: ChotuLlm, config: AppConfig) -> Result<()> {
+pub async fn start_streamer(
+    pool: SqlitePool,
+    llm: ChotuLlm,
+    config: AppConfig,
+    chat: ChatClient,
+) -> Result<()> {
     println!("IMAP Streamer Daemon starting up...");
 
     // Retrieve environment variables
@@ -56,8 +60,8 @@ pub async fn start_streamer(pool: SqlitePool, llm: ChotuLlm, config: AppConfig) 
     let mut reconnect_delay = Duration::from_secs(5);
 
     loop {
-        if let Err(error) = drain_pending_signal_deliveries(&pool, &config).await {
-            eprintln!("Failed to drain pending Signal reminders: {error:?}");
+        if let Err(error) = drain_pending_chat_deliveries(&pool, &config, &chat).await {
+            eprintln!("Failed to drain pending chat reminders: {error:?}");
         }
 
         println!("Refreshing OAuth2 access token...");
@@ -196,12 +200,15 @@ pub async fn start_streamer(pool: SqlitePool, llm: ChotuLlm, config: AppConfig) 
                     };
 
                     // Process new emails
-                    if let Err(e) = process_new_emails(&mut session, &llm, &pool, &config).await {
+                    if let Err(e) =
+                        process_new_emails(&mut session, &llm, &pool, &config, chat.provider())
+                            .await
+                    {
                         eprintln!("Error processing incoming emails: {:?}. Reconnecting...", e);
                         break;
                     }
-                    if let Err(error) = drain_pending_signal_deliveries(&pool, &config).await {
-                        eprintln!("Failed to drain pending Signal reminders: {error:?}");
+                    if let Err(error) = drain_pending_chat_deliveries(&pool, &config, &chat).await {
+                        eprintln!("Failed to drain pending chat reminders: {error:?}");
                     }
                 }
                 Ok(IdleResponse::Timeout) => {
@@ -216,8 +223,8 @@ pub async fn start_streamer(pool: SqlitePool, llm: ChotuLlm, config: AppConfig) 
                             break;
                         }
                     };
-                    if let Err(error) = drain_pending_signal_deliveries(&pool, &config).await {
-                        eprintln!("Failed to drain pending Signal reminders: {error:?}");
+                    if let Err(error) = drain_pending_chat_deliveries(&pool, &config, &chat).await {
+                        eprintln!("Failed to drain pending chat reminders: {error:?}");
                     }
                 }
                 Ok(IdleResponse::ManualInterrupt) => {
@@ -243,6 +250,7 @@ async fn process_new_emails<T>(
     llm: &ChotuLlm,
     pool: &SqlitePool,
     config: &AppConfig,
+    provider: ChatProvider,
 ) -> Result<()>
 where
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + Sync + std::fmt::Debug,
@@ -485,6 +493,7 @@ where
                                 calendar_event_id: calendar_event_id.as_deref(),
                             },
                             config,
+                            provider,
                         )
                         .await?;
                         if persisted.inserted {
@@ -509,7 +518,7 @@ where
                             }
                         } else {
                             println!(
-                                "Action item already exists as {}; ensured its Signal reminder remains queued",
+                                "Action item already exists as {}; ensured its chat reminder remains queued",
                                 persisted.task_id
                             );
                         }
@@ -633,7 +642,7 @@ where
                             }
                         };
 
-                        if let (Some(ref due), Some(member_id)) =
+                        if let (Some(due), Some(member_id)) =
                             (ext.due_date.as_ref(), assigned_to_member.as_ref())
                         {
                             if let Some(member) =
@@ -1029,47 +1038,31 @@ struct ReminderTarget {
 }
 
 impl ReminderTarget {
-    fn from_recipient(recipient: chotu_common::SignalRecipient) -> Self {
-        match recipient {
-            chotu_common::SignalRecipient::Direct { aci } => Self {
-                kind: "direct",
-                id: aci,
-            },
-            chotu_common::SignalRecipient::Group { group_id } => Self {
-                kind: "group",
-                id: group_id,
-            },
+    fn from_address(recipient: ChatAddress) -> Self {
+        Self {
+            kind: recipient.kind.as_str(),
+            id: recipient.id,
         }
     }
 }
 
 fn reminder_delivery_targets(
     config: &AppConfig,
+    provider: ChatProvider,
     assigned_to_member: Option<&str>,
-    household_targets: &[chotu_common::SignalRecipient],
+    household_targets: &[ChatAddress],
 ) -> Vec<ReminderTarget> {
     if let Some(member_id) = assigned_to_member {
-        if let Some(aci) = chotu_common::signal_aci_for_member(config, member_id) {
-            return vec![ReminderTarget {
-                kind: "direct",
-                id: aci,
-            }];
+        if let Some(address) = chotu_common::chat_address_for_member(config, provider, member_id) {
+            return vec![ReminderTarget::from_address(address)];
         }
-
-        // SIGNAL_GROUP_ID is the configured household conversation. It is the
-        // only safe fallback for an assigned member who has no linked DM.
-        if let Some(group_id) = household_targets.iter().find_map(|target| match target {
-            chotu_common::SignalRecipient::Group { group_id } => Some(group_id.clone()),
-            chotu_common::SignalRecipient::Direct { .. } => None,
-        }) {
-            return vec![ReminderTarget {
-                kind: "group",
-                id: group_id,
-            }];
+        if let Some(group) = household_targets
+            .iter()
+            .find(|target| target.kind == ConversationKind::Group)
+        {
+            return vec![ReminderTarget::from_address(group.clone())];
         }
-
-        // Keep the logical member target durable. A later process restart with
-        // that member linked can deliver it without exposing it to another DM.
+        // Keep a logical member target durable; never reroute it to a later-added group.
         return vec![ReminderTarget {
             kind: "member",
             id: member_id.to_string(),
@@ -1078,7 +1071,7 @@ fn reminder_delivery_targets(
 
     let mut targets = Vec::new();
     for recipient in household_targets.iter().cloned() {
-        let target = ReminderTarget::from_recipient(recipient);
+        let target = ReminderTarget::from_address(recipient);
         if !targets.contains(&target) {
             targets.push(target);
         }
@@ -1108,6 +1101,7 @@ async fn persist_inferred_task_and_deliveries(
     pool: &SqlitePool,
     task: NewInferredTask<'_>,
     config: &AppConfig,
+    provider: ChatProvider,
 ) -> Result<PersistedTask> {
     let mut tx = pool.begin().await?;
     let inserted = sqlx::query(
@@ -1146,22 +1140,38 @@ async fn persist_inferred_task_and_deliveries(
         })?
     };
 
-    let household_targets = chotu_common::signal_delivery_targets(config);
-    let targets = reminder_delivery_targets(config, assigned_to.as_deref(), &household_targets);
+    let household_targets = chotu_common::chat_delivery_targets(config, provider);
+    let targets =
+        reminder_delivery_targets(config, provider, assigned_to.as_deref(), &household_targets);
     let now = chrono::Utc::now().timestamp();
     for target in targets {
         sqlx::query(
-            "INSERT INTO email_task_signal_deliveries \
-             (task_id, target_kind, target_id, state, attempts, next_attempt_at) \
-             VALUES (?, ?, ?, 'pending', 0, ?) \
-             ON CONFLICT(task_id, target_kind, target_id) DO NOTHING",
+            "INSERT INTO email_task_chat_deliveries \
+             (task_id, provider, target_kind, target_id, state, attempts, next_attempt_at) \
+             VALUES (?, ?, ?, ?, 'pending', 0, ?) \
+             ON CONFLICT(task_id, provider, target_kind, target_id) DO NOTHING",
         )
         .bind(&task_id)
+        .bind(provider.as_str())
         .bind(target.kind)
         .bind(&target.id)
         .bind(now)
         .execute(&mut *tx)
         .await?;
+        if provider == ChatProvider::Signal {
+            sqlx::query(
+                "INSERT INTO email_task_signal_deliveries \
+                 (task_id, target_kind, target_id, state, attempts, next_attempt_at) \
+                 VALUES (?, ?, ?, 'pending', 0, ?) \
+                 ON CONFLICT(task_id, target_kind, target_id) DO NOTHING",
+            )
+            .bind(&task_id)
+            .bind(target.kind)
+            .bind(&target.id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     tx.commit().await?;
@@ -1170,6 +1180,7 @@ async fn persist_inferred_task_and_deliveries(
 
 #[derive(Debug)]
 struct PendingDelivery {
+    provider: ChatProvider,
     task_id: String,
     target_kind: String,
     target_id: String,
@@ -1180,25 +1191,17 @@ struct PendingDelivery {
 fn resolve_delivery_recipient(
     delivery: &PendingDelivery,
     config: &AppConfig,
-) -> Option<chotu_common::SignalRecipient> {
+    provider: ChatProvider,
+) -> Option<ChatAddress> {
     match delivery.target_kind.as_str() {
-        "direct" => Some(chotu_common::SignalRecipient::Direct {
-            aci: delivery.target_id.clone(),
-        }),
-        "group" => Some(chotu_common::SignalRecipient::Group {
-            group_id: delivery.target_id.clone(),
-        }),
-        // Durable logical target: wait until this member has a configured ACI.
-        // Do not fall back to SIGNAL_GROUP_ID here — that group may have been
-        // added after enqueue and would leak an assigned reminder into the
-        // household chat.
-        "member" => chotu_common::signal_aci_for_member(config, &delivery.target_id)
-            .map(|aci| chotu_common::SignalRecipient::Direct { aci }),
+        "direct" => Some(ChatAddress::direct(provider, &delivery.target_id)),
+        "group" => Some(ChatAddress::group(provider, &delivery.target_id)),
+        "member" => chotu_common::chat_address_for_member(config, provider, &delivery.target_id),
         _ => None,
     }
 }
 
-fn signal_retry_delay_seconds(attempts: i64) -> i64 {
+fn chat_retry_delay_seconds(attempts: i64) -> i64 {
     const DELAYS: [i64; 6] = [5, 30, 120, 300, 900, 1800];
     let index = attempts.saturating_sub(1) as usize;
     DELAYS[index.min(DELAYS.len() - 1)]
@@ -1211,67 +1214,109 @@ async fn schedule_delivery_retry(
     error: &str,
 ) -> Result<()> {
     let next_attempt_at =
-        chrono::Utc::now().timestamp() + signal_retry_delay_seconds(attempts.max(1));
+        chrono::Utc::now().timestamp() + chat_retry_delay_seconds(attempts.max(1));
     let last_error: String = error.chars().take(1000).collect();
+    let mut tx = pool.begin().await?;
     sqlx::query(
-        "UPDATE email_task_signal_deliveries \
+        "UPDATE email_task_chat_deliveries \
          SET state = 'pending', attempts = ?, next_attempt_at = ?, \
              lease_expires_at = NULL, last_error = ? \
-         WHERE task_id = ? AND target_kind = ? AND target_id = ? \
+         WHERE task_id = ? AND provider = ? AND target_kind = ? AND target_id = ? \
            AND state != 'delivered'",
     )
     .bind(attempts)
     .bind(next_attempt_at)
-    .bind(last_error)
+    .bind(&last_error)
     .bind(&delivery.task_id)
+    .bind(delivery.provider.as_str())
     .bind(&delivery.target_kind)
     .bind(&delivery.target_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if delivery.provider == ChatProvider::Signal {
+        sqlx::query(
+            "UPDATE email_task_signal_deliveries \
+             SET state = 'pending', attempts = ?, next_attempt_at = ?, \
+                 lease_expires_at = NULL, last_error = ? \
+             WHERE task_id = ? AND target_kind = ? AND target_id = ? \
+               AND state != 'delivered'",
+        )
+        .bind(attempts)
+        .bind(next_attempt_at)
+        .bind(&last_error)
+        .bind(&delivery.task_id)
+        .bind(&delivery.target_kind)
+        .bind(&delivery.target_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
 async fn claim_delivery(pool: &SqlitePool, delivery: &PendingDelivery) -> Result<bool> {
     let now = chrono::Utc::now().timestamp();
+    let mut tx = pool.begin().await?;
     let claimed = sqlx::query(
-        "UPDATE email_task_signal_deliveries \
+        "UPDATE email_task_chat_deliveries \
          SET state = 'sending', attempts = attempts + 1, \
              lease_expires_at = ?, last_error = NULL \
-         WHERE task_id = ? AND target_kind = ? AND target_id = ? \
+         WHERE task_id = ? AND provider = ? AND target_kind = ? AND target_id = ? \
            AND ((state = 'pending' AND next_attempt_at <= ?) \
                 OR (state = 'sending' AND lease_expires_at <= ?))",
     )
-    .bind(now + SIGNAL_DELIVERY_LEASE_SECS)
+    .bind(now + CHAT_DELIVERY_LEASE_SECS)
     .bind(&delivery.task_id)
+    .bind(delivery.provider.as_str())
     .bind(&delivery.target_kind)
     .bind(&delivery.target_id)
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    if claimed.rows_affected() == 1 && delivery.provider == ChatProvider::Signal {
+        sqlx::query(
+            "UPDATE email_task_signal_deliveries \
+             SET state = 'sending', attempts = attempts + 1, \
+                 lease_expires_at = ?, last_error = NULL \
+             WHERE task_id = ? AND target_kind = ? AND target_id = ?",
+        )
+        .bind(now + CHAT_DELIVERY_LEASE_SECS)
+        .bind(&delivery.task_id)
+        .bind(&delivery.target_kind)
+        .bind(&delivery.target_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(claimed.rows_affected() == 1)
 }
 
-async fn pending_signal_deliveries(pool: &SqlitePool) -> Result<Vec<PendingDelivery>> {
+async fn pending_chat_deliveries(
+    pool: &SqlitePool,
+    provider: ChatProvider,
+) -> Result<Vec<PendingDelivery>> {
     let now = chrono::Utc::now().timestamp();
     let rows: Vec<(String, String, String, i64, String)> = sqlx::query_as(
         "SELECT d.task_id, d.target_kind, d.target_id, d.attempts, t.title \
-         FROM email_task_signal_deliveries d \
+         FROM email_task_chat_deliveries d \
          JOIN tasks t ON t.id = d.task_id \
-         WHERE (d.state = 'pending' AND d.next_attempt_at <= ?) \
-            OR (d.state = 'sending' AND d.lease_expires_at <= ?) \
-         ORDER BY d.next_attempt_at, d.task_id, d.target_kind, d.target_id \
-         LIMIT ?",
+         WHERE d.provider = ? AND ( \
+              (d.state = 'pending' AND d.next_attempt_at <= ?) \
+           OR (d.state = 'sending' AND d.lease_expires_at <= ?)) \
+         ORDER BY d.next_attempt_at, d.task_id, d.target_kind, d.target_id LIMIT ?",
     )
+    .bind(provider.as_str())
     .bind(now)
     .bind(now)
-    .bind(SIGNAL_DELIVERY_BATCH_SIZE)
+    .bind(CHAT_DELIVERY_BATCH_SIZE)
     .fetch_all(pool)
     .await?;
     Ok(rows
         .into_iter()
         .map(
             |(task_id, target_kind, target_id, attempts, title)| PendingDelivery {
+                provider,
                 task_id,
                 target_kind,
                 target_id,
@@ -1282,52 +1327,17 @@ async fn pending_signal_deliveries(pool: &SqlitePool) -> Result<Vec<PendingDeliv
         .collect())
 }
 
-async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) -> Result<()> {
-    let deliveries = pending_signal_deliveries(pool).await?;
+async fn drain_pending_chat_deliveries(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    client: &ChatClient,
+) -> Result<()> {
+    let deliveries = pending_chat_deliveries(pool, client.provider()).await?;
     if deliveries.is_empty() {
         return Ok(());
     }
 
-    let socket = match std::env::var("SIGNAL_CLI_SOCKET") {
-        Ok(path) if !path.trim().is_empty() => path,
-        _ => {
-            for delivery in &deliveries {
-                schedule_delivery_retry(
-                    pool,
-                    delivery,
-                    delivery.attempts + 1,
-                    "SIGNAL_CLI_SOCKET is missing",
-                )
-                .await?;
-            }
-            return Ok(());
-        }
-    };
-
-    let client = match tokio::time::timeout(
-        SIGNAL_CONNECT_TIMEOUT,
-        chotu_common::SignalClient::connect(&socket),
-    )
-    .await
-    {
-        Ok(Ok(client)) => client,
-        result => {
-            let error = match result {
-                Ok(Err(error)) => format!("Signal connect failed: {error:?}"),
-                Err(_) => format!(
-                    "Signal connect timed out after {}s",
-                    SIGNAL_CONNECT_TIMEOUT.as_secs()
-                ),
-                Ok(Ok(_)) => unreachable!(),
-            };
-            for delivery in &deliveries {
-                schedule_delivery_retry(pool, delivery, delivery.attempts + 1, &error).await?;
-            }
-            return Ok(());
-        }
-    };
-
-    let drain_deadline = Instant::now() + SIGNAL_DRAIN_BUDGET;
+    let drain_deadline = Instant::now() + CHAT_DRAIN_BUDGET;
     for delivery in deliveries {
         if Instant::now() >= drain_deadline {
             break;
@@ -1336,14 +1346,14 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
             continue;
         }
         let attempts = delivery.attempts + 1;
-        let recipient = match resolve_delivery_recipient(&delivery, config) {
+        let recipient = match resolve_delivery_recipient(&delivery, config, client.provider()) {
             Some(recipient) => recipient,
             None => {
                 schedule_delivery_retry(
                     pool,
                     &delivery,
                     attempts,
-                    "assigned member has no configured Signal ACI",
+                    "assigned member has no configured direct chat",
                 )
                 .await?;
                 continue;
@@ -1351,21 +1361,20 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
         };
 
         let message = action_item_reminder_message(&delivery.task_id, &delivery.title);
-        match tokio::time::timeout(SIGNAL_SEND_TIMEOUT, client.send_text(&recipient, &message))
-            .await
+        match tokio::time::timeout(CHAT_SEND_TIMEOUT, client.send_text(&recipient, &message)).await
         {
-            Ok(Ok(timestamp)) => {
+            Ok(Ok(message_id)) => {
                 if let Err(error) =
-                    complete_signal_delivery(pool, &delivery, &recipient, timestamp).await
+                    complete_chat_delivery(pool, &delivery, &recipient, &message_id).await
                 {
                     schedule_delivery_retry(pool, &delivery, attempts, &error.to_string()).await?;
                     eprintln!(
-                        "Failed to persist Signal reminder mapping for {}: {error:?}",
+                        "Failed to persist chat reminder mapping for {}: {error:?}",
                         delivery.task_id
                     );
                 } else {
                     println!(
-                        "Action item reminder {} sent to Signal {recipient}.",
+                        "Action item reminder {} sent to {recipient}.",
                         delivery.task_id
                     );
                 }
@@ -1375,7 +1384,7 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
                     pool,
                     &delivery,
                     attempts,
-                    &format!("Signal send failed: {error:?}"),
+                    &format!("chat send failed: {error}"),
                 )
                 .await?;
             }
@@ -1384,10 +1393,7 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
                     pool,
                     &delivery,
                     attempts,
-                    &format!(
-                        "Signal send timed out after {}s",
-                        SIGNAL_SEND_TIMEOUT.as_secs()
-                    ),
+                    &format!("chat send timed out after {}s", CHAT_SEND_TIMEOUT.as_secs()),
                 )
                 .await?;
             }
@@ -1396,100 +1402,137 @@ async fn drain_pending_signal_deliveries(pool: &SqlitePool, config: &AppConfig) 
     Ok(())
 }
 
-pub(crate) fn signal_mapping_parts(
-    recipient: &chotu_common::SignalRecipient,
-) -> (&'static str, String) {
-    match recipient {
-        chotu_common::SignalRecipient::Direct { aci } => ("direct", aci.clone()),
-        chotu_common::SignalRecipient::Group { group_id } => ("group", group_id.clone()),
-    }
+pub(crate) fn chat_mapping_parts(recipient: &ChatAddress) -> (&'static str, &'static str, String) {
+    (
+        recipient.provider.as_str(),
+        recipient.kind.as_str(),
+        recipient.id.clone(),
+    )
 }
 
 #[cfg(test)]
-async fn record_task_signal_message(
+async fn record_task_chat_message(
     pool: &SqlitePool,
     task_id: &str,
-    recipient: &chotu_common::SignalRecipient,
-    timestamp: i64,
+    recipient: &ChatAddress,
+    message_id: &ChatMessageId,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    record_task_signal_message_tx(&mut tx, task_id, recipient, timestamp).await?;
+    record_task_chat_message_tx(&mut tx, task_id, recipient, message_id).await?;
     tx.commit().await?;
     Ok(())
 }
 
-async fn record_task_signal_message_tx(
+async fn record_task_chat_message_tx(
     tx: &mut Transaction<'_, Sqlite>,
     task_id: &str,
-    recipient: &chotu_common::SignalRecipient,
-    timestamp: i64,
+    recipient: &ChatAddress,
+    message_id: &ChatMessageId,
 ) -> Result<()> {
-    let (kind, recipient_id) = signal_mapping_parts(recipient);
+    let (provider, kind, recipient_id) = chat_mapping_parts(recipient);
     let inserted = sqlx::query(
-        "INSERT INTO task_signal_messages (task_id, recipient_kind, recipient_id, message_timestamp) \
-         VALUES (?, ?, ?, ?) \
-         ON CONFLICT(recipient_kind, recipient_id, message_timestamp) DO NOTHING",
+        "INSERT INTO task_chat_messages \
+         (task_id, provider, conversation_kind, conversation_id, message_id) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(provider, conversation_kind, conversation_id, message_id) DO NOTHING",
     )
     .bind(task_id)
+    .bind(provider)
     .bind(kind)
     .bind(&recipient_id)
-    .bind(timestamp)
+    .bind(&message_id.0)
     .execute(&mut **tx)
     .await?;
-    if inserted.rows_affected() == 1 {
-        return Ok(());
+    if inserted.rows_affected() == 0 {
+        let existing_task: Option<String> = sqlx::query_scalar(
+            "SELECT task_id FROM task_chat_messages \
+             WHERE provider = ? AND conversation_kind = ? \
+               AND conversation_id = ? AND message_id = ?",
+        )
+        .bind(provider)
+        .bind(kind)
+        .bind(&recipient_id)
+        .bind(&message_id.0)
+        .fetch_optional(&mut **tx)
+        .await?;
+        match existing_task.as_deref() {
+            Some(existing) if existing == task_id => {}
+            Some(existing) => anyhow::bail!(
+                "chat reminder mapping collision for {provider}:{kind}:{recipient_id}:{}: \
+                 existing task {existing}, attempted task {task_id}",
+                message_id.0
+            ),
+            None => {
+                anyhow::bail!("chat reminder mapping insert was skipped without an existing row")
+            }
+        }
     }
 
-    let existing_task: Option<String> = sqlx::query_scalar(
-        "SELECT task_id FROM task_signal_messages \
-         WHERE recipient_kind = ? AND recipient_id = ? AND message_timestamp = ?",
-    )
-    .bind(kind)
-    .bind(&recipient_id)
-    .bind(timestamp)
-    .fetch_optional(&mut **tx)
-    .await?;
-    match existing_task.as_deref() {
-        Some(existing) if existing == task_id => Ok(()),
-        Some(existing) => anyhow::bail!(
-            "Signal reminder mapping collision for {kind}:{recipient_id}:{timestamp}: \
-             existing task {existing}, attempted task {task_id}"
-        ),
-        None => anyhow::bail!(
-            "Signal reminder mapping insert was skipped without an existing row for \
-             {kind}:{recipient_id}:{timestamp}"
-        ),
+    if recipient.provider == ChatProvider::Signal {
+        let timestamp = message_id
+            .0
+            .parse::<i64>()
+            .with_context(|| format!("Signal message id `{}` is not a timestamp", message_id.0))?;
+        sqlx::query(
+            "INSERT INTO task_signal_messages \
+             (task_id, recipient_kind, recipient_id, message_timestamp) VALUES (?, ?, ?, ?) \
+             ON CONFLICT(recipient_kind, recipient_id, message_timestamp) DO NOTHING",
+        )
+        .bind(task_id)
+        .bind(kind)
+        .bind(&recipient_id)
+        .bind(timestamp)
+        .execute(&mut **tx)
+        .await?;
     }
+    Ok(())
 }
 
-async fn complete_signal_delivery(
+async fn complete_chat_delivery(
     pool: &SqlitePool,
     delivery: &PendingDelivery,
-    recipient: &chotu_common::SignalRecipient,
-    timestamp: i64,
+    recipient: &ChatAddress,
+    message_id: &ChatMessageId,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
-    record_task_signal_message_tx(&mut tx, &delivery.task_id, recipient, timestamp).await?;
+    record_task_chat_message_tx(&mut tx, &delivery.task_id, recipient, message_id).await?;
     let completed = sqlx::query(
-        "UPDATE email_task_signal_deliveries \
-         SET state = 'delivered', message_timestamp = ?, delivered_at = CURRENT_TIMESTAMP, \
+        "UPDATE email_task_chat_deliveries \
+         SET state = 'delivered', message_id = ?, delivered_at = CURRENT_TIMESTAMP, \
              lease_expires_at = NULL, last_error = NULL \
-         WHERE task_id = ? AND target_kind = ? AND target_id = ? \
+         WHERE task_id = ? AND provider = ? AND target_kind = ? AND target_id = ? \
            AND state = 'sending'",
     )
-    .bind(timestamp)
+    .bind(&message_id.0)
     .bind(&delivery.task_id)
+    .bind(delivery.provider.as_str())
     .bind(&delivery.target_kind)
     .bind(&delivery.target_id)
     .execute(&mut *tx)
     .await?;
     if completed.rows_affected() != 1 {
         anyhow::bail!(
-            "Signal delivery {}:{}:{} was not in sending state",
+            "chat delivery {}:{}:{}:{} was not in sending state",
             delivery.task_id,
+            delivery.provider,
             delivery.target_kind,
             delivery.target_id
         );
+    }
+    if delivery.provider == ChatProvider::Signal {
+        let timestamp = message_id.0.parse::<i64>()?;
+        sqlx::query(
+            "UPDATE email_task_signal_deliveries \
+             SET state = 'delivered', message_timestamp = ?, delivered_at = CURRENT_TIMESTAMP, \
+                 lease_expires_at = NULL, last_error = NULL \
+             WHERE task_id = ? AND target_kind = ? AND target_id = ?",
+        )
+        .bind(timestamp)
+        .bind(&delivery.task_id)
+        .bind(&delivery.target_kind)
+        .bind(&delivery.target_id)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(())
@@ -1513,20 +1556,19 @@ fn find_pdf_attachments(parsed: &mailparse::ParsedMail, pdfs: &mut Vec<(String, 
 }
 
 #[cfg(test)]
-mod signal_mapping_tests {
+mod chat_delivery_tests {
     use super::*;
-    use chotu_common::{init_db, SignalRecipient};
+    use chotu_common::init_db;
 
     #[test]
-    fn signal_drain_worst_case_stays_under_imap_idle() {
-        let worst =
-            SIGNAL_CONNECT_TIMEOUT + SIGNAL_SEND_TIMEOUT * SIGNAL_DELIVERY_BATCH_SIZE as u32;
+    fn chat_drain_stays_under_imap_idle() {
+        let worst = CHAT_SEND_TIMEOUT * CHAT_DELIVERY_BATCH_SIZE as u32;
         assert!(
             worst < IMAP_IDLE_KEEPALIVE,
             "batch drain {worst:?} must stay under IMAP IDLE {IMAP_IDLE_KEEPALIVE:?}"
         );
         assert!(
-            SIGNAL_DRAIN_BUDGET + SIGNAL_SEND_TIMEOUT < IMAP_IDLE_KEEPALIVE,
+            CHAT_DRAIN_BUDGET + CHAT_SEND_TIMEOUT < IMAP_IDLE_KEEPALIVE,
             "drain budget plus one in-flight send must stay under IMAP IDLE"
         );
     }
@@ -1544,47 +1586,47 @@ mod signal_mapping_tests {
     }
 
     #[test]
-    fn mapping_parts_cover_direct_and_group() {
+    fn mapping_parts_include_provider_kind_and_id() {
         assert_eq!(
-            signal_mapping_parts(&SignalRecipient::Direct {
-                aci: "aci-1".into()
-            }),
-            ("direct", "aci-1".into())
+            chat_mapping_parts(&ChatAddress::direct(ChatProvider::Telegram, "101")),
+            ("telegram", "direct", "101".into())
         );
         assert_eq!(
-            signal_mapping_parts(&SignalRecipient::Group {
-                group_id: "g1".into()
-            }),
-            ("group", "g1".into())
+            chat_mapping_parts(&ChatAddress::group(ChatProvider::Signal, "household")),
+            ("signal", "group", "household".into())
         );
     }
 
     #[tokio::test]
-    async fn each_successful_recipient_creates_one_mapping() {
+    async fn successful_recipients_create_provider_scoped_mappings() {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("map.db");
         let pool = init_db(db.to_str().unwrap()).await.unwrap();
         sqlx::query(
-            "INSERT INTO tasks (id, created_at, updated_at, title, status, source) VALUES ('task-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'buy milk', 'open', 'inferred')"
+            "INSERT INTO tasks (id, created_at, updated_at, title, status, source)
+             VALUES ('task-1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'buy milk', 'open', 'inferred')",
         )
         .execute(&pool)
         .await
         .unwrap();
         let recipients = [
-            SignalRecipient::Direct {
-                aci: "aci-1".into(),
-            },
-            SignalRecipient::Group {
-                group_id: "household".into(),
-            },
+            ChatAddress::direct(ChatProvider::Telegram, "101"),
+            ChatAddress::group(ChatProvider::Telegram, "-100303"),
         ];
-        for (idx, recipient) in recipients.iter().enumerate() {
-            record_task_signal_message(&pool, "task-1", recipient, 100 + idx as i64)
-                .await
-                .unwrap();
+        for (index, recipient) in recipients.iter().enumerate() {
+            record_task_chat_message(
+                &pool,
+                "task-1",
+                recipient,
+                &ChatMessageId((100 + index).to_string()),
+            )
+            .await
+            .unwrap();
         }
-        let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT recipient_kind, recipient_id, message_timestamp FROM task_signal_messages WHERE task_id = 'task-1' ORDER BY message_timestamp"
+        let rows: Vec<(String, String, String, String)> = sqlx::query_as(
+            "SELECT provider, conversation_kind, conversation_id, message_id
+             FROM task_chat_messages WHERE task_id = 'task-1'
+             ORDER BY message_id",
         )
         .fetch_all(&pool)
         .await
@@ -1592,104 +1634,122 @@ mod signal_mapping_tests {
         assert_eq!(
             rows,
             vec![
-                ("direct".into(), "aci-1".into(), 100),
-                ("group".into(), "household".into(), 101),
+                (
+                    "telegram".into(),
+                    "direct".into(),
+                    "101".into(),
+                    "100".into()
+                ),
+                (
+                    "telegram".into(),
+                    "group".into(),
+                    "-100303".into(),
+                    "101".into()
+                ),
             ]
         );
     }
 
     #[tokio::test]
-    async fn duplicate_mapping_is_idempotent_but_cross_task_collision_errors() {
+    async fn provider_namespace_allows_same_message_id() {
         let dir = tempfile::TempDir::new().unwrap();
-        let db = dir.path().join("map-collision.db");
-        let pool = init_db(db.to_str().unwrap()).await.unwrap();
-        for (id, title) in [("task-1", "buy milk"), ("task-2", "call dentist")] {
+        let pool = init_db(dir.path().join("namespace.db").to_str().unwrap())
+            .await
+            .unwrap();
+        for id in ["task-1", "task-2"] {
             sqlx::query(
-                "INSERT INTO tasks (id, created_at, updated_at, title, status, source) \
+                "INSERT INTO tasks (id, created_at, updated_at, title, status, source)
                  VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, 'open', 'inferred')",
             )
             .bind(id)
-            .bind(title)
+            .bind(id)
             .execute(&pool)
             .await
             .unwrap();
         }
-        let recipient = SignalRecipient::Direct {
-            aci: "aci-1".into(),
-        };
 
-        record_task_signal_message(&pool, "task-1", &recipient, 42)
-            .await
-            .unwrap();
-        record_task_signal_message(&pool, "task-1", &recipient, 42)
-            .await
-            .expect("same mapping should be idempotent");
+        record_task_chat_message(
+            &pool,
+            "task-1",
+            &ChatAddress::direct(ChatProvider::Signal, "same-id"),
+            &ChatMessageId("42".into()),
+        )
+        .await
+        .unwrap();
+        record_task_chat_message(
+            &pool,
+            "task-2",
+            &ChatAddress::direct(ChatProvider::Telegram, "same-id"),
+            &ChatMessageId("42".into()),
+        )
+        .await
+        .unwrap();
 
-        let error = record_task_signal_message(&pool, "task-2", &recipient, 42)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("mapping collision"), "{error}");
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM task_chat_messages WHERE conversation_id = 'same-id' AND message_id = '42'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]
     fn assigned_reminders_never_fan_out_to_other_member_dms() {
         let mut config = AppConfig::default();
         config.family.members[0].id = "alice".into();
-        config.family.members[0].signal_aci = Some("alice-aci".into());
+        config.family.members[0].chat_ids.telegram = Some("101".into());
         let mut bob = config.family.members[0].clone();
         bob.id = "bob".into();
         bob.name = "Bob".into();
-        bob.signal_aci = Some("bob-aci".into());
+        bob.chat_ids.telegram = Some("202".into());
         config.family.members.push(bob);
 
         let household = vec![
-            SignalRecipient::Direct {
-                aci: "alice-aci".into(),
-            },
-            SignalRecipient::Direct {
-                aci: "bob-aci".into(),
-            },
-            SignalRecipient::Group {
-                group_id: "household".into(),
-            },
+            ChatAddress::direct(ChatProvider::Telegram, "101"),
+            ChatAddress::direct(ChatProvider::Telegram, "202"),
+            ChatAddress::group(ChatProvider::Telegram, "-100303"),
         ];
 
         assert_eq!(
-            reminder_delivery_targets(&config, Some("alice"), &household),
+            reminder_delivery_targets(&config, ChatProvider::Telegram, Some("alice"), &household),
             vec![ReminderTarget {
                 kind: "direct",
-                id: "alice-aci".into(),
+                id: "101".into(),
             }]
         );
         assert_eq!(
-            reminder_delivery_targets(&config, Some("unlinked"), &household),
+            reminder_delivery_targets(
+                &config,
+                ChatProvider::Telegram,
+                Some("unlinked"),
+                &household
+            ),
             vec![ReminderTarget {
                 kind: "group",
-                id: "household".into(),
+                id: "-100303".into(),
             }]
         );
         assert_eq!(
-            reminder_delivery_targets(&config, Some("unlinked"), &household[..2]),
+            reminder_delivery_targets(
+                &config,
+                ChatProvider::Telegram,
+                Some("unlinked"),
+                &household[..2]
+            ),
             vec![ReminderTarget {
                 kind: "member",
                 id: "unlinked".into(),
             }]
         );
-        assert_eq!(
-            reminder_delivery_targets(&config, None, &household),
-            household
-                .into_iter()
-                .map(ReminderTarget::from_recipient)
-                .collect::<Vec<_>>()
-        );
     }
 
     #[test]
-    fn member_targets_wait_for_aci_and_never_fall_back_to_group() {
+    fn member_targets_wait_for_selected_provider_link() {
         let mut config = AppConfig::default();
         config.family.members[0].id = "unlinked".into();
-        config.family.members[0].signal_aci = None;
         let delivery = PendingDelivery {
+            provider: ChatProvider::Telegram,
             task_id: "task-member".into(),
             target_kind: "member".into(),
             target_id: "unlinked".into(),
@@ -1698,74 +1758,50 @@ mod signal_mapping_tests {
         };
 
         assert_eq!(
-            resolve_delivery_recipient(&delivery, &config),
-            None,
-            "member target must stay pending while the ACI is missing"
+            resolve_delivery_recipient(&delivery, &config, ChatProvider::Telegram),
+            None
         );
-
-        config.family.members[0].signal_aci = Some("unlinked-aci".into());
+        config.family.members[0].chat_ids.telegram = Some("101".into());
         assert_eq!(
-            resolve_delivery_recipient(&delivery, &config),
-            Some(SignalRecipient::Direct {
-                aci: "unlinked-aci".into(),
-            })
-        );
-
-        assert_eq!(
-            resolve_delivery_recipient(
-                &PendingDelivery {
-                    target_kind: "group".into(),
-                    target_id: "household".into(),
-                    ..delivery
-                },
-                &config
-            ),
-            Some(SignalRecipient::Group {
-                group_id: "household".into(),
-            })
+            resolve_delivery_recipient(&delivery, &config, ChatProvider::Telegram),
+            Some(ChatAddress::direct(ChatProvider::Telegram, "101"))
         );
     }
 
     #[tokio::test]
-    async fn duplicate_email_keeps_one_task_and_one_pending_target() {
+    async fn duplicate_email_keeps_one_task_and_provider_delivery() {
         let dir = tempfile::TempDir::new().unwrap();
-        let db = dir.path().join("same-task.db");
-        let pool = init_db(db.to_str().unwrap()).await.unwrap();
+        let pool = init_db(dir.path().join("same-task.db").to_str().unwrap())
+            .await
+            .unwrap();
         let mut config = AppConfig::default();
-        config.family.members[0].signal_aci = Some("alice-aci".into());
+        config.family.members[0].chat_ids.telegram = Some("101".into());
         let now = chrono::Utc::now();
 
+        let create = |id| NewInferredTask {
+            id,
+            created_at: now,
+            title: "buy milk",
+            assigned_to: Some(&config.family.members[0].id),
+            due_date: None,
+            message_id: "email-1",
+            email_sender: "sender@example.com",
+            email_subject: "milk",
+            calendar_event_id: None,
+        };
         let first = persist_inferred_task_and_deliveries(
             &pool,
-            NewInferredTask {
-                id: "task-1",
-                created_at: now,
-                title: "buy milk",
-                assigned_to: Some(&config.family.members[0].id),
-                due_date: None,
-                message_id: "email-1",
-                email_sender: "sender@example.com",
-                email_subject: "milk",
-                calendar_event_id: None,
-            },
+            create("task-1"),
             &config,
+            ChatProvider::Telegram,
         )
         .await
         .unwrap();
         let duplicate = persist_inferred_task_and_deliveries(
             &pool,
-            NewInferredTask {
-                id: "task-2",
-                created_at: now,
-                title: "duplicate extraction",
-                assigned_to: Some(&config.family.members[0].id),
-                due_date: None,
-                message_id: "email-1",
-                email_sender: "sender@example.com",
-                email_subject: "milk",
-                calendar_event_id: None,
-            },
+            create("task-2"),
             &config,
+            ChatProvider::Telegram,
         )
         .await
         .unwrap();
@@ -1773,18 +1809,14 @@ mod signal_mapping_tests {
         assert!(first.inserted);
         assert!(!duplicate.inserted);
         assert_eq!(duplicate.task_id, "task-1");
-        let task_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM tasks WHERE message_id = 'email-1'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
         let delivery_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM email_task_signal_deliveries WHERE task_id = 'task-1'",
+            "SELECT COUNT(*) FROM email_task_chat_deliveries
+             WHERE task_id = 'task-1' AND provider = 'telegram'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
-        assert_eq!((task_count, delivery_count), (1, 1));
+        assert_eq!(delivery_count, 1);
     }
 
     #[tokio::test]
@@ -1793,7 +1825,7 @@ mod signal_mapping_tests {
         let db = dir.path().join("retry.db");
         let pool = init_db(db.to_str().unwrap()).await.unwrap();
         let mut config = AppConfig::default();
-        config.family.members[0].signal_aci = Some("alice-aci".into());
+        config.family.members[0].chat_ids.telegram = Some("101".into());
         persist_inferred_task_and_deliveries(
             &pool,
             NewInferredTask {
@@ -1808,107 +1840,31 @@ mod signal_mapping_tests {
                 calendar_event_id: None,
             },
             &config,
+            ChatProvider::Telegram,
         )
         .await
         .unwrap();
         let delivery = PendingDelivery {
+            provider: ChatProvider::Telegram,
             task_id: "task-retry".into(),
             target_kind: "direct".into(),
-            target_id: "alice-aci".into(),
+            target_id: "101".into(),
             attempts: 0,
             title: "call dentist".into(),
         };
-        schedule_delivery_retry(&pool, &delivery, 1, "socket unavailable")
+        schedule_delivery_retry(&pool, &delivery, 1, "transport unavailable")
             .await
             .unwrap();
         pool.close().await;
 
         let reopened = init_db(db.to_str().unwrap()).await.unwrap();
         let row: (String, i64, String) = sqlx::query_as(
-            "SELECT state, attempts, last_error FROM email_task_signal_deliveries \
-             WHERE task_id = 'task-retry'",
+            "SELECT state, attempts, last_error FROM email_task_chat_deliveries
+             WHERE task_id = 'task-retry' AND provider = 'telegram'",
         )
         .fetch_one(&reopened)
         .await
         .unwrap();
-        assert_eq!(row, ("pending".into(), 1, "socket unavailable".into()));
-    }
-
-    #[tokio::test]
-    async fn cross_task_timestamp_collision_leaves_second_delivery_retriable() {
-        let dir = tempfile::TempDir::new().unwrap();
-        let db = dir.path().join("delivery-collision.db");
-        let pool = init_db(db.to_str().unwrap()).await.unwrap();
-        for (id, title) in [("task-1", "buy milk"), ("task-2", "call dentist")] {
-            sqlx::query(
-                "INSERT INTO tasks (id, created_at, updated_at, title, status, source) \
-                 VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, 'open', 'inferred')",
-            )
-            .bind(id)
-            .bind(title)
-            .execute(&pool)
-            .await
-            .unwrap();
-            sqlx::query(
-                "INSERT INTO email_task_signal_deliveries \
-                 (task_id, target_kind, target_id, state, attempts, next_attempt_at) \
-                 VALUES (?, 'direct', 'alice-aci', 'sending', 1, 0)",
-            )
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
-        }
-        let recipient = SignalRecipient::Direct {
-            aci: "alice-aci".into(),
-        };
-        let first = PendingDelivery {
-            task_id: "task-1".into(),
-            target_kind: "direct".into(),
-            target_id: "alice-aci".into(),
-            attempts: 0,
-            title: "buy milk".into(),
-        };
-        let second = PendingDelivery {
-            task_id: "task-2".into(),
-            target_kind: "direct".into(),
-            target_id: "alice-aci".into(),
-            attempts: 0,
-            title: "call dentist".into(),
-        };
-
-        complete_signal_delivery(&pool, &first, &recipient, 42)
-            .await
-            .unwrap();
-        let error = complete_signal_delivery(&pool, &second, &recipient, 42)
-            .await
-            .unwrap_err();
-        assert!(error.to_string().contains("mapping collision"), "{error}");
-        schedule_delivery_retry(&pool, &second, 1, &error.to_string())
-            .await
-            .unwrap();
-
-        let states: Vec<(String, String)> = sqlx::query_as(
-            "SELECT task_id, state FROM email_task_signal_deliveries ORDER BY task_id",
-        )
-        .fetch_all(&pool)
-        .await
-        .unwrap();
-        assert_eq!(
-            states,
-            vec![
-                ("task-1".into(), "delivered".into()),
-                ("task-2".into(), "pending".into())
-            ]
-        );
-        let mapped_task: String = sqlx::query_scalar(
-            "SELECT task_id FROM task_signal_messages \
-             WHERE recipient_kind = 'direct' AND recipient_id = 'alice-aci' \
-               AND message_timestamp = 42",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(mapped_task, "task-1");
+        assert_eq!(row, ("pending".into(), 1, "transport unavailable".into()));
     }
 }

@@ -6,7 +6,7 @@ Calendar, tasks, morning brief, and evening reflection — the daily rhythm arou
 
 ## `/brief`
 
-Manual morning digest (also scheduled at `schedules.morning_brief` in `config.yaml`; blank = off). Linked DMs get a private slice; household chat stays family-wide. `SIGNAL_GROUP_ID` is an optional shared fallback.
+Manual morning digest (also scheduled at `schedules.morning_brief` in `config.yaml`; blank = off). Linked DMs get a private slice; the active provider's household chat stays family-wide.
 
 **Looks like**
 
@@ -56,7 +56,7 @@ Needs `/login calendar <member>` + `calendar:` in config for each adult you care
 /tasks open praj
 ```
 
-Open/snoozed lists include inline **✅ Done** / **😴 +1d** buttons (no id typing required).
+Open/snoozed lists include typed `/tasks complete <id>` and `/tasks snooze <id> [days]` instructions.
 
 ### Add
 
@@ -81,7 +81,7 @@ Plain text: `remind me to …`, `open tasks`.
 | `/tasks reassign <id> <member>` | |
 | `/tasks open <id>` | Unsnooze |
 
-Timed `due_at` triggers one Signal reminder to the assignee’s configured DM, falling back to `SIGNAL_GROUP_ID` when that assignee is unlinked. Unassigned reminders use all household targets.
+Timed `due_at` triggers one chat reminder to the assignee’s configured DM, falling back to the active provider's household chat when that assignee is unlinked. Unassigned reminders use all active-provider household targets.
 
 **Email feedback:** reply `unactionable` to a task reminder to suppress similar mail next time.
 

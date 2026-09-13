@@ -6,32 +6,46 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 
 ---
 
-## Minimum to get Signal talking
+## Minimum to get chat talking
 
 | Need | Env / config | Notes |
 | :--- | :--- | :--- |
-| signal-cli account | `SIGNAL_ACCOUNT` | The linked Signal account (E.164 or ACI). Chotu does not register a number. |
-| signal-cli data dir | `SIGNAL_CLI_DATA_DIR` | Private daemon store |
-| signal-cli socket | `SIGNAL_CLI_SOCKET` | Unix-domain JSON-RPC socket; **required for `just run`** |
-| Optional household group | `SIGNAL_GROUP_ID` | Base64 group id from `signal-cli -a "$SIGNAL_ACCOUNT" listGroups` |
-| Gemini | `GEMINI_API_KEY` | **Required for `just run`** (Signal coordinator won’t start without it) |
+| Active provider | `CHOTU_CHAT_PROVIDER` | `signal` (default) or `telegram` |
+| Gemini | `GEMINI_API_KEY` | Required by `just run` for food photos and PDF ingest |
 | Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
-| Authorized direct messages | `config.yaml` → `family.members[].signal_aci` | Required for each member DM; restart after changes |
+| Authorized chats | `config.yaml` → member `chat_ids` and `chat.household_ids` | Exact IDs for the selected provider; restart after changes |
 
-Direct/group authorization is context-specific and configuration is static for the process lifetime. A linked sender in the wrong group is rejected.
+Direct/group authorization is provider-scoped and static for the process
+lifetime. A linked sender in the wrong group is rejected.
 
-`just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon. Only one `just run` process may use a configured socket at a time; a concurrent invocation exits without disturbing the active coordinator or daemon.
+### Signal
 
-To manage the daemon separately, start it before `just run`:
+| Need | Env | Notes |
+| :--- | :--- | :--- |
+| signal-cli account | `SIGNAL_ACCOUNT` | Linked account; needed only when `just run` starts the daemon |
+| signal-cli data dir | `SIGNAL_CLI_DATA_DIR` | Private daemon store; needed only to start the daemon |
+| signal-cli socket | `SIGNAL_CLI_SOCKET` | Unix-domain JSON-RPC socket |
+
+`just run` probes the socket. It reuses a listening daemon or starts
+`signal-cli`, then stops only the daemon it managed. It requires `jq`, `nc`, and
+`shlock` only in Signal mode. To manage the daemon separately:
 
 ```sh
 signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" daemon \
   --receive-mode=manual --socket "$SIGNAL_CLI_SOCKET"
 ```
 
-One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`finishLink`). Chotu has no runtime identity-linking command. Configure each member ACI in `config.yaml` before startup, keep the daemon data directory private, and upgrade signal-cli at least every 90 days.
+One-time provisioning is `signal-cli link`. New authorization belongs in
+`chat_ids.signal` and `chat.household_ids.signal`. Legacy member `signal_aci`
+and env `SIGNAL_GROUP_ID` remain accepted for migration.
 
-`just run` exits immediately if `SIGNAL_CLI_SOCKET` or `GEMINI_API_KEY` is missing. It also rejects a non-socket path and replaces a stale socket before starting signal-cli, so the supervisor (Signal, Health Coach, Streamer, Janitor) only starts after a daemon is listening.
+### Telegram
+
+Create a bot with BotFather and set `TELEGRAM_BOT_TOKEN`. With
+`CHOTU_CHAT_PROVIDER=telegram`, `just run` validates only the bot token and
+`GEMINI_API_KEY`; it does not inspect Signal variables or require Signal tools.
+Configure numeric direct IDs under `chat_ids.telegram` and the negative
+group/supergroup ID under `chat.household_ids.telegram`.
 
 ---
 
@@ -66,7 +80,7 @@ Smaller 3–4B models work but misclassify more often; prefer `qwen3.5:9b` when 
 
 | Service | Env | Required? | Powers |
 | :--- | :--- | :--- | :--- |
-| Gemini | `GEMINI_API_KEY` | **Required for Signal (`just run`)** | Food photos (package/plate), PDF ingest, some nutrition parsing. Health Coach scheduled sync can still run without multimodal Gemini fills. |
+| Gemini | `GEMINI_API_KEY` | **Required for `just run`** | Food photos (package/plate), PDF ingest, some nutrition parsing. Health Coach scheduled sync can still run without multimodal Gemini fills. |
 | OpenRouter | `OPENROUTER_API_KEY` | For `/research` | Propose → score → judge panel. Bot logs that research is disabled if unset. |
 | Finnhub | `FINNHUB_API_KEY` | Optional | Market-cap filter on research universe; without it, model-estimated bands are used. |
 
@@ -138,23 +152,25 @@ Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 
 | Missing | Behavior |
 | :--- | :--- |
-| `GEMINI_API_KEY` | `just run` / Signal client will not start. Health Coach sync logic can still run without Gemini nutrient fills once something else hosts it. |
+| `GEMINI_API_KEY` | `just run` will not start. Health Coach sync logic can still run without Gemini nutrient fills once something else hosts it. |
 | `OPENROUTER_API_KEY` | `/research` refuses with a clear error |
 | `FINNHUB_API_KEY` | Research continues with estimated cap bands |
 | Gmail refresh token | Streamer skips IMAP until `/login gmail` |
 | Health refresh token | `/sync` / coach have nothing to pull for that member |
 | Calendar refresh token | Tasks/bills/travel won’t auto-schedule for that member |
-| No member `signal_aci` | Direct messages are rejected; the exact configured `SIGNAL_GROUP_ID` remains authorized |
+| No selected-provider member ID | Direct messages are rejected; the exact configured household conversation remains authorized |
 
 ---
 
 ## Setup order (practical)
 
-1. Rust + Ollama models + `just setup` (+ `just prereqs` to pull models)
-2. Link signal-cli as a secondary device; starting the documented daemon separately is optional
-3. Set each allowed member's `signal_aci` in `config.yaml`; optionally set `SIGNAL_GROUP_ID`; set `SIGNAL_ACCOUNT`, `SIGNAL_CLI_DATA_DIR`, `SIGNAL_CLI_SOCKET`, and `GEMINI_API_KEY`; then `just run`
-4. Google OAuth clients → run `/login health …`, `/login gmail`, or `/login calendar …` from an authorized DM (Health/Calendar are self-only; groups cannot mutate OAuth)
-5. Optionally set `OLLAMA_MODEL=qwen3.5:9b` (and pull that model) for better triage
-6. Add OpenRouter (+ Finnhub) when you want `/research`
+1. Install Rust and Ollama; run `just setup` and optionally `just prereqs`.
+2. Choose `CHOTU_CHAT_PROVIDER=signal|telegram`.
+3. For Signal, link `signal-cli` and set its socket variables. For Telegram,
+   create a BotFather bot and set `TELEGRAM_BOT_TOKEN`.
+4. Configure exact member and optional household IDs in `config.yaml`, set
+   `GEMINI_API_KEY`, then run `just run`.
+5. Configure Google OAuth from an authorized DM; add Ollama/OpenRouter/Finnhub
+   upgrades as needed.
 
 See also: root README “Linking Accounts” and command pages under [`commands/`](./commands/).

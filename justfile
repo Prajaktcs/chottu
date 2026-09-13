@@ -26,10 +26,12 @@ setup:
     if [ ! -f .env ]; then
         echo "Creating template .env file..."
         echo "# Project Chotu Environment Secrets" > .env
+        echo "CHOTU_CHAT_PROVIDER=signal" >> .env
         echo "SIGNAL_ACCOUNT=" >> .env
         echo "SIGNAL_CLI_DATA_DIR=" >> .env
         echo "SIGNAL_CLI_SOCKET=" >> .env
         echo "SIGNAL_GROUP_ID=" >> .env
+        echo "TELEGRAM_BOT_TOKEN=" >> .env
         echo "GEMINI_API_KEY=" >> .env
         echo "" >> .env
         echo "# Ollama Configuration" >> .env
@@ -53,14 +55,33 @@ prereqs:
     ollama pull deepseek-r1:8b
     ollama pull qwen3.5:4b
 
-# Run signal-cli when needed, then start the supervisor coordinator
+# Start the selected chat transport, then run the supervisor coordinator
 run: setup
     #!/usr/bin/env bash
     set -e
 
-    if [ -z "$SIGNAL_CLI_SOCKET" ] || [ -z "$GEMINI_API_KEY" ]; then
-        echo "WARNING: SIGNAL_CLI_SOCKET and GEMINI_API_KEY must be configured in your environment or .env file."
-        echo "Please edit the .env file and add your credentials first."
+    provider="${CHOTU_CHAT_PROVIDER:-signal}"
+    if [ -z "${GEMINI_API_KEY:-}" ]; then
+        echo "GEMINI_API_KEY must be configured in your environment or .env file."
+        exit 1
+    fi
+    case "$provider" in
+        telegram)
+            if [ -z "${TELEGRAM_BOT_TOKEN:-}" ]; then
+                echo "TELEGRAM_BOT_TOKEN is required when CHOTU_CHAT_PROVIDER=telegram."
+                exit 1
+            fi
+            exec cargo run -p coordinator
+            ;;
+        signal) ;;
+        *)
+            echo "Unsupported CHOTU_CHAT_PROVIDER: $provider (expected signal or telegram)."
+            exit 1
+            ;;
+    esac
+
+    if [ -z "${SIGNAL_CLI_SOCKET:-}" ]; then
+        echo "SIGNAL_CLI_SOCKET is required when CHOTU_CHAT_PROVIDER=signal."
         exit 1
     fi
     for command in jq nc shlock; do

@@ -60,7 +60,7 @@ Wipes today’s food logs + summary for that member.
 
 ## `/sync`
 
-Manual pull of today’s nutrition/activity for every linked Google Health account. Evening scheduled sync merges Telegram meals instead of overwriting. Late steps sync (~11pm ET by default) can nudge toward the step goal.
+Manual pull of today’s nutrition/activity for every linked Google Health account. Evening scheduled sync merges chat-originated meals instead of overwriting. Late steps sync (~11pm ET by default) can nudge toward the step goal.
 
 **Looks like**
 
@@ -69,7 +69,7 @@ Manual pull of today’s nutrition/activity for every linked Google Health accou
 ✅ praj: 1840 kcal | 9200 steps | …
 ```
 
-Works once the Signal client is running (`just run` requires `GEMINI_API_KEY`). The Health Coach sync path itself does not need Gemini for the pull/merge; OAuth Health tokens are what matter for `/sync`.
+Works once the selected chat client is running (`just run` requires `GEMINI_API_KEY`). The Health Coach sync path itself does not need Gemini for the pull/merge; OAuth Health tokens are what matter for `/sync`.
 
 ---
 

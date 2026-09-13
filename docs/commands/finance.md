@@ -27,7 +27,7 @@ Plain text: `monthly spend`.
 | `/budget set Food 800` | Override / set a category cap |
 | `/budget clear Entertainment` | Remove a `/budget set` override |
 
-YAML `spend_budgets` are the baseline; `/budget set` overrides merge on top. Mid-month alerts at **80%** and **100%** fan out to linked DMs (+ optional `SIGNAL_GROUP_ID`).
+YAML `spend_budgets` are the baseline; `/budget set` overrides merge on top. Mid-month alerts at **80%** and **100%** fan out to linked DMs plus the active provider's optional household chat.
 
 Plain text: `how's food budget`.
 

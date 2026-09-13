@@ -1,51 +1,73 @@
 # Setup commands
 
-Signal identity is configured by the operator before startup. There is no chat command that can claim or change an identity.
+Chat identity is configured by the operator before startup. There is no chat
+command that can claim or change an identity.
 
-## Authorize Signal conversations
+## Select and authorize a provider
 
-For each allowed direct conversation, set that member's ACI in `config.yaml`:
+Set `CHOTU_CHAT_PROVIDER=signal` or `telegram` in `.env`. Omitting it preserves
+the existing Signal default. Direct and household IDs live in `config.yaml`:
 
 ```yaml
+chat:
+  household_ids:
+    signal: aG91c2Vob2xk
+    telegram: "-1001234567890"
 family:
   members:
     - id: praj
       name: Praj
       role: adult
-      signal_aci: 00000000-0000-0000-0000-000000000001
+      chat_ids:
+        signal: 00000000-0000-0000-0000-000000000001
+        telegram: "123456789"
 ```
 
-Optionally set `SIGNAL_GROUP_ID` in `.env` for the household group. Direct messages are accepted only when their sender ACI exactly matches a configured `signal_aci`. Group messages are accepted only when their group id exactly matches `SIGNAL_GROUP_ID`; group authorization does not depend on the sender being linked.
+Only the selected provider's IDs authorize conversations. A direct message must
+match one member ID exactly. A group must match that provider's household ID
+exactly; a linked sender does not authorize another group. Restart Chotu after
+changing provider or authorization.
 
-Restart Chotu after changing `signal_aci` or `SIGNAL_GROUP_ID`. Configuration is static for the process lifetime.
+### Signal
 
-### Use your existing account with Note to Self
+Set `SIGNAL_CLI_SOCKET`; `just run` reuses a listening daemon or starts
+`signal-cli` from `SIGNAL_ACCOUNT` and `SIGNAL_CLI_DATA_DIR`. The legacy
+`SIGNAL_GROUP_ID` and member `signal_aci` keys remain accepted for migration;
+new configuration should use the provider-scoped YAML above.
 
-Chotu can use the same Signal account as your phone when `signal-cli` is linked
-as a secondary device. Set that account's ACI as your member's `signal_aci`,
-restart Chotu, then send commands in Signal's **Note to Self** conversation.
+Chotu can use your phone's account when `signal-cli` is linked as a secondary
+device. Configure that account's ACI for your member, restart Chotu, then use
+Signal's **Note to Self**. Chotu prefixes replies with `[Chotu]` followed by a
+space and ignores Note-to-Self sync messages carrying that prefix.
 
-Every Chotu response starts with `[Chotu]` followed by a space. Chotu ignores
-Note-to-Self sync messages with that prefix so it does not process its own
-replies. Treat the prefix as reserved: a command you type beginning with
-`[Chotu]` followed by a space is ignored.
-Messages you send from this account to other Signal contacts are also ignored.
+### Telegram
+
+Create a bot with BotFather, set `TELEGRAM_BOT_TOKEN`, and select
+`CHOTU_CHAT_PROVIDER=telegram`. Send the bot a direct message to learn your
+numeric user/chat ID from Bot API `getUpdates`; add the bot to the household
+group to learn its negative group or supergroup ID. Store those IDs as quoted
+strings in `chat_ids.telegram` and `chat.household_ids.telegram`.
+
+Telegram startup validates the token with `getMe` and checks `getUpdates` for
+webhook conflicts. It does not require or inspect Signal credentials,
+`signal-cli`, `jq`, `nc`, or `shlock`.
 
 ---
 
 ## `/chat`
 
-Shows the current authorized Signal conversation (direct ACI or group id) for diagnostics.
+Shows the current authorized provider, conversation kind, and ID:
 
 ```text
-Current Signal conversation: direct:00000000-0000-0000-0000-000000000001
+Current chat conversation: telegram:direct:123456789
 ```
 
 ---
 
 ## `/whoami`
 
-In an authorized direct conversation, shows the member configured for that ACI. In the configured group, confirms that it is the household group.
+In an authorized direct conversation, shows the member configured for that
+provider ID. In the configured group, confirms that it is the household group.
 
 ---
 

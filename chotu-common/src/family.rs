@@ -1,9 +1,12 @@
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::schedule::{resolve_timezone_name, resolve_tz, AgentSchedules, DEFAULT_TIMEZONE};
-use crate::signal::SignalRecipient;
+use crate::{
+    chat::{ChatAddress, ChatProvider, ConversationKind},
+    schedule::{resolve_timezone_name, resolve_tz, AgentSchedules, DEFAULT_TIMEZONE},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalendarConfig {
@@ -363,6 +366,35 @@ impl HealthCondition {
         self.lag_window[1]
     }
 }
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderIds {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telegram: Option<String>,
+}
+
+impl ProviderIds {
+    pub fn get(&self, provider: ChatProvider) -> Option<&str> {
+        match provider {
+            ChatProvider::Signal => self.signal.as_deref(),
+            ChatProvider::Telegram => self.telegram.as_deref(),
+        }
+    }
+
+    fn get_mut(&mut self, provider: ChatProvider) -> &mut Option<String> {
+        match provider {
+            ChatProvider::Signal => &mut self.signal,
+            ChatProvider::Telegram => &mut self.telegram,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.signal.is_none() && self.telegram.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FamilyMember {
@@ -380,9 +412,11 @@ pub struct FamilyMember {
     /// Optional chronic conditions (empty = none). Watchlists live in the DB.
     #[serde(default)]
     pub health_conditions: Vec<HealthCondition>,
-    /// Signal ACI authorized for this member's direct conversation.
-    /// Operator-configured in config.yaml; changes take effect after restart.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Provider-scoped direct conversation identifiers.
+    #[serde(default, skip_serializing_if = "ProviderIds::is_empty")]
+    pub chat_ids: ProviderIds,
+    /// Legacy Signal ACI accepted for one compatibility release.
+    #[serde(default, skip_serializing)]
     pub signal_aci: Option<String>,
 }
 
@@ -613,9 +647,18 @@ pub struct SpendBudgets {
     pub categories: std::collections::HashMap<String, f64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChatConfig {
+    #[serde(default, skip_serializing_if = "ProviderIds::is_empty")]
+    pub household_ids: ProviderIds,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub family: FamilySection,
+    #[serde(default)]
+    pub chat: ChatConfig,
     pub investment_philosophy: Option<InvestmentPhilosophy>,
     /// Personal core values that shape evening reflection prompts (with health logs).
     #[serde(default)]
@@ -647,9 +690,11 @@ impl Default for AppConfig {
                     nutrition_goals: None,
                     fitness_goals: None,
                     health_conditions: vec![],
+                    chat_ids: ProviderIds::default(),
                     signal_aci: None,
                 }],
             },
+            chat: ChatConfig::default(),
             investment_philosophy: Some(InvestmentPhilosophy::default()),
             core_values: Some(CoreValues::default()),
             target_allocation: None,
@@ -663,18 +708,26 @@ impl Default for AppConfig {
     }
 }
 
-/// Member linked to this Signal ACI, if any.
-pub fn member_for_signal_aci<'a>(config: &'a AppConfig, aci: &str) -> Option<&'a FamilyMember> {
+/// Member linked to a provider-scoped direct conversation, if any.
+pub fn member_for_chat_id<'a>(
+    config: &'a AppConfig,
+    provider: ChatProvider,
+    id: &str,
+) -> Option<&'a FamilyMember> {
     config
         .family
         .members
         .iter()
-        .find(|member| member.signal_aci.as_deref() == Some(aci))
+        .find(|member| member.chat_ids.get(provider) == Some(id))
 }
 
-/// Default family member id for a direct conversation: linked member, else primary member.
-pub fn default_member_id<'a>(config: &'a AppConfig, aci: &str) -> &'a str {
-    member_for_signal_aci(config, aci)
+/// Default member id for a direct conversation: linked member, else primary member.
+pub fn default_member_id<'a>(
+    config: &'a AppConfig,
+    provider: ChatProvider,
+    direct_id: &str,
+) -> &'a str {
+    member_for_chat_id(config, provider, direct_id)
         .map(|member| member.id.as_str())
         .or_else(|| {
             config
@@ -687,13 +740,13 @@ pub fn default_member_id<'a>(config: &'a AppConfig, aci: &str) -> &'a str {
 }
 
 /// Food writes from a linked direct conversation may only target that member.
-/// Household and unlinked conversations may target any member.
 pub fn ensure_food_mutation_allowed(
     config: &AppConfig,
-    aci: &str,
+    provider: ChatProvider,
+    direct_id: &str,
     target_member_id: &str,
 ) -> Result<(), String> {
-    match member_for_signal_aci(config, aci) {
+    match member_for_chat_id(config, provider, direct_id) {
         Some(linked) if !linked.id.eq_ignore_ascii_case(target_member_id) => Err(format!(
             "This direct conversation is linked as {}. Food commands here only work for you — \
              use the household group to log or change food for someone else.",
@@ -703,56 +756,54 @@ pub fn ensure_food_mutation_allowed(
     }
 }
 
-/// True when at least one member has a linked Signal direct conversation.
-pub fn has_any_signal_link(config: &AppConfig) -> bool {
+pub fn has_any_chat_link(config: &AppConfig, provider: ChatProvider) -> bool {
     config
         .family
         .members
         .iter()
-        .any(|member| member.signal_aci.is_some())
+        .any(|member| member.chat_ids.get(provider).is_some())
 }
 
-/// Authorize Signal conversations according to their context.
-///
-/// Direct messages require a configured member ACI. Group messages require the
-/// exact configured household group id, regardless of the sender ACI.
-pub fn is_signal_conversation_allowed(
-    config: &AppConfig,
-    sender_aci: &str,
-    group_id: Option<&str>,
-) -> bool {
-    match group_id {
-        Some(inbound) => matches!(
-            env_signal_group_id(),
-            Some(configured) if inbound == configured
-        ),
-        None => member_for_signal_aci(config, sender_aci).is_some(),
+/// Authorize direct members and the exact configured household group.
+pub fn is_chat_conversation_allowed(config: &AppConfig, address: &ChatAddress) -> bool {
+    match address.kind {
+        ConversationKind::Direct => {
+            member_for_chat_id(config, address.provider, &address.id).is_some()
+        }
+        ConversationKind::Group => {
+            config.chat.household_ids.get(address.provider) == Some(address.id.as_str())
+        }
     }
 }
 
-/// Signal ACI linked to `member_id`, if any.
-pub fn signal_aci_for_member(config: &AppConfig, member_id: &str) -> Option<String> {
+/// Provider-scoped direct address linked to `member_id`, if any.
+pub fn chat_address_for_member(
+    config: &AppConfig,
+    provider: ChatProvider,
+    member_id: &str,
+) -> Option<ChatAddress> {
     config
         .family
         .members
         .iter()
         .find(|member| member.id.eq_ignore_ascii_case(member_id))
-        .and_then(|member| member.signal_aci.clone())
+        .and_then(|member| member.chat_ids.get(provider))
+        .map(|id| ChatAddress::direct(provider, id))
 }
 
-/// Unique direct and household-group delivery targets.
-pub fn signal_delivery_targets(config: &AppConfig) -> Vec<SignalRecipient> {
+/// Unique direct and household-group delivery targets for the selected provider.
+pub fn chat_delivery_targets(config: &AppConfig, provider: ChatProvider) -> Vec<ChatAddress> {
     let mut targets = Vec::new();
     for member in &config.family.members {
-        if let Some(aci) = &member.signal_aci {
-            let target = SignalRecipient::Direct { aci: aci.clone() };
+        if let Some(id) = member.chat_ids.get(provider) {
+            let target = ChatAddress::direct(provider, id);
             if !targets.contains(&target) {
                 targets.push(target);
             }
         }
     }
-    if let Some(group_id) = env_signal_group_id() {
-        let target = SignalRecipient::Group { group_id };
+    if let Some(group_id) = config.chat.household_ids.get(provider) {
+        let target = ChatAddress::group(provider, group_id);
         if !targets.contains(&target) {
             targets.push(target);
         }
@@ -760,35 +811,19 @@ pub fn signal_delivery_targets(config: &AppConfig) -> Vec<SignalRecipient> {
     targets
 }
 
-/// True when proactive Signal delivery has somewhere to go.
-pub fn has_signal_delivery(config: &AppConfig) -> bool {
-    !signal_delivery_targets(config).is_empty()
+pub fn has_chat_delivery(config: &AppConfig, provider: ChatProvider) -> bool {
+    !chat_delivery_targets(config, provider).is_empty()
 }
 
-fn env_signal_group_id() -> Option<String> {
-    std::env::var("SIGNAL_GROUP_ID")
-        .ok()
-        .filter(|group_id| !group_id.trim().is_empty())
-}
-
-/// Link `aci` to `member_id` in config.yaml and clear that ACI from another member.
-/// Returns the updated config on success.
-///
-/// Uses a strict parse so a bad write cannot wipe the file.
-pub fn set_member_signal_aci<P: AsRef<Path>>(
+/// Set one provider-scoped member id in config.yaml.
+pub fn set_member_chat_id<P: AsRef<Path>>(
     path: P,
+    provider: ChatProvider,
     member_id: &str,
-    aci: &str,
+    chat_id: &str,
 ) -> Result<AppConfig, String> {
     let path_ref = path.as_ref();
-    let content = std::fs::read_to_string(path_ref)
-        .map_err(|error| format!("Failed to read {:?}: {error}", path_ref))?;
-    let mut config: AppConfig = serde_yaml::from_str(&content)
-        .map_err(|error| format!("Failed to parse {:?}: {error}", path_ref))?;
-    if config.family.members.is_empty() {
-        return Err(format!("{:?} has no family members", path_ref));
-    }
-
+    let mut config = load_config_for_provider(path_ref, provider)?;
     let Some(member_index) = config
         .family
         .members
@@ -797,25 +832,23 @@ pub fn set_member_signal_aci<P: AsRef<Path>>(
     else {
         return Err(format!("Unknown member `{member_id}`"));
     };
-
-    if let Some(existing) = config.family.members[member_index].signal_aci.as_deref() {
-        if existing != aci {
+    if let Some(existing) = config.family.members[member_index].chat_ids.get(provider) {
+        if existing != chat_id {
             return Err(format!(
-                "Member `{member_id}` is already linked to Signal ACI `{existing}`. \
-                 Update that member's `signal_aci` in config.yaml, then restart Chotu."
+                "Member `{member_id}` is already linked to {provider} id `{existing}`"
             ));
         }
         return Ok(config);
     }
-
+    validate_direct_id(provider, chat_id)?;
     for (index, member) in config.family.members.iter_mut().enumerate() {
+        let slot = member.chat_ids.get_mut(provider);
         if index == member_index {
-            member.signal_aci = Some(aci.to_owned());
-        } else if member.signal_aci.as_deref() == Some(aci) {
-            member.signal_aci = None;
+            *slot = Some(chat_id.to_owned());
+        } else if slot.as_deref() == Some(chat_id) {
+            *slot = None;
         }
     }
-
     let yaml = serde_yaml::to_string(&config)
         .map_err(|error| format!("Failed to serialize config.yaml: {error}"))?;
     std::fs::write(path_ref, yaml)
@@ -922,13 +955,16 @@ impl AppConfig {
     }
 }
 
-/// Loads application configuration from a file.
-///
-/// Missing, unreadable, empty-family, or invalid YAML is an error — we never
-/// silently fall back to [`AppConfig::default`]. Legacy keys like
-/// `telegram_chat_id` fail under `deny_unknown_fields`; edit `config.yaml`
-/// rather than keeping soft compatibility.
+/// Load configuration with Signal compatibility defaults.
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
+    load_config_for_provider(path, ChatProvider::Signal)
+}
+
+/// Load, normalize, and validate routing for the selected provider.
+pub fn load_config_for_provider<P: AsRef<Path>>(
+    path: P,
+    provider: ChatProvider,
+) -> Result<AppConfig, String> {
     let path_ref = path.as_ref();
     if !path_ref.exists() {
         return Err(format!(
@@ -936,12 +972,11 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
             path_ref
         ));
     }
-
     let content = std::fs::read_to_string(path_ref)
-        .map_err(|e| format!("Failed to read configuration file {:?}: {e}", path_ref))?;
-    let config: AppConfig = serde_yaml::from_str(&content).map_err(|e| {
+        .map_err(|error| format!("Failed to read configuration file {:?}: {error}", path_ref))?;
+    let mut config: AppConfig = serde_yaml::from_str(&content).map_err(|error| {
         format!(
-            "Failed to parse configuration file {:?}: {e}. Remove legacy keys (e.g. telegram_chat_id) and match config.yaml.example.",
+            "Failed to parse configuration file {:?}: {error}. Match config.yaml.example.",
             path_ref
         )
     })?;
@@ -951,36 +986,172 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
             path_ref
         ));
     }
+    normalize_legacy_chat_config(&mut config, provider)?;
+    validate_chat_config(&config, provider)?;
 
     for member in &config.family.members {
         if let Some(fg) = member.fitness_goals.as_ref() {
-            for w in fg.validation_warnings(&member.id) {
-                eprintln!("Config warning: {}", w);
+            for warning in fg.validation_warnings(&member.id) {
+                eprintln!("Config warning: {warning}");
             }
         }
-        for w in member.health_condition_warnings() {
-            eprintln!("Config warning: {}", w);
+        for warning in member.health_condition_warnings() {
+            eprintln!("Config warning: {warning}");
         }
     }
     if let Some(cv) = config.core_values.as_ref() {
-        for w in cv.validation_warnings() {
-            eprintln!("Config warning: {}", w);
+        for warning in cv.validation_warnings() {
+            eprintln!("Config warning: {warning}");
         }
     }
-    for w in crate::schedule::timezone_validation_warnings(config.timezone.as_deref()) {
-        eprintln!("Config warning: {}", w);
+    for warning in crate::schedule::timezone_validation_warnings(config.timezone.as_deref()) {
+        eprintln!("Config warning: {warning}");
     }
-    if let Some(sched) = config.schedules.as_ref() {
-        for w in sched.validation_warnings() {
-            eprintln!("Config warning: {}", w);
+    if let Some(schedules) = config.schedules.as_ref() {
+        for warning in schedules.validation_warnings() {
+            eprintln!("Config warning: {warning}");
         }
     }
-    let tz_name = config.resolved_timezone_name();
     println!(
-        "Successfully loaded configuration from {:?} (timezone {})",
-        path_ref, tz_name
+        "Successfully loaded configuration from {:?} (timezone {}, chat provider {})",
+        path_ref,
+        config.resolved_timezone_name(),
+        provider
     );
     Ok(config)
+}
+
+fn normalize_legacy_chat_config(
+    config: &mut AppConfig,
+    selected_provider: ChatProvider,
+) -> Result<(), String> {
+    let mut used_legacy_member_id = false;
+    for member in &mut config.family.members {
+        let Some(legacy) = member.signal_aci.take() else {
+            continue;
+        };
+        match member.chat_ids.signal.as_deref() {
+            Some(current) if current != legacy => {
+                return Err(format!(
+                    "member `{}` has conflicting `signal_aci` and `chat_ids.signal` values",
+                    member.id
+                ));
+            }
+            Some(_) => {}
+            None => {
+                member.chat_ids.signal = Some(legacy);
+                used_legacy_member_id = true;
+            }
+        }
+    }
+    if used_legacy_member_id {
+        eprintln!(
+            "Config compatibility: migrate `family.members[].signal_aci` to `chat_ids.signal`."
+        );
+    }
+
+    if selected_provider == ChatProvider::Signal {
+        if let Some(legacy_group) = std::env::var("SIGNAL_GROUP_ID")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+        {
+            match config.chat.household_ids.signal.as_deref() {
+                Some(current) if current != legacy_group => {
+                    return Err(
+                        "conflicting `SIGNAL_GROUP_ID` and `chat.household_ids.signal` values"
+                            .into(),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    config.chat.household_ids.signal = Some(legacy_group);
+                    eprintln!(
+                        "Config compatibility: migrate `SIGNAL_GROUP_ID` to `chat.household_ids.signal`."
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_chat_config(config: &AppConfig, selected_provider: ChatProvider) -> Result<(), String> {
+    for provider in [ChatProvider::Signal, ChatProvider::Telegram] {
+        for member in &config.family.members {
+            if let Some(id) = member.chat_ids.get(provider) {
+                validate_direct_id(provider, id).map_err(|error| {
+                    format!(
+                        "member `{}` has invalid {provider} chat id: {error}",
+                        member.id
+                    )
+                })?;
+            }
+        }
+        if let Some(id) = config.chat.household_ids.get(provider) {
+            validate_household_id(provider, id)
+                .map_err(|error| format!("invalid {provider} household id: {error}"))?;
+        }
+    }
+
+    let mut direct_ids = HashSet::new();
+    for member in &config.family.members {
+        if let Some(id) = member.chat_ids.get(selected_provider) {
+            if !direct_ids.insert(id) {
+                return Err(format!(
+                    "duplicate {selected_provider} direct id `{id}` across family members"
+                ));
+            }
+        }
+    }
+    if let Some(group_id) = config.chat.household_ids.get(selected_provider) {
+        if direct_ids.contains(group_id) {
+            return Err(format!(
+                "{selected_provider} household id `{group_id}` also belongs to a member direct chat"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_direct_id(provider: ChatProvider, id: &str) -> Result<(), String> {
+    let id = nonblank_id(id)?;
+    match provider {
+        ChatProvider::Signal => {
+            let uuid = id.strip_prefix("aci:").unwrap_or(id);
+            uuid::Uuid::parse_str(uuid)
+                .map(|_| ())
+                .map_err(|_| "expected a Signal ACI UUID".into())
+        }
+        ChatProvider::Telegram => validate_telegram_id(id),
+    }
+}
+
+fn validate_household_id(provider: ChatProvider, id: &str) -> Result<(), String> {
+    let id = nonblank_id(id)?;
+    match provider {
+        ChatProvider::Signal => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(id)
+                .map_err(|_| "expected a base64 Signal group id".to_string())?;
+            (!bytes.is_empty())
+                .then_some(())
+                .ok_or_else(|| "expected a non-empty base64 Signal group id".into())
+        }
+        ChatProvider::Telegram => validate_telegram_id(id),
+    }
+}
+
+fn nonblank_id(id: &str) -> Result<&str, String> {
+    let id = id.trim();
+    (!id.is_empty())
+        .then_some(id)
+        .ok_or_else(|| "id must not be blank".into())
+}
+
+fn validate_telegram_id(id: &str) -> Result<(), String> {
+    id.parse::<i64>()
+        .map(|_| ())
+        .map_err(|_| "expected a signed decimal integer".into())
 }
 
 #[cfg(test)]
@@ -1028,6 +1199,7 @@ mod tests {
             nutrition_goals: None,
             fitness_goals: None,
             health_conditions: vec![],
+            chat_ids: ProviderIds::default(),
             signal_aci: None,
         };
         assert_eq!(
@@ -1106,7 +1278,8 @@ target_allocation:
         let mut tmp_file = NamedTempFile::new().unwrap();
         write!(tmp_file, "{}", yaml_content).unwrap();
 
-        let loaded = load_config(tmp_file.path()).expect("valid config");
+        let loaded = load_config_for_provider(tmp_file.path(), ChatProvider::Telegram)
+            .expect("valid config");
         assert_eq!(loaded.family.members.len(), 3);
         assert_eq!(loaded.family.members[0].id, "alex");
         assert_eq!(loaded.family.members[1].id, "jordan");
@@ -1197,7 +1370,8 @@ schedules:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", yaml).unwrap();
-        let loaded = load_config(tmp.path()).expect("valid config");
+        let loaded =
+            load_config_for_provider(tmp.path(), ChatProvider::Telegram).expect("valid config");
         assert!(loaded.email_sync_enabled);
         assert_eq!(loaded.resolved_timezone_name(), "America/Toronto");
         let s = loaded.schedules.as_ref().unwrap();
@@ -1257,7 +1431,7 @@ family:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", bad_focus).unwrap();
-        assert!(load_config(tmp.path()).is_err());
+        assert!(load_config_for_provider(tmp.path(), ChatProvider::Telegram).is_err());
 
         let bad_equip = r#"
 family:
@@ -1270,7 +1444,7 @@ family:
 "#;
         let mut tmp2 = NamedTempFile::new().unwrap();
         write!(tmp2, "{}", bad_equip).unwrap();
-        assert!(load_config(tmp2.path()).is_err());
+        assert!(load_config_for_provider(tmp2.path(), ChatProvider::Telegram).is_err());
     }
 
     #[test]
@@ -1340,6 +1514,7 @@ family:
                     notes: None,
                 },
             ],
+            chat_ids: ProviderIds::default(),
             signal_aci: None,
         };
         let warnings = member.health_condition_warnings();
@@ -1363,7 +1538,8 @@ family:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", yaml).unwrap();
-        let loaded = load_config(tmp.path()).expect("valid config");
+        let loaded =
+            load_config_for_provider(tmp.path(), ChatProvider::Telegram).expect("valid config");
         let cond = &loaded.family.members[0].health_conditions[0];
         assert!(cond.check_in);
         assert_eq!(cond.lag_window, [1, 3]);
@@ -1374,7 +1550,8 @@ family:
 
     #[test]
     fn test_load_missing_config_errors() {
-        let err = load_config("non_existent_file.yaml").unwrap_err();
+        let err =
+            load_config_for_provider("non_existent_file.yaml", ChatProvider::Telegram).unwrap_err();
         assert!(err.contains("not found"), "{err}");
     }
 
@@ -1390,7 +1567,7 @@ family:
 "#;
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", legacy).unwrap();
-        let err = load_config(tmp.path()).unwrap_err();
+        let err = load_config_for_provider(tmp.path(), ChatProvider::Telegram).unwrap_err();
         assert!(
             err.contains("telegram_chat_id") || err.contains("Failed to parse"),
             "{err}"
@@ -1410,6 +1587,7 @@ family:
             nutrition_goals: None,
             fitness_goals: None,
             health_conditions: vec![],
+            chat_ids: ProviderIds::default(),
             signal_aci: None,
         });
         assert_eq!(
@@ -1446,7 +1624,10 @@ family:
 
     fn two_member_config() -> AppConfig {
         let mut config = AppConfig::default();
-        config.family.members[0].signal_aci = Some("aci-alex".to_string());
+        config.family.members[0].chat_ids = ProviderIds {
+            signal: Some("00000000-0000-0000-0000-000000000001".into()),
+            telegram: Some("101".into()),
+        };
         config.family.members.push(FamilyMember {
             id: "jordan".to_string(),
             name: "Jordan".to_string(),
@@ -1455,171 +1636,175 @@ family:
             nutrition_goals: None,
             fitness_goals: None,
             health_conditions: vec![],
-            signal_aci: Some("aci-jordan".to_string()),
+            chat_ids: ProviderIds {
+                signal: Some("00000000-0000-0000-0000-000000000002".into()),
+                telegram: Some("202".into()),
+            },
+            signal_aci: None,
         });
+        config.chat.household_ids = ProviderIds {
+            signal: Some("aG91c2Vob2xk".into()),
+            telegram: Some("-100303".into()),
+        };
         config
     }
 
     #[test]
-    fn test_member_for_signal_aci_and_default() {
+    fn member_lookup_and_authorization_are_provider_scoped() {
         let config = two_member_config();
         assert_eq!(
-            member_for_signal_aci(&config, "aci-alex").map(|member| member.id.as_str()),
+            member_for_chat_id(
+                &config,
+                ChatProvider::Signal,
+                "00000000-0000-0000-0000-000000000001"
+            )
+            .map(|member| member.id.as_str()),
             Some("alex")
         );
         assert_eq!(
-            member_for_signal_aci(&config, "aci-jordan").map(|member| member.id.as_str()),
-            Some("jordan")
+            member_for_chat_id(&config, ChatProvider::Telegram, "101")
+                .map(|member| member.id.as_str()),
+            Some("alex")
         );
-        assert!(member_for_signal_aci(&config, "aci-unknown").is_none());
-        assert_eq!(default_member_id(&config, "aci-jordan"), "jordan");
-        assert_eq!(default_member_id(&config, "aci-unknown"), "alex");
-    }
+        assert!(member_for_chat_id(&config, ChatProvider::Signal, "101").is_none());
 
-    #[test]
-    fn test_food_mutation_guard_linked_direct_conversation() {
-        let config = two_member_config();
-        assert!(ensure_food_mutation_allowed(&config, "aci-alex", "alex").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, "aci-alex", "Alex").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, "aci-alex", "jordan").is_err());
-        assert!(ensure_food_mutation_allowed(&config, "aci-jordan", "jordan").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, "aci-jordan", "alex").is_err());
-        assert!(ensure_food_mutation_allowed(&config, "aci-unknown", "alex").is_ok());
-        assert!(ensure_food_mutation_allowed(&config, "aci-unknown", "jordan").is_ok());
-    }
-
-    #[test]
-    fn test_direct_messages_require_configured_aci() {
-        let open = AppConfig::default();
-        assert!(!has_any_signal_link(&open));
-        assert!(!is_signal_conversation_allowed(&open, "aci-unknown", None));
-
-        let linked = two_member_config();
-        assert!(has_any_signal_link(&linked));
-        assert!(is_signal_conversation_allowed(&linked, "aci-alex", None));
-        assert!(is_signal_conversation_allowed(&linked, "aci-jordan", None));
-        assert!(!is_signal_conversation_allowed(
-            &linked,
-            "aci-unknown",
-            None
+        assert!(is_chat_conversation_allowed(
+            &config,
+            &ChatAddress::direct(ChatProvider::Telegram, "101")
+        ));
+        assert!(!is_chat_conversation_allowed(
+            &config,
+            &ChatAddress::direct(ChatProvider::Telegram, "999")
+        ));
+        assert!(is_chat_conversation_allowed(
+            &config,
+            &ChatAddress::group(ChatProvider::Telegram, "-100303")
+        ));
+        assert!(!is_chat_conversation_allowed(
+            &config,
+            &ChatAddress::group(ChatProvider::Telegram, "-100404")
         ));
     }
 
     #[test]
-    fn test_allowlist_and_delivery_include_household_group() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
-        let linked = two_member_config();
-        with_env_var("SIGNAL_GROUP_ID", Some("household-group"), || {
-            assert!(is_signal_conversation_allowed(
-                &linked,
-                "aci-unknown",
-                Some("household-group")
-            ));
-            assert!(is_signal_conversation_allowed(
-                &linked,
-                "",
-                Some("household-group")
-            ));
-            assert!(!is_signal_conversation_allowed(
-                &linked,
-                "aci-unknown",
-                Some("other-group")
-            ));
-            assert!(!is_signal_conversation_allowed(
-                &linked,
-                "aci-alex",
-                Some("other-group")
-            ));
-            assert_eq!(
-                signal_delivery_targets(&linked),
-                vec![
-                    SignalRecipient::Direct {
-                        aci: "aci-alex".to_string()
-                    },
-                    SignalRecipient::Direct {
-                        aci: "aci-jordan".to_string()
-                    },
-                    SignalRecipient::Group {
-                        group_id: "household-group".to_string()
-                    }
-                ]
-            );
-        });
+    fn private_mutation_and_delivery_stay_on_selected_provider() {
+        let config = two_member_config();
+        assert!(
+            ensure_food_mutation_allowed(&config, ChatProvider::Telegram, "101", "alex").is_ok()
+        );
+        assert!(
+            ensure_food_mutation_allowed(&config, ChatProvider::Telegram, "101", "jordan").is_err()
+        );
+        assert_eq!(
+            chat_delivery_targets(&config, ChatProvider::Telegram),
+            vec![
+                ChatAddress::direct(ChatProvider::Telegram, "101"),
+                ChatAddress::direct(ChatProvider::Telegram, "202"),
+                ChatAddress::group(ChatProvider::Telegram, "-100303"),
+            ]
+        );
     }
 
     #[test]
-    fn test_set_member_signal_aci_persists_and_moves_matching_aci() {
-        let yaml_content = r#"
+    fn legacy_signal_id_loads_and_serializes_only_new_shape() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        with_env_var("SIGNAL_GROUP_ID", Some("aG91c2Vob2xk"), || {
+            let yaml = r#"
 family:
   members:
     - id: alex
       name: Alex
       role: adult
-    - id: jordan
-      name: Jordan
-      role: adult
-currency: "CAD"
+      signal_aci: 00000000-0000-0000-0000-000000000001
 "#;
-        let mut tmp_file = NamedTempFile::new().unwrap();
-        write!(tmp_file, "{}", yaml_content).unwrap();
-
-        let updated =
-            set_member_signal_aci(tmp_file.path(), "jordan", "aci-shared").expect("link jordan");
-        assert_eq!(
-            signal_aci_for_member(&updated, "jordan").as_deref(),
-            Some("aci-shared")
-        );
-        assert!(signal_aci_for_member(&updated, "alex").is_none());
-
-        let moved = set_member_signal_aci(tmp_file.path(), "alex", "aci-shared")
-            .expect("move link to alex");
-        assert_eq!(
-            signal_aci_for_member(&moved, "alex").as_deref(),
-            Some("aci-shared")
-        );
-        assert!(signal_aci_for_member(&moved, "jordan").is_none());
-
-        let again =
-            set_member_signal_aci(tmp_file.path(), "alex", "aci-shared").expect("idempotent");
-        assert_eq!(
-            signal_aci_for_member(&again, "alex").as_deref(),
-            Some("aci-shared")
-        );
-
-        let hijack = set_member_signal_aci(tmp_file.path(), "alex", "aci-other");
-        assert!(hijack.is_err());
-        assert!(hijack.unwrap_err().contains("already linked"));
+            let mut file = NamedTempFile::new().unwrap();
+            write!(file, "{yaml}").unwrap();
+            let loaded = load_config_for_provider(file.path(), ChatProvider::Signal).unwrap();
+            assert_eq!(
+                loaded.family.members[0].chat_ids.signal.as_deref(),
+                Some("00000000-0000-0000-0000-000000000001")
+            );
+            assert!(loaded.family.members[0].signal_aci.is_none());
+            assert_eq!(
+                loaded.chat.household_ids.signal.as_deref(),
+                Some("aG91c2Vob2xk")
+            );
+            let serialized = serde_yaml::to_string(&loaded).unwrap();
+            assert!(serialized.contains("chat_ids:"));
+            assert!(!serialized.contains("signal_aci:"));
+        });
     }
 
     #[test]
-    fn test_yaml_serializes_signal_aci_only() {
+    fn conflicting_and_malformed_chat_ids_fail_loading() {
+        let conflicting = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+      signal_aci: 00000000-0000-0000-0000-000000000001
+      chat_ids:
+        signal: 00000000-0000-0000-0000-000000000002
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{conflicting}").unwrap();
+        assert!(load_config_for_provider(file.path(), ChatProvider::Signal)
+            .unwrap_err()
+            .contains("conflicting"));
+
+        let malformed = r#"
+family:
+  members:
+    - id: alex
+      name: Alex
+      role: adult
+      chat_ids:
+        telegram: not-a-number
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{malformed}").unwrap();
+        assert!(
+            load_config_for_provider(file.path(), ChatProvider::Telegram)
+                .unwrap_err()
+                .contains("signed decimal")
+        );
+    }
+
+    #[test]
+    fn duplicate_selected_provider_ids_fail_loading() {
         let yaml = r#"
 family:
   members:
     - id: alex
       name: Alex
       role: adult
-      signal_aci: aci-alex
-"#;
-        let mut tmp_file = NamedTempFile::new().unwrap();
-        write!(tmp_file, "{}", yaml).unwrap();
-        let loaded = load_config(tmp_file.path()).expect("valid config");
-        assert_eq!(
-            loaded.family.members[0].signal_aci.as_deref(),
-            Some("aci-alex")
-        );
-        let serialized = serde_yaml::to_string(&loaded).unwrap();
-        assert!(serialized.contains("signal_aci: aci-alex"));
-        assert!(!serialized.contains("telegram_chat_id"));
-
-        let legacy = r#"
-family:
-  members:
-    - id: alex
-      name: Alex
+      chat_ids:
+        telegram: "101"
+    - id: jordan
+      name: Jordan
       role: adult
-      telegram_chat_id: 424242
+      chat_ids:
+        telegram: "101"
 "#;
-        assert!(serde_yaml::from_str::<AppConfig>(legacy).is_err());
+        let mut file = NamedTempFile::new().unwrap();
+        write!(file, "{yaml}").unwrap();
+        assert!(
+            load_config_for_provider(file.path(), ChatProvider::Telegram)
+                .unwrap_err()
+                .contains("duplicate telegram direct id")
+        );
+    }
+    #[test]
+    fn example_config_loads_for_each_provider() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        with_env_var("SIGNAL_GROUP_ID", None, || {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("config.yaml.example");
+            load_config_for_provider(&path, ChatProvider::Signal).unwrap();
+            load_config_for_provider(&path, ChatProvider::Telegram).unwrap();
+        });
     }
 }
