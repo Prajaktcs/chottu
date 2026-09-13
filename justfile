@@ -45,6 +45,17 @@ setup:
     else
         echo ".env file already exists."
     fi
+    missing_runtime_helper=false
+    for command in nc plutil; do
+        if ! command -v "$command" >/dev/null 2>&1; then
+            echo "Missing runtime prerequisite: $command (required by just run)." >&2
+            missing_runtime_helper=true
+        fi
+    done
+    if [ "$missing_runtime_helper" = true ]; then
+        echo "nc and plutil ship with macOS; restore them with a macOS update or reinstall, then rerun just setup." >&2
+        exit 1
+    fi
 
 # Pull required local Ollama models
 prereqs:
@@ -63,9 +74,10 @@ run: setup
         echo "Please edit the .env file and add your credentials first."
         exit 1
     fi
-    for command in jq nc shlock; do
+    for command in nc plutil; do
         if ! command -v "$command" >/dev/null 2>&1; then
-            echo "$command is required to manage the signal-cli Unix socket."
+            echo "just run requires $command to probe SIGNAL_CLI_SOCKET." >&2
+            echo "$command ships with macOS; restore it with a macOS update or reinstall, then retry." >&2
             exit 1
         fi
     done
@@ -78,25 +90,60 @@ run: setup
             kill "$signal_cli_pid" 2>/dev/null || true
             wait "$signal_cli_pid" 2>/dev/null || true
         fi
-        if [ "$lock_held" = true ]; then
+        if [ "$lock_held" = true ] && [ "$(readlink "$run_lock" 2>/dev/null || true)" = "$$" ]; then
             rm -f "$run_lock"
         fi
     }
     socket_ready() {
         [ -S "$SIGNAL_CLI_SOCKET" ] || return 1
-        local response
+        local response jsonrpc response_id result_type
         response="$(printf '%s\n' '{"jsonrpc":"2.0","method":"getUserStatus","params":{},"id":1}' \
             | nc -U -w 1 "$SIGNAL_CLI_SOCKET" 2>/dev/null || true)"
-        printf '%s\n' "$response" \
-            | jq -e '.jsonrpc == "2.0" and .id == 1 and (.result | type == "array")' \
-                >/dev/null 2>&1
+        [ -n "$response" ] || return 1
+        jsonrpc="$(printf '%s\n' "$response" \
+            | plutil -extract jsonrpc raw -o - - 2>/dev/null || true)"
+        response_id="$(printf '%s\n' "$response" \
+            | plutil -extract id raw -o - - 2>/dev/null || true)"
+        result_type="$(printf '%s\n' "$response" \
+            | plutil -type result - 2>/dev/null || true)"
+        [ "$jsonrpc" = "2.0" ] \
+            && [ "$response_id" = "1" ] \
+            && [ "$result_type" = "array" ]
     }
     acquire_run_lock() {
-        if ! shlock -p $$ -f "$run_lock"; then
-            echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
-            exit 1
-        fi
-        lock_held=true
+        local lock_pid stale_lock
+        while true; do
+            if ln -s "$$" "$run_lock" 2>/dev/null; then
+                lock_held=true
+                return
+            fi
+            if [ -L "$run_lock" ]; then
+                lock_pid="$(readlink "$run_lock" 2>/dev/null || true)"
+            elif [ -f "$run_lock" ]; then
+                lock_pid="$(cat "$run_lock" 2>/dev/null || true)"
+            elif [ ! -e "$run_lock" ]; then
+                continue
+            else
+                echo "Cannot use run lock: $run_lock" >&2
+                echo "Remove it if no just run process is active, then retry." >&2
+                exit 1
+            fi
+            case "$lock_pid" in
+                ''|*[!0-9]*)
+                    echo "Cannot read the owner PID from run lock: $run_lock" >&2
+                    echo "Remove it if no just run process is active, then retry." >&2
+                    exit 1
+                    ;;
+            esac
+            if kill -0 "$lock_pid" 2>/dev/null; then
+                echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
+                exit 1
+            fi
+            stale_lock="${run_lock}.stale.$$"
+            if mv "$run_lock" "$stale_lock" 2>/dev/null; then
+                rm -f "$stale_lock"
+            fi
+        done
     }
     trap cleanup EXIT
     trap 'exit 130' INT
