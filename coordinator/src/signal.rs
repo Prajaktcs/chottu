@@ -21,7 +21,7 @@ use chotu_common::{
     split_task_add_args, start_redirect_listener, AppConfig, AssignedFoodTags, CalendarWindow,
     ChotuLlm, CostHint, FoodPhotoKind, GeminiClient, GoogleCalendarClient, InvestmentPhilosophy,
     MemoryIndex, SignalClient, SignalError, SignalInbound, SignalRecipient, UserIntent,
-    CHOTU_SIGNAL_PREFIX, TASK_CALENDAR_DURATION_MINUTES,
+    TASK_CALENDAR_DURATION_MINUTES,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 
@@ -227,11 +227,7 @@ async fn send_signal(
     chat_id: &ChatId,
     text: impl AsRef<str>,
 ) -> Result<i64, SignalError> {
-    let text = text.as_ref();
-    let mut marked = String::with_capacity(CHOTU_SIGNAL_PREFIX.len() + text.len());
-    marked.push_str(CHOTU_SIGNAL_PREFIX);
-    marked.push_str(text);
-    bot.send_text(chat_id, &marked).await
+    bot.send_text(chat_id, text.as_ref()).await
 }
 
 #[derive(Debug, Clone)]

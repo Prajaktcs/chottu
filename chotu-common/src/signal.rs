@@ -181,14 +181,17 @@ impl SignalClient {
         recipient: &SignalRecipient,
         text: &str,
     ) -> Result<i64, SignalError> {
+        let mut marked = String::with_capacity(CHOTU_SIGNAL_PREFIX.len() + text.len());
+        marked.push_str(CHOTU_SIGNAL_PREFIX);
+        marked.push_str(text);
         let params = match recipient {
             SignalRecipient::Direct { aci } => json!({
                 "recipient": [aci],
-                "message": text,
+                "message": marked,
             }),
             SignalRecipient::Group { group_id } => json!({
                 "groupId": group_id,
-                "message": text,
+                "message": marked,
             }),
         };
         let result = self.request("send", params).await?;
@@ -986,8 +989,8 @@ mod tests {
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
             for (timestamp, expected) in [
-                (3, json!({"recipient":["aci"],"message":"one"})),
-                (4, json!({"groupId":"group","message":"two"})),
+                (3, json!({"recipient":["aci"],"message":"[Chotu] one"})),
+                (4, json!({"groupId":"group","message":"[Chotu] two"})),
             ] {
                 let request = request(&mut reader).await;
                 assert_eq!(request["method"], "send");
