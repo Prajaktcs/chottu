@@ -154,7 +154,7 @@ markdownlint:
         echo "markdownlint: npx is required (install Node.js)" >&2
         exit 1
     fi
-    npx --yes markdownlint-cli2@0.23.2
+    npx --yes markdownlint-cli2@0.23.2 "*.md" "docs/**/*.md" "evals/**/*.md" "!evals/research/results/**"
 
 # Markdown, format, and clippy checks. Used by pre-commit.
 lint: markdownlint
