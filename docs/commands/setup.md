@@ -37,8 +37,9 @@ new configuration should use the provider-scoped YAML above.
 
 Chotu can use your phone's account when `signal-cli` is linked as a secondary
 device. Configure that account's ACI for your member, restart Chotu, then use
-Signal's **Note to Self**. Chotu prefixes replies with `[Chotu]` followed by a
-space and ignores Note-to-Self sync messages carrying that prefix.
+Signal's **Note to Self**. Every reply starts with `[Chotu]` followed by a
+space; Chotu ignores Note-to-Self sync messages carrying that reserved prefix
+and ignores messages sent from the account to other Signal contacts.
 
 ### Telegram
 
