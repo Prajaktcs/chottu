@@ -10,15 +10,27 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 
 | Need | Env / config | Notes |
 | :--- | :--- | :--- |
-| signal-cli account | `SIGNAL_ACCOUNT` | The linked Signal account (E.164 or ACI). Chotu does not register a number. |
+| signal-cli account | `SIGNAL_ACCOUNT` | Linked account **E.164** phone number (must start with `+`). This is signal-cli’s `-a/--account`, not an ACI. Chotu does not register a number. |
 | signal-cli data dir | `SIGNAL_CLI_DATA_DIR` | Private daemon store |
 | signal-cli socket | `SIGNAL_CLI_SOCKET` | Unix-domain JSON-RPC socket; **required for `just run`** |
-| Optional household group | `SIGNAL_GROUP_ID` | Base64 group id from `signal-cli -a "$SIGNAL_ACCOUNT" listGroups` |
+| Optional household group | `SIGNAL_GROUP_ID` | Base64 group id (see commands below) |
 | Gemini | `GEMINI_API_KEY` | **Required for `just run`** (Signal coordinator won’t start without it) |
 | Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
-| Authorized direct messages | `config.yaml` → `family.members[].signal_aci` | Required for each member DM; restart after changes |
+| Authorized direct messages | `config.yaml` → `family.members[].signal_aci` | Per-contact **ACI** UUID for each allowed DM; distinct from `SIGNAL_ACCOUNT`. Restart after changes |
 
 Direct/group authorization is context-specific and configuration is static for the process lifetime. A linked sender in the wrong group is rejected.
+
+`SIGNAL_ACCOUNT` identifies the local linked device to signal-cli. `family.members[].signal_aci` authorizes which remote senders may DM Chotu. Do not put an ACI in `SIGNAL_ACCOUNT`.
+
+After the daemon account is linked, copy contact ACIs and (optionally) the household group id:
+
+```sh
+# Contact ACIs for config.yaml → family.members[].signal_aci
+signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" listContacts -o json
+
+# Optional base64 group id for SIGNAL_GROUP_ID
+signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" listGroups -o json
+```
 
 `just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon. Only one `just run` process may use a configured socket at a time; a concurrent invocation exits without disturbing the active coordinator or daemon.
 
