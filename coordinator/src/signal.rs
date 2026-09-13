@@ -5,6 +5,7 @@ use anyhow::Context;
 use sqlx::SqlitePool;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 
+use crate::scheduled_delivery::{self, DeliveryOutcome, ScheduledJob};
 use chotu_common::{
     answer_memory_query, assign_food_tags, build_calendar_client, clear_budget_override,
     complete_all_open_tasks, compose_calendar_agenda, compute_budget_progress,
@@ -470,102 +471,232 @@ pub async fn start_signal_client(
     let sched_states = conversation_states.clone();
     let sched_config = shared_config.clone();
     tokio::spawn(async move {
-        let mut last_brief = String::new();
-        let mut last_portfolio = String::new();
-        let mut last_reflect = String::new();
         loop {
             let cfg = sched_config.as_ref();
             let now = cfg.now_in_tz();
             let date_str = now.format("%Y-%m-%d").to_string();
-            let targets = signal_delivery_targets(&cfg);
+            let targets = signal_delivery_targets(cfg);
             let tz_name = cfg.resolved_timezone_name();
+            let now_epoch = chrono::Utc::now().timestamp();
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::morning_brief) {
-                if clock.matches(now) && date_str != last_brief && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled morning brief ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    let mut any_ok = false;
-                    for cid in &targets {
-                        if push_scheduled_brief(&sched_bot, cid, &sched_pool, &cfg)
-                            .await
-                            .is_ok()
+                let due = scheduled_delivery::due_recipients(
+                    &sched_pool,
+                    ScheduledJob::MorningBrief,
+                    &date_str,
+                    &targets,
+                    clock.matches(now),
+                    now_epoch,
+                )
+                .await;
+                match due {
+                    Ok(due) if !due.is_empty() => {
+                        println!(
+                            "Signal: scheduled morning brief ({:02}:{:02} {}).",
+                            clock.hour, clock.minute, tz_name
+                        );
+                        if let Err(error) = scheduled_delivery::deliver_recipients(
+                            &sched_pool,
+                            ScheduledJob::MorningBrief,
+                            &date_str,
+                            due,
+                            |chat_id| {
+                                let bot = sched_bot.clone();
+                                let pool = sched_pool.clone();
+                                let config = sched_config.clone();
+                                async move {
+                                    match push_scheduled_brief(
+                                        &bot,
+                                        &chat_id,
+                                        &pool,
+                                        config.as_ref(),
+                                    )
+                                    .await
+                                    {
+                                        Ok(()) => DeliveryOutcome::Delivered,
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Signal: scheduled morning brief failed for {}: {:?}",
+                                                chat_id, error
+                                            );
+                                            DeliveryOutcome::Retry
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                        .await
                         {
-                            any_ok = true;
+                            eprintln!(
+                                "Signal: failed to record scheduled morning brief delivery: {:?}",
+                                error
+                            );
                         }
                     }
-                    if any_ok {
-                        last_brief = date_str.clone();
-                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!(
+                        "Signal: failed to load scheduled morning brief recipients: {:?}",
+                        error
+                    ),
                 }
             }
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::portfolio) {
-                if clock.matches(now) && date_str != last_portfolio && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled portfolio overview ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    match build_networth_summary(&sched_pool, &cfg).await {
-                        Ok(msg) => {
-                            if send_household_attempts(
-                                &sched_bot,
-                                &cfg,
-                                msg,
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                            )
-                            .await
-                            {
-                                last_portfolio = date_str.clone();
-                            }
-                        }
-                        Err(e) => {
+                let due = scheduled_delivery::due_recipients(
+                    &sched_pool,
+                    ScheduledJob::Portfolio,
+                    &date_str,
+                    &targets,
+                    clock.matches(now),
+                    now_epoch,
+                )
+                .await;
+                match due {
+                    Ok(due) if !due.is_empty() => {
+                        println!(
+                            "Signal: scheduled portfolio overview ({:02}:{:02} {}).",
+                            clock.hour, clock.minute, tz_name
+                        );
+                        let summary = build_networth_summary(&sched_pool, cfg).await;
+                        if let Err(error) = &summary {
                             eprintln!(
                                 "Signal: failed to build scheduled portfolio overview: {}",
-                                e
+                                error
                             );
-                            let _ = send_household_attempts(
-                                &sched_bot,
-                                &cfg,
-                                format!("Portfolio overview failed: {}", e),
-                                SCHEDULED_SIGNAL_ATTEMPTS,
-                            )
-                            .await;
+                        }
+                        if let Err(error) = scheduled_delivery::deliver_recipients(
+                            &sched_pool,
+                            ScheduledJob::Portfolio,
+                            &date_str,
+                            due,
+                            |chat_id| {
+                                let bot = sched_bot.clone();
+                                let summary = summary.clone();
+                                async move {
+                                    match summary {
+                                        Ok(message) => match send_markdown_retry(
+                                            &bot,
+                                            &chat_id,
+                                            message,
+                                            SCHEDULED_SIGNAL_ATTEMPTS,
+                                            "scheduled portfolio overview",
+                                        )
+                                        .await
+                                        {
+                                            Ok(()) => DeliveryOutcome::Delivered,
+                                            Err(error) => {
+                                                eprintln!(
+                                                    "Signal: scheduled portfolio overview failed for {}: {:?}",
+                                                    chat_id, error
+                                                );
+                                                DeliveryOutcome::Retry
+                                            }
+                                        },
+                                        Err(error) => {
+                                            let _ = send_plain_retry(
+                                                &bot,
+                                                &chat_id,
+                                                format!("Portfolio overview failed: {}", error),
+                                                SCHEDULED_SIGNAL_ATTEMPTS,
+                                                "scheduled portfolio error",
+                                            )
+                                            .await;
+                                            DeliveryOutcome::Retry
+                                        }
+                                    }
+                                }
+                            },
+                        )
+                        .await
+                        {
+                            eprintln!(
+                                "Signal: failed to record scheduled portfolio delivery: {:?}",
+                                error
+                            );
                         }
                     }
+                    Ok(_) => {}
+                    Err(error) => eprintln!(
+                        "Signal: failed to load scheduled portfolio recipients: {:?}",
+                        error
+                    ),
                 }
             }
 
             if let Some(clock) = cfg.schedule_clock(chotu_common::AgentSchedules::reflection) {
-                if clock.matches(now) && date_str != last_reflect && !targets.is_empty() {
-                    println!(
-                        "Signal: scheduled evening reflection ({:02}:{:02} {}).",
-                        clock.hour, clock.minute, tz_name
-                    );
-                    let mut any_ok = false;
-                    for cid in &targets {
-                        let scope = caller_scope(cfg, cid, cid.lookup_aci())
-                            .expect("scheduled reflection targets are authorized");
-                        if handle_reflect_trigger(
-                            &sched_bot,
-                            cid,
+                let due = scheduled_delivery::due_recipients(
+                    &sched_pool,
+                    ScheduledJob::Reflection,
+                    &date_str,
+                    &targets,
+                    clock.matches(now),
+                    now_epoch,
+                )
+                .await;
+                match due {
+                    Ok(due) if !due.is_empty() => {
+                        println!(
+                            "Signal: scheduled evening reflection ({:02}:{:02} {}).",
+                            clock.hour, clock.minute, tz_name
+                        );
+                        if let Err(error) = scheduled_delivery::deliver_recipients(
                             &sched_pool,
-                            &sched_llm,
-                            sched_states.clone(),
-                            cfg,
-                            &scope,
-                            SCHEDULED_SIGNAL_ATTEMPTS,
+                            ScheduledJob::Reflection,
+                            &date_str,
+                            due,
+                            |chat_id| {
+                                let bot = sched_bot.clone();
+                                let pool = sched_pool.clone();
+                                let llm = sched_llm.clone();
+                                let states = sched_states.clone();
+                                let config = sched_config.clone();
+                                async move {
+                                    let Some(scope) =
+                                        caller_scope(config.as_ref(), &chat_id, chat_id.lookup_aci())
+                                    else {
+                                        eprintln!(
+                                            "Signal: scheduled reflection target {} is no longer authorized",
+                                            chat_id
+                                        );
+                                        return DeliveryOutcome::Retry;
+                                    };
+                                    match handle_reflect_trigger(
+                                        &bot,
+                                        &chat_id,
+                                        &pool,
+                                        &llm,
+                                        states,
+                                        config.as_ref(),
+                                        &scope,
+                                        SCHEDULED_SIGNAL_ATTEMPTS,
+                                    )
+                                    .await
+                                    {
+                                        Ok(outcome) => outcome,
+                                        Err(error) => {
+                                            eprintln!(
+                                                "Signal: scheduled reflection failed for {}: {:?}",
+                                                chat_id, error
+                                            );
+                                            DeliveryOutcome::Retry
+                                        }
+                                    }
+                                }
+                            },
                         )
                         .await
-                        .is_ok()
                         {
-                            any_ok = true;
+                            eprintln!(
+                                "Signal: failed to record scheduled reflection delivery: {:?}",
+                                error
+                            );
                         }
                     }
-                    if any_ok {
-                        last_reflect = date_str;
-                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!(
+                        "Signal: failed to load scheduled reflection recipients: {:?}",
+                        error
+                    ),
                 }
             }
 
@@ -778,7 +909,8 @@ async fn handle_command(
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1).await?;
+            let _ = handle_reflect_trigger(&bot, &chat_id, &pool, &llm, states, config, &scope, 1)
+                .await?;
         }
         Command::Chat => {
             send_signal(
@@ -4691,7 +4823,7 @@ async fn handle_reflect_trigger(
     config: &AppConfig,
     scope: &CallerScope,
     prompt_attempts: u32,
-) -> Result<(), SignalError> {
+) -> Result<DeliveryOutcome, SignalError> {
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let ping = send_signal(
@@ -4719,7 +4851,7 @@ async fn handle_reflect_trigger(
                 "evening reflection db error",
             )
             .await?;
-            return Ok(());
+            return Ok(DeliveryOutcome::Retry);
         }
     };
     crate::reflection::filter_health_for_member(&mut healths, scope.member_id());
@@ -4759,6 +4891,7 @@ async fn handle_reflect_trigger(
                     member_id: scope.member_id().map(str::to_string),
                 },
             );
+            Ok(DeliveryOutcome::Delivered)
         }
         Err(e) => {
             eprintln!("Failed to generate reflection prompt: {:?}", e);
@@ -4770,10 +4903,9 @@ async fn handle_reflect_trigger(
                 "evening reflection llm error",
             )
             .await?;
+            Ok(DeliveryOutcome::Retry)
         }
     }
-
-    Ok(())
 }
 
 async fn handle_message(

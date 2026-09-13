@@ -3,6 +3,7 @@ use chotu_common::ChotuLlm;
 
 mod brief;
 mod reflection;
+mod scheduled_delivery;
 mod signal;
 
 #[tokio::main]
