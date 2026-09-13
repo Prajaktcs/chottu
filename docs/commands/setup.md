@@ -19,6 +19,17 @@ Optionally set `SIGNAL_GROUP_ID` in `.env` for the household group. Direct messa
 
 Restart Chotu after changing `signal_aci` or `SIGNAL_GROUP_ID`. Configuration is static for the process lifetime.
 
+### Use your existing account with Note to Self
+
+Chotu can use the same Signal account as your phone when `signal-cli` is linked
+as a secondary device. Set that account's ACI as your member's `signal_aci`,
+restart Chotu, then send commands in Signal's **Note to Self** conversation.
+
+Every Chotu response starts with `[Chotu] `. Chotu ignores Note-to-Self sync
+messages with that prefix so it does not process its own replies. Treat the
+prefix as reserved: a command you type beginning with `[Chotu] ` is ignored.
+Messages you send from this account to other Signal contacts are also ignored.
+
 ---
 
 ## `/chat`
