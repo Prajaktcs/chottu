@@ -57,12 +57,15 @@ setup:
         exit 1
     fi
     plutil_probe='{"jsonrpc":"2.0","id":1,"result":[]}'
-    if [ "$(printf '%s\n' "$plutil_probe" \
-        | plutil -extract jsonrpc raw -o - - 2>/dev/null || true)" != "2.0" ] \
-        || [ "$(printf '%s\n' "$plutil_probe" \
-        | plutil -type id - 2>/dev/null || true)" != "integer" ] \
-        || [ "$(printf '%s\n' "$plutil_probe" \
-        | plutil -type result - 2>/dev/null || true)" != "array" ]; then
+    plutil_probe_jsonrpc="$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract jsonrpc xml1 -o - - 2>/dev/null || true)"
+    plutil_probe_id="$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract id xml1 -o - - 2>/dev/null || true)"
+    plutil_probe_result="$(printf '%s\n' "$plutil_probe" \
+        | plutil -extract result xml1 -o - - 2>/dev/null || true)"
+    if [[ "$plutil_probe_jsonrpc" != *"<string>2.0</string>"* ]] \
+        || [[ "$plutil_probe_id" != *"<integer>1</integer>"* ]] \
+        || [[ "$plutil_probe_result" != *"<array/>"* ]]; then
         echo "Installed plutil lacks the JSON support required by just run." >&2
         echo "Update macOS, then rerun just setup." >&2
         exit 1
@@ -97,10 +100,8 @@ run: setup
     run_lock="${SIGNAL_CLI_SOCKET}.run.lock"
     lock_held=false
     lock_owner() {
-        if [ -L "$run_lock" ]; then
-            readlink "$run_lock" 2>/dev/null || true
-        elif [ -f "$run_lock" ]; then
-            cat "$run_lock" 2>/dev/null || true
+        if [ -d "$run_lock" ] && [ ! -L "$run_lock" ]; then
+            cat "$run_lock/pid" 2>/dev/null || true
         fi
     }
     cleanup() {
@@ -109,73 +110,71 @@ run: setup
             wait "$signal_cli_pid" 2>/dev/null || true
         fi
         if [ "$lock_held" = true ] && [ "$(lock_owner)" = "$$" ]; then
-            rm -f "$run_lock"
+            rm -f "$run_lock/pid"
+            rmdir "$run_lock" 2>/dev/null || true
         fi
     }
     socket_ready() {
         [ -S "$SIGNAL_CLI_SOCKET" ] || return 1
-        local response jsonrpc response_id response_id_type result_type
+        local response jsonrpc_xml response_id_xml result_xml
         response="$(printf '%s\n' '{"jsonrpc":"2.0","method":"getUserStatus","params":{},"id":1}' \
             | nc -U -w 1 "$SIGNAL_CLI_SOCKET" 2>/dev/null || true)"
         [ -n "$response" ] || return 1
-        jsonrpc="$(printf '%s\n' "$response" \
-            | plutil -extract jsonrpc raw -o - - 2>/dev/null || true)"
-        response_id="$(printf '%s\n' "$response" \
-            | plutil -extract id raw -o - - 2>/dev/null || true)"
-        response_id_type="$(printf '%s\n' "$response" \
-            | plutil -type id - 2>/dev/null || true)"
-        result_type="$(printf '%s\n' "$response" \
-            | plutil -type result - 2>/dev/null || true)"
-        [ "$jsonrpc" = "2.0" ] \
-            && [ "$response_id" = "1" ] \
-            && [ "$response_id_type" = "integer" ] \
-            && [ "$result_type" = "array" ]
+        jsonrpc_xml="$(printf '%s\n' "$response" \
+            | plutil -extract jsonrpc xml1 -o - - 2>/dev/null || true)"
+        response_id_xml="$(printf '%s\n' "$response" \
+            | plutil -extract id xml1 -o - - 2>/dev/null || true)"
+        result_xml="$(printf '%s\n' "$response" \
+            | plutil -extract result xml1 -o - - 2>/dev/null || true)"
+        [[ "$jsonrpc_xml" == *"<string>2.0</string>"* ]] \
+            && [[ "$response_id_xml" == *"<integer>1</integer>"* ]] \
+            && { [[ "$result_xml" == *"<array/>"* ]] || [[ "$result_xml" == *"<array>"* ]]; }
     }
     acquire_run_lock() {
-        local lock_pid stale_lock empty_lock_retries=0
-        while true; do
-            if (set -o noclobber; printf '%s\n' "$$" > "$run_lock") 2>/dev/null; then
-                lock_held=true
-                return
-            fi
-            if [ -L "$run_lock" ] || [ -f "$run_lock" ]; then
-                lock_pid="$(lock_owner)"
-            elif [ ! -e "$run_lock" ]; then
-                echo "Cannot create run lock: $run_lock" >&2
-                echo "Ensure its parent directory exists and is writable, then retry." >&2
+        local lock_pid=""
+        if mkdir "$run_lock" 2>/dev/null; then
+            if ! printf '%s\n' "$$" > "$run_lock/pid"; then
+                rmdir "$run_lock" 2>/dev/null || true
+                echo "Cannot write run lock owner: $run_lock/pid" >&2
                 exit 1
-            else
-                echo "Cannot use run lock: $run_lock" >&2
+            fi
+            lock_held=true
+            return
+        fi
+        if [ -L "$run_lock" ] || { [ -e "$run_lock" ] && [ ! -d "$run_lock" ]; }; then
+            echo "Cannot use run lock: $run_lock" >&2
+            echo "Remove it if no just run process is active, then retry." >&2
+            exit 1
+        fi
+        if [ ! -e "$run_lock" ]; then
+            echo "Cannot create run lock: $run_lock" >&2
+            echo "Ensure its parent directory exists and is writable, then retry." >&2
+            exit 1
+        fi
+        for _ in 1 2 3 4; do
+            lock_pid="$(lock_owner)"
+            [ -n "$lock_pid" ] && break
+            sleep 0.1
+        done
+        case "$lock_pid" in
+            '')
+                echo "Run lock has no owner PID: $run_lock" >&2
                 echo "Remove it if no just run process is active, then retry." >&2
                 exit 1
-            fi
-            case "$lock_pid" in
-                '')
-                    empty_lock_retries=$((empty_lock_retries + 1))
-                    if [ "$empty_lock_retries" -le 3 ]; then
-                        sleep 0.1
-                        continue
-                    fi
-                    echo "Run lock has no owner PID: $run_lock" >&2
-                    echo "Remove it if no just run process is active, then retry." >&2
-                    exit 1
-                    ;;
-                *[!0-9]*)
-                    echo "Cannot read the owner PID from run lock: $run_lock" >&2
-                    echo "Remove it if no just run process is active, then retry." >&2
-                    exit 1
-                    ;;
-            esac
-            if kill -0 "$lock_pid" 2>/dev/null; then
-                echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
+                ;;
+            *[!0-9]*)
+                echo "Cannot read the owner PID from run lock: $run_lock" >&2
+                echo "Remove it if no just run process is active, then retry." >&2
                 exit 1
-            fi
-            empty_lock_retries=0
-            stale_lock="${run_lock}.stale.$$"
-            if mv "$run_lock" "$stale_lock" 2>/dev/null; then
-                rm -f "$stale_lock"
-            fi
-        done
+                ;;
+        esac
+        if kill -0 "$lock_pid" 2>/dev/null; then
+            echo "Another just run process is already using $SIGNAL_CLI_SOCKET"
+            exit 1
+        fi
+        echo "Stale run lock: $run_lock (owner PID $lock_pid is not running)." >&2
+        echo "Remove the lock directory, then retry." >&2
+        exit 1
     }
     trap cleanup EXIT
     trap 'exit 130' INT
