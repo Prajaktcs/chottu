@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    SqlitePool,
-};
+use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
 
@@ -724,6 +721,7 @@ pub async fn complete_all_open_tasks(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
     use tempfile::TempDir;
 
     async fn insert_task(pool: &SqlitePool, id: &str, title: &str, status: &str) {

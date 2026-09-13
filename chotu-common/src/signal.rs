@@ -28,6 +28,8 @@ const RECONNECT_BACKOFF: [Duration; 5] = [
     Duration::from_secs(60),
 ];
 
+pub const CHOTU_SIGNAL_PREFIX: &str = "[Chotu] ";
+
 #[derive(Debug, Error)]
 pub enum SignalError {
     #[error("signal socket I/O error: {0}")]
@@ -179,14 +181,17 @@ impl SignalClient {
         recipient: &SignalRecipient,
         text: &str,
     ) -> Result<i64, SignalError> {
+        let mut marked = String::with_capacity(CHOTU_SIGNAL_PREFIX.len() + text.len());
+        marked.push_str(CHOTU_SIGNAL_PREFIX);
+        marked.push_str(text);
         let params = match recipient {
             SignalRecipient::Direct { aci } => json!({
                 "recipient": [aci],
-                "message": text,
+                "message": marked,
             }),
             SignalRecipient::Group { group_id } => json!({
                 "groupId": group_id,
-                "message": text,
+                "message": marked,
             }),
         };
         let result = self.request("send", params).await?;
@@ -496,14 +501,30 @@ fn parse_receive(message: &Value) -> Result<Option<SignalInbound>, SignalError> 
         .ok_or_else(|| {
             SignalError::Protocol("receive notification lacked result.envelope".into())
         })?;
-    let Some(sender_aci) = envelope.get("sourceUuid").and_then(Value::as_str) else {
+    let Some(sender_aci) = envelope
+        .get("sourceUuid")
+        .and_then(Value::as_str)
+        .filter(|aci| !aci.is_empty())
+    else {
         return Ok(None);
     };
-    if sender_aci.is_empty() {
-        return Ok(None);
-    }
-    let Some(data_message) = envelope.get("dataMessage") else {
-        return Ok(None);
+    let (data_message, is_note_to_self) = if let Some(data_message) = envelope.get("dataMessage") {
+        (data_message, false)
+    } else {
+        let Some(sent_message) = envelope
+            .get("syncMessage")
+            .and_then(|sync| sync.get("sentMessage"))
+        else {
+            return Ok(None);
+        };
+        let is_note_to_self = sent_message
+            .get("destinationUuid")
+            .and_then(Value::as_str)
+            .is_some_and(|destination| destination == sender_aci);
+        if !is_note_to_self {
+            return Ok(None);
+        }
+        (sent_message, true)
     };
 
     let recipient = data_message
@@ -522,6 +543,13 @@ fn parse_receive(message: &Value) -> Result<Option<SignalInbound>, SignalError> 
         .get("message")
         .and_then(Value::as_str)
         .map(str::to_string);
+    if is_note_to_self
+        && text
+            .as_deref()
+            .is_some_and(|text| text.starts_with(CHOTU_SIGNAL_PREFIX))
+    {
+        return Ok(None);
+    }
     let quote_timestamp = data_message
         .get("quote")
         .and_then(|quote| quote.get("id"))
@@ -681,6 +709,67 @@ mod tests {
                 caption: None,
             }]
         );
+    }
+
+    #[test]
+    fn note_to_self_sync_message_is_received() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"result": {"envelope": {
+                "sourceUuid": "aci-self",
+                "syncMessage": {"sentMessage": {
+                    "destinationUuid": "aci-self",
+                    "message": "/tasks"
+                }}
+            }}}
+        });
+
+        let inbound = parse_receive(&message)
+            .unwrap()
+            .expect("unmarked Note to Self message should be received");
+        assert_eq!(inbound.sender_aci, "aci-self");
+        assert_eq!(
+            inbound.recipient,
+            SignalRecipient::Direct {
+                aci: "aci-self".into()
+            }
+        );
+        assert_eq!(inbound.text.as_deref(), Some("/tasks"));
+    }
+
+    #[test]
+    fn marked_note_to_self_reply_is_ignored() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"result": {"envelope": {
+                "sourceUuid": "aci-self",
+                "syncMessage": {"sentMessage": {
+                    "destinationUuid": "aci-self",
+                    "message": "[Chotu] No open tasks."
+                }}
+            }}}
+        });
+
+        assert_eq!(parse_receive(&message).unwrap(), None);
+    }
+
+    #[test]
+    fn sync_message_to_another_contact_is_ignored() {
+        let message = json!({
+            "jsonrpc": "2.0",
+            "method": "receive",
+            "params": {"result": {"envelope": {
+                "sourceUuid": "aci-self",
+                "syncMessage": {"sentMessage": {
+                    "destinationUuid": "aci-other",
+                    "message": "/tasks"
+                }}
+            }}}
+        });
+
+        assert_eq!(parse_receive(&message).unwrap(), None);
     }
 
     #[tokio::test]
@@ -846,6 +935,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn note_to_self_marker_prevents_receive_loop() {
+        let (_dir, listener, path) = socket().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let subscribe = request(&mut reader).await;
+            let marked = json!({
+                "jsonrpc":"2.0", "method":"receive", "params":{"result":{"envelope":{
+                    "sourceUuid":"aci-self", "syncMessage":{"sentMessage":{
+                        "destinationUuid":"aci-self", "message":"[Chotu] response"
+                    }}
+                }}}
+            });
+            let command = json!({
+                "jsonrpc":"2.0", "method":"receive", "params":{"result":{"envelope":{
+                    "sourceUuid":"aci-self", "syncMessage":{"sentMessage":{
+                        "destinationUuid":"aci-self", "message":"/tasks"
+                    }}
+                }}}
+            });
+            write
+                .write_all(
+                    format!(
+                        "{}\n{}\n{}\n",
+                        json!({"jsonrpc":"2.0","id":subscribe["id"],"result":{}}),
+                        marked,
+                        command
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = SignalClient::connect(&path).await.unwrap();
+        let mut receives = client.subscribe_receive().await.unwrap();
+        let received = receives.recv().await.unwrap();
+        assert_eq!(received.text.as_deref(), Some("/tasks"));
+        assert!(matches!(
+            receives.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn sends_direct_and_group_payloads() {
         let (_dir, listener, path) = socket().await;
         let server = tokio::spawn(async move {
@@ -853,8 +989,8 @@ mod tests {
             let (read, mut write) = stream.into_split();
             let mut reader = BufReader::new(read);
             for (timestamp, expected) in [
-                (3, json!({"recipient":["aci"],"message":"one"})),
-                (4, json!({"groupId":"group","message":"two"})),
+                (3, json!({"recipient":["aci"],"message":"[Chotu] one"})),
+                (4, json!({"groupId":"group","message":"[Chotu] two"})),
             ] {
                 let request = request(&mut reader).await;
                 assert_eq!(request["method"], "send");

@@ -146,8 +146,18 @@ run: setup
 build:
     cargo build --workspace
 
-# Format check + clippy (warnings allowed until -D is clean). Used by pre-commit.
-lint:
+# Lint Markdown with the same markdownlint-cli2 version used by CI.
+markdownlint:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v npx >/dev/null 2>&1; then
+        echo "markdownlint: npx is required (install Node.js)" >&2
+        exit 1
+    fi
+    npx --yes markdownlint-cli2@0.23.2 "*.md" "docs/**/*.md" "evals/**/*.md" "!evals/research/results/**"
+
+# Markdown, format, and clippy checks. Used by pre-commit.
+lint: markdownlint
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --locked
 
