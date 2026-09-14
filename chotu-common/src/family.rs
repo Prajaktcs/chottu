@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -769,6 +770,7 @@ fn env_signal_group_id() -> Option<String> {
     std::env::var("SIGNAL_GROUP_ID")
         .ok()
         .filter(|group_id| !group_id.trim().is_empty())
+        .filter(|group_id| STANDARD.decode(group_id).is_ok())
 }
 
 /// Link `aci` to `member_id` in config.yaml and clear that ACI from another member.
@@ -1509,17 +1511,14 @@ family:
     fn test_allowlist_and_delivery_include_household_group() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let linked = two_member_config();
-        with_env_var("SIGNAL_GROUP_ID", Some("household-group"), || {
+        let group_id = "aG91c2Vob2xkLWdyb3Vw";
+        with_env_var("SIGNAL_GROUP_ID", Some(group_id), || {
             assert!(is_signal_conversation_allowed(
                 &linked,
                 "aci-unknown",
-                Some("household-group")
+                Some(group_id)
             ));
-            assert!(is_signal_conversation_allowed(
-                &linked,
-                "",
-                Some("household-group")
-            ));
+            assert!(is_signal_conversation_allowed(&linked, "", Some(group_id)));
             assert!(!is_signal_conversation_allowed(
                 &linked,
                 "aci-unknown",
@@ -1540,7 +1539,31 @@ family:
                         aci: "aci-jordan".to_string()
                     },
                     SignalRecipient::Group {
-                        group_id: "household-group".to_string()
+                        group_id: group_id.to_string()
+                    }
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn test_direct_identifier_is_not_a_household_group() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let linked = two_member_config();
+        with_env_var("SIGNAL_GROUP_ID", Some("direct:aci-alex"), || {
+            assert!(!is_signal_conversation_allowed(
+                &linked,
+                "aci-unknown",
+                Some("direct:aci-alex")
+            ));
+            assert_eq!(
+                signal_delivery_targets(&linked),
+                vec![
+                    SignalRecipient::Direct {
+                        aci: "aci-alex".to_string()
+                    },
+                    SignalRecipient::Direct {
+                        aci: "aci-jordan".to_string()
                     }
                 ]
             );
