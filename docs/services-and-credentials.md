@@ -33,7 +33,7 @@ signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" -o json listCo
 signal-cli --data-dir "$SIGNAL_CLI_DATA_DIR" -a "$SIGNAL_ACCOUNT" -o json listGroups
 ```
 
-`just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon. Only one `just run` process may use a configured socket at a time; a concurrent invocation exits without disturbing the active coordinator or daemon.
+`just run` probes `SIGNAL_CLI_SOCKET`. It reuses a listening daemon, or starts signal-cli when no daemon is listening and stops that managed daemon when the coordinator exits. On macOS it wraps the session in `caffeinate -ims` so idle/system sleep does not freeze the Signal websocket; the display may still sleep. `SIGNAL_CLI_DATA_DIR` and `SIGNAL_ACCOUNT` are only required when `just run` needs to start the daemon. Only one `just run` process may use a configured socket at a time; a concurrent invocation exits without disturbing the active coordinator or daemon.
 
 `just setup` verifies that `nc` and `plutil` are available and that `plutil` supports the JSON operations used by the socket probe. Both commands ship with macOS and need no separate package installation. If either command is missing or incompatible, install current macOS updates, then rerun `just setup`. `just run` names the failed prerequisite before attempting to probe or reuse a daemon; it does not require `jq` or `shlock`.
 

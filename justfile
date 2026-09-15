@@ -97,6 +97,13 @@ run: setup
         fi
     done
 
+    # Keep the Mac awake for the Signal websocket while Chotu runs.
+    # Display may still sleep (-d intentionally omitted). No-op if caffeinate is absent.
+    if [ -z "${CHOTU_CAFFEINATE:-}" ] && command -v caffeinate >/dev/null 2>&1; then
+        export CHOTU_CAFFEINATE=1
+        echo "Preventing idle/system sleep for this session (caffeinate -ims); display may still sleep."
+        exec caffeinate -ims -- "$0"
+    fi
     signal_cli_pid=""
     run_lock="${SIGNAL_CLI_SOCKET}.run.lock"
     lock_held=false
