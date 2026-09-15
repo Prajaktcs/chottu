@@ -218,7 +218,11 @@ run: setup
         for _ in {1..100}; do
             socket_ready && break
             if ! kill -0 "$signal_cli_pid" 2>/dev/null; then
-                wait "$signal_cli_pid"
+                signal_cli_status=0
+                wait "$signal_cli_pid" || signal_cli_status=$?
+                signal_cli_pid=""
+                echo "signal-cli exited before becoming ready (status $signal_cli_status)." >&2
+                exit 1
             fi
             sleep 0.1
         done
