@@ -1044,32 +1044,15 @@ impl ReminderTarget {
 }
 
 fn reminder_delivery_targets(
-    config: &AppConfig,
+    _config: &AppConfig,
     assigned_to_member: Option<&str>,
     household_targets: &[chotu_common::SignalRecipient],
 ) -> Vec<ReminderTarget> {
     if let Some(member_id) = assigned_to_member {
-        if let Some(aci) = chotu_common::signal_aci_for_member(config, member_id) {
-            return vec![ReminderTarget {
-                kind: "direct",
-                id: aci,
-            }];
-        }
-
-        // SIGNAL_GROUP_ID is the configured household conversation. It is the
-        // only safe fallback for an assigned member who has no linked DM.
-        if let Some(group_id) = household_targets.iter().find_map(|target| match target {
-            chotu_common::SignalRecipient::Group { group_id } => Some(group_id.clone()),
-            chotu_common::SignalRecipient::Direct { .. } => None,
-        }) {
-            return vec![ReminderTarget {
-                kind: "group",
-                id: group_id,
-            }];
-        }
-
-        // Keep the logical member target durable. A later process restart with
-        // that member linked can deliver it without exposing it to another DM.
+        // Keep the logical member target durable. Resolve signal_aci only at
+        // delivery so an operator ACI change + restart cannot send a pending
+        // reminder to a previous recipient. Stay pending while unlinked —
+        // never snapshot a DM ACI or fall back to another conversation here.
         return vec![ReminderTarget {
             kind: "member",
             id: member_id.to_string(),
@@ -1657,15 +1640,15 @@ mod signal_mapping_tests {
         assert_eq!(
             reminder_delivery_targets(&config, Some("alice"), &household),
             vec![ReminderTarget {
-                kind: "direct",
-                id: "alice-aci".into(),
+                kind: "member",
+                id: "alice".into(),
             }]
         );
         assert_eq!(
             reminder_delivery_targets(&config, Some("unlinked"), &household),
             vec![ReminderTarget {
-                kind: "group",
-                id: "household".into(),
+                kind: "member",
+                id: "unlinked".into(),
             }]
         );
         assert_eq!(
@@ -1681,6 +1664,59 @@ mod signal_mapping_tests {
                 .into_iter()
                 .map(ReminderTarget::from_recipient)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn assigned_reminder_uses_current_aci_after_config_change() {
+        let mut config = AppConfig::default();
+        config.family.members[0].id = "alice".into();
+        config.family.members[0].signal_aci = Some("alice-aci-old".into());
+        let mut bob = config.family.members[0].clone();
+        bob.id = "bob".into();
+        bob.name = "Bob".into();
+        bob.signal_aci = Some("bob-aci".into());
+        config.family.members.push(bob);
+
+        let targets = reminder_delivery_targets(&config, Some("alice"), &[]);
+        assert_eq!(
+            targets,
+            vec![ReminderTarget {
+                kind: "member",
+                id: "alice".into(),
+            }]
+        );
+
+        let delivery = PendingDelivery {
+            task_id: "task-privacy".into(),
+            target_kind: targets[0].kind.into(),
+            target_id: targets[0].id.clone(),
+            attempts: 0,
+            title: "renew insurance".into(),
+        };
+
+        assert_eq!(
+            resolve_delivery_recipient(&delivery, &config),
+            Some(SignalRecipient::Direct {
+                aci: "alice-aci-old".into(),
+            })
+        );
+
+        // Operator changes Alice's ACI and restarts with updated config.
+        config.family.members[0].signal_aci = Some("alice-aci-new".into());
+        assert_eq!(
+            resolve_delivery_recipient(&delivery, &config),
+            Some(SignalRecipient::Direct {
+                aci: "alice-aci-new".into(),
+            }),
+            "pending assigned reminders must follow the member's current ACI"
+        );
+
+        config.family.members[0].signal_aci = None;
+        assert_eq!(
+            resolve_delivery_recipient(&delivery, &config),
+            None,
+            "unlinked assignee must stay pending, never redirect to another DM"
         );
     }
 
@@ -1811,10 +1847,11 @@ mod signal_mapping_tests {
         )
         .await
         .unwrap();
+        let member_id = config.family.members[0].id.clone();
         let delivery = PendingDelivery {
             task_id: "task-retry".into(),
-            target_kind: "direct".into(),
-            target_id: "alice-aci".into(),
+            target_kind: "member".into(),
+            target_id: member_id,
             attempts: 0,
             title: "call dentist".into(),
         };
