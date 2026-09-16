@@ -144,6 +144,10 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
         .await
         .context("Failed to backfill memory chunk task owners")?;
 
+    rewrite_assigned_email_reminder_targets_to_members(&pool)
+        .await
+        .context("Failed to rewrite assigned email reminder targets to members")?;
+
     let tagged = crate::food_tags::backfill_food_log_keyword_tags(&pool)
         .await
         .context("Failed to backfill food_log keyword tags")?;
@@ -626,6 +630,77 @@ async fn backfill_memory_chunk_task_owners(pool: &SqlitePool) -> Result<()> {
                WHERE tasks.id = memory_chunks.source_id \
                  AND tasks.assigned_to IS NOT NULL \
            )",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Rewrite incomplete assigned-task Signal outbox rows from snapshotted
+/// `direct`/`group` targets to durable `member` IDs.
+///
+/// Delivery resolves the member's current `signal_aci` at send time, so an
+/// operator ACI change + restart cannot deliver a pending reminder to a
+/// previous recipient. Unassigned household fan-out rows stay `direct`.
+async fn rewrite_assigned_email_reminder_targets_to_members(pool: &SqlitePool) -> Result<()> {
+    let has_deliveries: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'table' AND name = 'email_task_signal_deliveries'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_deliveries.0 == 0 {
+        return Ok(());
+    }
+    let has_assigned: (i32,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name = 'assigned_to'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if has_assigned.0 == 0 {
+        return Ok(());
+    }
+
+    sqlx::query(
+        "INSERT OR IGNORE INTO email_task_signal_deliveries (
+            task_id,
+            target_kind,
+            target_id,
+            state,
+            attempts,
+            next_attempt_at,
+            lease_expires_at,
+            last_error,
+            message_timestamp,
+            created_at,
+            delivered_at
+        )
+        SELECT
+            d.task_id,
+            'member',
+            t.assigned_to,
+            d.state,
+            d.attempts,
+            d.next_attempt_at,
+            d.lease_expires_at,
+            d.last_error,
+            d.message_timestamp,
+            d.created_at,
+            d.delivered_at
+        FROM email_task_signal_deliveries d
+        JOIN tasks t ON t.id = d.task_id
+        WHERE t.assigned_to IS NOT NULL
+          AND d.state IN ('pending', 'sending')
+          AND d.target_kind IN ('direct', 'group')",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM email_task_signal_deliveries
+         WHERE state IN ('pending', 'sending')
+           AND target_kind IN ('direct', 'group')
+           AND task_id IN (SELECT id FROM tasks WHERE assigned_to IS NOT NULL)",
     )
     .execute(pool)
     .await?;
@@ -1250,5 +1325,67 @@ mod tests {
                 ("t-open".to_string(), None),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn assigned_pending_direct_deliveries_migrate_to_member_targets() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("assigned_member_targets.db");
+        let pool = init_db(db_path.to_str().unwrap()).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, status, source) \
+             VALUES \
+             ('task-assigned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'renew insurance', 'alice', 'open', 'inferred'), \
+             ('task-unassigned', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'shared chore', NULL, 'open', 'inferred')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO email_task_signal_deliveries \
+             (task_id, target_kind, target_id, state, attempts, next_attempt_at) \
+             VALUES \
+             ('task-assigned', 'direct', 'alice-aci-old', 'pending', 2, 10), \
+             ('task-unassigned', 'direct', 'bob-aci', 'pending', 0, 10)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        rewrite_assigned_email_reminder_targets_to_members(&pool)
+            .await
+            .unwrap();
+
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT task_id, target_kind, target_id, attempts \
+             FROM email_task_signal_deliveries \
+             ORDER BY task_id, target_kind, target_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("task-assigned".into(), "member".into(), "alice".into(), 2),
+                (
+                    "task-unassigned".into(),
+                    "direct".into(),
+                    "bob-aci".into(),
+                    0
+                ),
+            ]
+        );
+
+        // Idempotent on boot-style re-run.
+        rewrite_assigned_email_reminder_targets_to_members(&pool)
+            .await
+            .unwrap();
+        let again: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM email_task_signal_deliveries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(again, 2);
     }
 }
