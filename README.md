@@ -35,7 +35,7 @@ What leaves is temporary: processing and extraction the mini cannot do yet. A fo
 
 ## How it runs
 
-The baseline this was built for is a Mac mini: local Ollama, SQLite, a Signal interface via `signal-cli`, optional API calls for the jobs the mini cannot do. Run `just setup`, fill `.env` and `config.yaml`, link signal-cli once, then use `just run`; it starts and stops the Signal daemon with the coordinator, and on macOS keeps the machine awake (`caffeinate -ims`) so sleep does not drop the Signal websocket while the display may still sleep. How each command behaves is in [`docs/README.md`](docs/README.md). How the process is shaped is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+The baseline this was built for is a Mac mini: local Ollama, SQLite, a Signal interface via `signal-cli`, optional API calls for the jobs the mini cannot do. Run `just setup`, fill `.env` and `config.yaml`, link signal-cli once, then use `just run`; it reuses a listening Signal daemon (and leaves that externally managed process running), or starts one when needed and stops only the daemon it started when the coordinator exits. On macOS it keeps the machine awake (`caffeinate -ims`) so sleep does not drop the Signal websocket while the display may still sleep. How each command behaves is in [`docs/README.md`](docs/README.md). How the process is shaped is in [`ARCHITECTURE.md`](ARCHITECTURE.md). Daemon ownership details are in [`docs/services-and-credentials.md`](docs/services-and-credentials.md).
 
 ## If you want to contribute
 
