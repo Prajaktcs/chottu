@@ -43,7 +43,7 @@
 - [x] Structured `exercise_log` schema (activity type, duration, active kcal, start/end) beyond free-text descriptions — wire into coach/plan progress without keyword heuristics
 - [ ] Meal planning ↔ grocery lists
 - [ ] Medical-record–aware coaching (private local ingest only; never commit or fan-out across family DMs; user-confirmed constraints → macros/plan; never diagnose)
-- [ ] Local relationship graph (YouSpot-shaped): people / identities / interactions; contacts + email/cal ingest; leverage via `/brief` `/cal` `/memory` — see [`docs/relationship-graph-spec.md`](docs/relationship-graph-spec.md)
+- [ ] Local relationship graph (YouSpot-shaped): people + multi-channel context; leverage via `/brief` `/cal` `/memory` — see [`docs/relationship-graph-spec.md`](docs/relationship-graph-spec.md)
 
 ### Non-goals
 

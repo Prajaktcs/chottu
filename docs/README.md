@@ -11,7 +11,7 @@ Living notes for running the household agent: credentials, services, and how Sig
 | [Memory](./commands/memory.md) | `/memory` RAG |
 | [Finance](./commands/finance.md) | Monthly, budget, net worth, research |
 | [Condition tracking spec](./condition-tracking-spec.md) | M1–M2 shipped (schema, config, food tags); M3–M6 still open |
-| [Relationship graph spec](./relationship-graph-spec.md) | Design only: local people graph, multi-channel ingest, brief/cal/memory leverage |
+| [Relationship graph spec](./relationship-graph-spec.md) | Product intent only: local people graph, multi-channel ingest, brief/cal/memory leverage |
 | [Signal vs Telegram](./signal-vs-telegram.md) | What carried over after the chat transport switch — and what you miss |
 
 **Secrets:** never put real API keys, tokens, or refresh tokens in these files. Values live only in local `.env` (gitignored). Document names and “where to get them,” not the secrets themselves.
