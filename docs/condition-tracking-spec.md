@@ -5,7 +5,7 @@ psoriasis) per family member, tag food logs against a fixed vocabulary, collect
 a daily symptom score during evening reflection, and surface lag-aware trends —
 without Chotu ever inventing medical advice.
 
-**Status:** M1–M2 shipped (schema, config, tag-at-log-time) · remaining M3–M6 · **Owner agents:** Coordinator (Telegram, reflection),
+**Status:** M1–M3 shipped (schema, config, tag-at-log-time, private reflection check-ins) · remaining M4–M6 · **Owner agents:** Coordinator (Signal, reflection),
 Health Coach (tips, trends)
 
 ---
@@ -202,8 +202,11 @@ Also — plaque psoriasis today, 0–5 (0 = calm, 5 = flare)?
 Optional one word after the number: itch / plaques / sleep / stress.
 ```
 
-Reply parsing: first integer 0–5 found per condition line → `condition_checkin`
-upsert; any following word(s) on that line → `note`. Everything else remains
+Reply parsing: `condition_id: 3 itch` (or the full condition label instead of
+the id) → `condition_checkin` upsert; following words → `note`. A bare `3`
+is accepted only as the entire reply when exactly one condition was asked.
+Other journal numbers, invalid scores, and ambiguous bare scores are ignored.
+Everything else remains
 the normal journal entry saved under `~/chotu_brain/Journal/`, and the score is
 also written into the journal markdown so memory search sees it.
 

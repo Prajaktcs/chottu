@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chotu_common::{ChotuLlm, HealthFamilySummary};
+use chotu_common::{AppConfig, ChotuLlm, HealthCondition, HealthFamilySummary};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::path::PathBuf;
@@ -10,6 +10,148 @@ pub struct SimpleTx {
     pub amount: f64,
     pub category: String,
     pub currency: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConditionCheckin {
+    pub condition_id: String,
+    pub label: String,
+    pub score: u8,
+    pub note: Option<String>,
+}
+
+/// Household reflections must never carry a member's condition definitions.
+pub fn checkin_conditions(config: &AppConfig, member_id: Option<&str>) -> Vec<HealthCondition> {
+    member_id
+        .and_then(|id| {
+            config
+                .family
+                .members
+                .iter()
+                .find(|m| m.id.eq_ignore_ascii_case(id))
+        })
+        .map(|member| {
+            member
+                .health_conditions
+                .iter()
+                .filter(|c| c.check_in && !c.id.trim().is_empty() && !c.label.trim().is_empty())
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn append_checkin_questions(prompt: &mut String, conditions: &[HealthCondition]) {
+    if conditions.is_empty() {
+        return;
+    }
+    prompt.push_str("\n\nOptional symptom check-in (0 = calm, 5 = worst flare). Reply on a separate line for each condition, with an optional note; skipping is fine:\n");
+    for condition in conditions {
+        prompt.push_str(&format!(
+            "{} today, 0–5? Reply: {}: <0–5> [note]\n",
+            condition.label, condition.id
+        ));
+    }
+}
+
+/// Explicit condition lines avoid mistaking ordinary journal numbers for scores.
+pub fn parse_condition_checkins(
+    response: &str,
+    conditions: &[HealthCondition],
+) -> Vec<ConditionCheckin> {
+    let mut checkins = Vec::new();
+    for condition in conditions {
+        let mut answer = None;
+        for line in response.lines() {
+            let line = line.trim().trim_start_matches("- ").trim();
+            let payload = line
+                .split_once(':')
+                .and_then(|(name, rest)| {
+                    (name.trim().eq_ignore_ascii_case(&condition.id)
+                        || name.trim().eq_ignore_ascii_case(&condition.label))
+                    .then_some(rest.trim())
+                })
+                .or_else(|| {
+                    // A bare number is allowed only as the entire single-condition reply.
+                    // Notes use the explicit condition prefix to avoid journal prose like "3 meetings".
+                    (conditions.len() == 1 && response.trim() == line && line.len() == 1)
+                        .then_some(line)
+                });
+            let Some(payload) = payload else { continue };
+            let (score, note) = payload
+                .split_once(char::is_whitespace)
+                .unwrap_or((payload, ""));
+            if score.len() != 1 || !matches!(score.as_bytes()[0], b'0'..=b'5') {
+                continue;
+            }
+            answer = Some(ConditionCheckin {
+                condition_id: condition.id.clone(),
+                label: condition.label.clone(),
+                score: score.as_bytes()[0] - b'0',
+                note: (!note.trim().is_empty()).then(|| note.trim().to_string()),
+            });
+        }
+        if let Some(answer) = answer {
+            checkins.push(answer);
+        }
+    }
+    checkins
+}
+
+pub async fn save_condition_checkins(
+    pool: &SqlitePool,
+    member_id: &str,
+    date: &str,
+    checkins: &[ConditionCheckin],
+    conditions: &[HealthCondition],
+) -> Result<Vec<ConditionCheckin>> {
+    let mut tx = pool.begin().await?;
+    for checkin in checkins {
+        sqlx::query("INSERT INTO condition_checkin (family_member_id, date, condition_id, score, note) VALUES (?, ?, ?, ?, ?) ON CONFLICT(family_member_id, date, condition_id) DO UPDATE SET score = excluded.score, note = excluded.note")
+            .bind(member_id).bind(date).bind(&checkin.condition_id)
+            .bind(checkin.score as i32).bind(&checkin.note)
+            .execute(&mut *tx).await.context("Failed to save symptom check-in")?;
+    }
+    // Rehydrate today's scores so a later reflection that skips a question
+    // does not erase its previously recorded score from the journal / RAG.
+    let rows: Vec<(String, i32, Option<String>)> = sqlx::query_as(
+        "SELECT condition_id, score, note FROM condition_checkin WHERE family_member_id = ? AND date = ?",
+    ).bind(member_id).bind(date).fetch_all(&mut *tx).await?;
+    let saved = conditions
+        .iter()
+        .filter_map(|condition| {
+            let (_, score, note) = rows.iter().find(|(id, _, _)| id == &condition.id)?;
+            let score = u8::try_from(*score).ok().filter(|score| *score <= 5)?;
+            Some(ConditionCheckin {
+                condition_id: condition.id.clone(),
+                label: condition.label.clone(),
+                score,
+                note: note.clone(),
+            })
+        })
+        .collect();
+    tx.commit().await?;
+    Ok(saved)
+}
+
+fn format_checkin_journal(checkins: &[ConditionCheckin]) -> String {
+    let mut section = String::new();
+    if !checkins.is_empty() {
+        // Memory indexes the ## Response section and stops at the next ##.
+        section.push_str("### Condition Check-ins\n");
+        for checkin in checkins {
+            section.push_str(&format!(
+                "- {} ({}): {}/5",
+                checkin.label, checkin.condition_id, checkin.score
+            ));
+            if let Some(note) = &checkin.note {
+                section.push_str(&format!(" — {note}"));
+            }
+            section.push('\n');
+        }
+        section.push_str("\n### Journal\n");
+    }
+    section
 }
 
 pub async fn get_daily_data(
@@ -268,6 +410,7 @@ pub async fn save_reflection(
     txs: &[SimpleTx],
     healths: &[HealthFamilySummary],
     member_id: Option<&str>,
+    checkins: &[ConditionCheckin],
 ) -> Result<PathBuf> {
     // Retrieve journal directory from env or default to ~/chotu_brain
     let brain_dir_str =
@@ -355,6 +498,7 @@ pub async fn save_reflection(
     content.push_str(prompt);
     content.push_str("\n\n");
     content.push_str("## Response\n");
+    content.push_str(&format_checkin_journal(checkins));
     content.push_str(response);
     content.push('\n');
 
@@ -377,6 +521,167 @@ fn escape_yaml_double_quoted(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn condition(id: &str, label: &str) -> HealthCondition {
+        HealthCondition {
+            id: id.into(),
+            label: label.into(),
+            check_in: true,
+            lag_window: [1, 3],
+            notes: None,
+        }
+    }
+
+    #[test]
+    fn checkin_prompts_are_private_and_opt_in() {
+        let mut config = AppConfig::default();
+        let active = condition("skin", "Skin symptoms");
+        let mut disabled = condition("sleep", "Sleep symptoms");
+        disabled.check_in = false;
+        config.family.members[0].health_conditions = vec![active.clone(), disabled];
+        let mut other = config.family.members[0].clone();
+        other.id = "jordan".into();
+        other.health_conditions = vec![condition("other", "Private other condition")];
+        config.family.members.push(other);
+
+        assert!(checkin_conditions(&config, None).is_empty());
+        assert!(checkin_conditions(&config, Some("unknown")).is_empty());
+        let selected = checkin_conditions(&config, Some("alex"));
+        assert_eq!(selected, vec![active]);
+        let mut prompt = "Original journal prompt".to_string();
+        append_checkin_questions(&mut prompt, &selected);
+        assert!(prompt.starts_with("Original journal prompt"));
+        assert!(prompt.contains("skin: <0–5> [note]"));
+        assert!(!prompt.contains("Sleep symptoms"));
+        assert!(!prompt.contains("Private other condition"));
+        let mut household = "Household prompt".to_string();
+        append_checkin_questions(&mut household, &checkin_conditions(&config, None));
+        assert_eq!(household, "Household prompt");
+    }
+
+    #[test]
+    fn checkins_parse_named_conditions_and_preserve_notes() {
+        let conditions = vec![
+            condition("skin", "Skin symptoms"),
+            condition("joint", "Joint pain"),
+        ];
+        let response = "I slept 5 hours and walked 3 miles.\n- SKIN: 0\nJoint pain: 5 itch and stress\nunknown: 2\nskin: 2 better tonight";
+        let checkins = parse_condition_checkins(response, &conditions);
+        assert_eq!(checkins.len(), 2);
+        assert_eq!(checkins[0].score, 2);
+        assert_eq!(checkins[0].note.as_deref(), Some("better tonight"));
+        assert_eq!(checkins[1].score, 5);
+        assert_eq!(checkins[1].note.as_deref(), Some("itch and stress"));
+        let journal = format_checkin_journal(&checkins);
+        assert!(journal.contains("Skin symptoms (skin): 2/5 — better tonight"));
+        assert!(journal.contains("Joint pain (joint): 5/5 — itch and stress"));
+    }
+
+    #[test]
+    fn checkins_skip_missing_invalid_and_ambiguous_scores() {
+        let one = vec![condition("skin", "Skin symptoms")];
+        for reply in [
+            "skin: -1",
+            "skin: 6",
+            "skin: 10",
+            "skin: 3.5",
+            "skin: 2/5",
+            "skin: skip",
+            "I slept 5 hours",
+            "3 meetings today",
+            "unknown: 3",
+            "Journal entry\n3",
+        ] {
+            assert!(parse_condition_checkins(reply, &one).is_empty(), "{reply}");
+        }
+        assert_eq!(parse_condition_checkins("0", &one)[0].score, 0);
+        assert_eq!(parse_condition_checkins("5", &one)[0].score, 5);
+        let mut multiple = one;
+        multiple.push(condition("joint", "Joint pain"));
+        assert!(parse_condition_checkins("3", &multiple).is_empty());
+        assert!(parse_condition_checkins("skin: 3", &[]).is_empty());
+        assert!(format_checkin_journal(&[]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn checkins_upsert_without_crossing_member_or_date_boundaries() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../chotu-common/migrations/20260824000003_condition_tracking.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let conditions = vec![condition("skin", "Skin symptoms")];
+        let first = parse_condition_checkins("skin: 3 itch", &conditions);
+        save_condition_checkins(&pool, "alex", "2026-09-29", &first, &conditions)
+            .await
+            .unwrap();
+        save_condition_checkins(&pool, "jordan", "2026-09-29", &first, &conditions)
+            .await
+            .unwrap();
+        save_condition_checkins(&pool, "alex", "2026-09-28", &first, &conditions)
+            .await
+            .unwrap();
+        let revised = parse_condition_checkins("skin: 1", &conditions);
+        save_condition_checkins(&pool, "alex", "2026-09-29", &revised, &conditions)
+            .await
+            .unwrap();
+        let skipped = save_condition_checkins(&pool, "alex", "2026-09-29", &[], &conditions)
+            .await
+            .unwrap();
+        assert_eq!(skipped, revised);
+        assert!(format_checkin_journal(&skipped).contains("Skin symptoms (skin): 1/5"));
+        let rows: Vec<(String, String, i32, Option<String>)> = sqlx::query_as("SELECT family_member_id, date, score, note FROM condition_checkin ORDER BY family_member_id, date")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("alex".into(), "2026-09-28".into(), 3, Some("itch".into())),
+                ("alex".into(), "2026-09-29".into(), 1, None),
+                ("jordan".into(), "2026-09-29".into(), 3, Some("itch".into())),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn checkin_batch_failure_keeps_previous_scores_for_retry() {
+        let pool = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../chotu-common/migrations/20260824000003_condition_tracking.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let conditions = vec![
+            condition("skin", "Skin symptoms"),
+            condition("joint", "Joint pain"),
+        ];
+        let first = parse_condition_checkins("skin: 2", &conditions);
+        save_condition_checkins(&pool, "alex", "2026-09-29", &first, &conditions)
+            .await
+            .unwrap();
+        sqlx::raw_sql("CREATE TRIGGER reject_joint BEFORE INSERT ON condition_checkin WHEN NEW.condition_id = 'joint' BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END;")
+            .execute(&pool).await.unwrap();
+        let revised = parse_condition_checkins("skin: 4\njoint: 3", &conditions);
+        assert!(
+            save_condition_checkins(&pool, "alex", "2026-09-29", &revised, &conditions)
+                .await
+                .is_err()
+        );
+        let saved = save_condition_checkins(&pool, "alex", "2026-09-29", &[], &conditions)
+            .await
+            .unwrap();
+        assert_eq!(saved, first);
+        sqlx::raw_sql("DROP TRIGGER reject_joint")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let retried = save_condition_checkins(&pool, "alex", "2026-09-29", &revised, &conditions)
+            .await
+            .unwrap();
+        assert_eq!(retried, revised);
+    }
 
     #[test]
     fn test_strip_think_blocks() {
