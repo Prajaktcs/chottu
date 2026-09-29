@@ -5218,7 +5218,7 @@ async fn handle_food_photo(
             send_signal(
                 bot,
                 chat_id,
-                "Vision is busy — estimating from your caption instead…",
+                "Couldn't analyze the photo — estimating from your caption instead…",
             )
             .await?;
             match gemini_client.approximate_nutrition(caption_for_text).await {
@@ -5261,7 +5261,12 @@ async fn handle_food_photo(
                 }
                 Err(e2) => {
                     eprintln!("Caption text nutrition fallback failed: {:?}", e2);
-                    send_signal(bot, chat_id, format!("Failed to analyze food photo: {e}")).await?;
+                    send_signal(
+                        bot,
+                        chat_id,
+                        format!("Failed to estimate food from caption: {e2}"),
+                    )
+                    .await?;
                     return Ok(());
                 }
             }

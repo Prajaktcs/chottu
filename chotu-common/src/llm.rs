@@ -1130,6 +1130,22 @@ Do not include any explanation or markdown formatting outside the JSON block.";
         mime_type: &str,
         caption: &str,
     ) -> Result<FoodPhotoAnalysis, LlmError> {
+        self.approximate_nutrition_from_image_at(
+            image_bytes,
+            mime_type,
+            caption,
+            "https://generativelanguage.googleapis.com/v1beta",
+        )
+        .await
+    }
+
+    async fn approximate_nutrition_from_image_at(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        caption: &str,
+        base_url: &str,
+    ) -> Result<FoodPhotoAnalysis, LlmError> {
         use base64::prelude::*;
         let base64_data = BASE64_STANDARD.encode(image_bytes);
 
@@ -1212,7 +1228,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
 
         for (model_idx, model) in FOOD_PHOTO_MODELS.iter().enumerate() {
             let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={}",
+                "{base_url}/models/{model}:generateContent?key={}",
                 self.api_key
             );
 
@@ -1483,9 +1499,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parse_food_photo_analysis() {
-        let json = r#"{
+    const FOOD_PHOTO_JSON: &str = r#"{
             "kind": "BARCODE",
             "barcode": "737628064502",
             "description": "Thai peanut noodle kit",
@@ -1519,10 +1533,127 @@ mod tests {
                 "trans_fat_g": 0.0
             }
         }"#;
-        let parsed: FoodPhotoAnalysis = serde_json::from_str(json).unwrap();
+
+    #[test]
+    fn test_parse_food_photo_analysis() {
+        let parsed: FoodPhotoAnalysis = serde_json::from_str(FOOD_PHOTO_JSON).unwrap();
         assert_eq!(parsed.kind, FoodPhotoKind::Barcode);
         assert_eq!(parsed.barcode.as_deref(), Some("737628064502"));
         assert_eq!(parsed.nutrition.total_calories, 200);
+    }
+
+    async fn photo_response_sequence(
+        statuses: &[u16],
+    ) -> (Result<FoodPhotoAnalysis, LlmError>, Vec<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+        let statuses = statuses.to_vec();
+        let server = tokio::spawn(async move {
+            let mut paths = Vec::new();
+            for status in statuses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let (headers_end, content_length) = loop {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0, "request ended before headers");
+                    request.extend_from_slice(&buffer[..n]);
+                    if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..pos]).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        paths.push(headers.lines().next().unwrap().to_string());
+                        break (pos + 4, length);
+                    }
+                };
+                while request.len() < headers_end + content_length {
+                    let n = stream.read(&mut buffer).await.unwrap();
+                    assert!(n > 0, "request ended before body");
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let payload: serde_json::Value =
+                    serde_json::from_slice(&request[headers_end..headers_end + content_length])
+                        .unwrap();
+                assert_eq!(
+                    payload["contents"][0]["parts"][1]["inlineData"]["mimeType"],
+                    "image/jpeg"
+                );
+                assert_eq!(
+                    payload["contents"][0]["parts"][1]["inlineData"]["data"],
+                    "aW1hZ2U="
+                );
+
+                let body = if status == 200 {
+                    serde_json::json!({"candidates": [{"content": {"parts": [{"text": FOOD_PHOTO_JSON}]}}]}).to_string()
+                } else {
+                    serde_json::json!({"error": {"status": if status == 400 { "INVALID_ARGUMENT" } else { "UNAVAILABLE" }}}).to_string()
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            paths
+        });
+        let client = GeminiClient::new("test-key".into());
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            client.approximate_nutrition_from_image_at(b"image", "image/jpeg", "lunch", &base_url),
+        )
+        .await
+        .expect("food-photo request timed out");
+        let paths = tokio::time::timeout(std::time::Duration::from_secs(10), server)
+            .await
+            .expect("mock server timed out")
+            .unwrap();
+        (result, paths)
+    }
+
+    #[tokio::test]
+    async fn food_photo_capacity_retries_same_model_before_switching() {
+        let (result, paths) = photo_response_sequence(&[503, 200]).await;
+        assert_eq!(result.unwrap().nutrition.total_calories, 200);
+        assert_eq!(
+            paths,
+            vec![
+                "POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",
+                "POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn food_photo_repeated_capacity_switches_model() {
+        let (result, paths) = photo_response_sequence(&[503, 503, 200]).await;
+        assert_eq!(result.unwrap().nutrition.total_calories, 200);
+        assert_eq!(
+            paths,
+            vec![
+                "POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",
+                "POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",
+                "POST /v1beta/models/gemini-flash-latest:generateContent?key=test-key HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn food_photo_non_capacity_error_stops_without_retrying() {
+        let (result, paths) = photo_response_sequence(&[400]).await;
+        assert!(matches!(result, Err(LlmError::Client(msg)) if msg.contains("returned 400")));
+        assert_eq!(
+            paths,
+            vec!["POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",]
+        );
     }
 
     #[test]
@@ -1544,13 +1675,6 @@ mod tests {
             400,
             &serde_json::json!({"error": {"status": "INVALID_ARGUMENT"}})
         ));
-    }
-
-    #[test]
-    fn test_food_photo_model_fallback_chain() {
-        assert_eq!(FOOD_PHOTO_MODELS[0], "gemini-3.6-flash");
-        assert!(FOOD_PHOTO_MODELS.len() >= 2);
-        assert!(FOOD_PHOTO_MODELS.contains(&"gemini-2.5-flash"));
     }
 
     #[test]
