@@ -33,7 +33,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Effort:** S
 
-**Files:** `coordinator/src/telegram.rs` (`mark_all_tasks_complete`), `chotu-common/src/database.rs` (`complete_all_open_tasks`)
+**Files:** `coordinator/src/signal.rs` (`mark_all_tasks_complete`), `chotu-common/src/database.rs` (`complete_all_open_tasks`)
 
 **Done:** Linked DMs complete `assigned_to = me OR NULL` immediately; household/unlinked chats preview then require `/tasks complete all confirm`.
 
@@ -49,7 +49,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Effort:** S
 
-**Files:** `coordinator/src/telegram.rs` (`resolve_food_member_and_description`, `resolve_optional_member_arg`, food handlers), `chotu-common/src/family.rs` (`member_for_telegram_chat`)
+**Files:** `coordinator/src/signal.rs` (`resolve_food_member_and_description`, `resolve_optional_member_arg`, food handlers), `chotu-common/src/family.rs` (`member_for_signal_aci`)
 
 **Done:** `ensure_food_mutation_allowed` rejects cross-member `/food`, `/adjustfood`, `/undofood`, `/clearfood`, free-text FOOD, and food photos in linked DMs; household/unlinked chats unchanged.
 
@@ -65,7 +65,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Effort:** S–M
 
-**Files:** `coordinator/src/telegram.rs` (`create_manual_task`, `snooze_task`, `mark_task_complete` / `mark_all_tasks_complete`), `chotu-common/src/calendar.rs`
+**Files:** `coordinator/src/signal.rs` (`create_manual_task`, `snooze_task`, `mark_task_complete` / `mark_all_tasks_complete`), `chotu-common/src/calendar.rs`
 
 **Done:** Snooze PATCHes start/end via `reschedule_at` (duration from `duration_minutes` or 30m); complete/complete-all delete the Google event and clear `calendar_event_id` only after successful delete (or confirmed 404); create path unchanged.
 
@@ -81,7 +81,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Effort:** M
 
-**Files:** `coordinator/src/brief.rs`, `chotu-common/src/agenda.rs` (`format_brief_calendar_section` / `compose_calendar_agenda`), brief scheduler in `coordinator/src/telegram.rs`
+**Files:** `coordinator/src/brief.rs`, `chotu-common/src/agenda.rs` (`format_brief_calendar_section` / `compose_calendar_agenda`), brief scheduler in `coordinator/src/signal.rs`
 
 **Done:** Linked DM briefs/`/cal` fetch only the recipient’s calendar; brief tasks use assignee = me OR unassigned (same as complete-all). Household chats unchanged; bills stay shared.
 
@@ -97,7 +97,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Effort:** S–M
 
-**Files:** `health-coach/src/coach_enrich.rs`, `health-coach/src/trends.rs`, `health-coach/src/fitness_plan.rs`, `coordinator/src/brief.rs`, `coordinator/src/telegram.rs` (`handle_plan`)
+**Files:** `health-coach/src/coach_enrich.rs`, `health-coach/src/trends.rs`, `health-coach/src/fitness_plan.rs`, `coordinator/src/brief.rs`, `coordinator/src/signal.rs` (`handle_plan`)
 
 **Done:** `CoachEnrichOpts` — trends skip today’s plan and load exercises for the trend window; status uses `for_day`. `plan_session_adherence` + `plan_cardio_minutes_on_cardio_days` feed coach tips, `/plan`, and morning brief.
 
@@ -112,7 +112,7 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 **Effort:** M (scoping S–M; ANN larger)
 
-**Files:** `chotu-common/src/memory.rs`, `coordinator/src/telegram.rs` (`handle_memory`)
+**Files:** `chotu-common/src/memory.rs`, `coordinator/src/signal.rs` (`handle_memory`)
 
 **Done:** `memory_chunks.owner_member_id` (tasks from `assigned_to`; journals from YAML `member` / `member_id`). Linked DM search is owner = me OR unassigned tasks; household chat still sees all. Startup backfills existing task chunks from `tasks.assigned_to` after the modern tasks schema is in place. ANN/pruning still open.
 
@@ -120,15 +120,18 @@ New product ideas (meal planning, medical-record coaching) stay parked under **L
 
 ### 8. Research bench finish
 
-- [ ] Commit `tool_choice: Auto` for OpenRouter structured extraction in `chotu-common/src/llm.rs` (Qwen thinking mode rejects `required`)
-- [ ] Finish a clean Sol vs Qwen run with `summary.md` and a decision under the harness rule
-- [ ] Tighten metrics: composite currently ignores `interest_label_accuracy`; `validate_score_report` only checks ticker coverage
+- [x] Use `ToolChoice::Auto` for Qwen OpenRouter structured extraction in `chotu-common/src/llm.rs` (other models retain `Required`)
+- [x] Finish a clean Sol vs Qwen run with `summary.md` and a decision under the harness rule
+- [ ] Include `interest_label_accuracy` in the composite score
+- [ ] Extend `validate_score_report` beyond ticker coverage
 
-**Why:** Harness exists; first live candidate arm failed on tool choice; decision rule needs a complete comparable run.
+**Why:** The harness now has a completed comparable run; metric weighting and score validation still need tightening.
 
 **Effort:** S–M
 
 **Files:** `chotu-common/src/llm.rs`, `finance-advisor/src/bench.rs`, `finance-advisor/src/lib.rs`, `finance-advisor/src/bin/research_bench.rs`, `evals/research/`
+
+**Done:** Qwen extraction uses `ToolChoice::Auto`. The [two-trial Sol vs Qwen run](evals/research/results/20260809-203705/summary.md) scored Sol at 0.950 and Qwen at 0.925 under the current composite; the recorded decision was to keep the baseline scorer. Revisit that comparison after changing the metrics.
 
 ---
 
@@ -140,10 +143,8 @@ Not prioritized, but known thin spots:
 | ------ | ----- |
 | Nutrition | Gemini missing-nutrient fills when key absent; photo capture still ambiguous on portion/time |
 | Intent router | Strong for status/tasks/food/plan/memory; thin for adjust/undo/clear food, complete-all safety, calendar vs brief ambiguity |
-| Family privacy | Allowlist + link hijack guards are good; remaining leak is item 7 ANN/pruning (full-table scan in household chat); household `SIGNAL_GROUP_ID` still gets family-wide nutrition when unlinked |
+| Family privacy | Allowlist + link hijack guards and memory owner scoping are shipped; unlinked household `SIGNAL_GROUP_ID` still gets family-wide nutrition by design |
 
 ## Suggested order
 
-Max quality per week: **8** (items 1–7 scoping done; ANN follow-on still open).
-
-Take 8 next (research bench finish).
+Next: finish **8** (composite metrics and score validation), then the **7** memory retrieval pruning follow-on. Items 1–6 and item 7 owner scoping are complete; item 8 extraction compatibility and the recorded comparison run are complete.
