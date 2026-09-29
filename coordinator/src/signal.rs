@@ -5142,7 +5142,7 @@ async fn handle_message(
     Ok(())
 }
 
-/// Download a Signal food photo, analyze with Gemini (+ Open Food Facts for barcodes), persist.
+/// Download a Signal food photo, analyze with Gemini or OpenRouter (+ Open Food Facts for barcodes), persist.
 async fn handle_food_photo(
     bot: &Bot,
     chat_id: &ChatId,
@@ -5202,13 +5202,17 @@ async fn handle_food_photo(
             "Still analyzing that photo — hang tight…".to_string(),
         );
         gemini_client
-            .approximate_nutrition_from_image(&image_bytes, &attachment.content_type, caption)
+            .approximate_nutrition_from_image_with_fallback(
+                &image_bytes,
+                &attachment.content_type,
+                caption,
+            )
             .await
     };
-    let analysis = match analysis {
-        Ok(a) => a,
+    let (analysis, vision_source) = match analysis {
+        Ok(result) => result,
         Err(e) => {
-            eprintln!("Gemini food-photo analysis failed: {:?}", e);
+            eprintln!("Food-photo analysis failed: {e}");
             send_signal(bot, chat_id, format!("Failed to analyze food photo: {e}")).await?;
             return Ok(());
         }
@@ -5246,7 +5250,10 @@ async fn handle_food_photo(
                 (
                     desc,
                     analysis.nutrition,
-                    format!("Gemini vision; barcode {} not in Open Food Facts", barcode),
+                    format!(
+                        "{vision_source}; barcode {} not in Open Food Facts",
+                        barcode
+                    ),
                 )
             }
             Err(e) => {
@@ -5259,7 +5266,7 @@ async fn handle_food_photo(
                 (
                     desc,
                     analysis.nutrition,
-                    "Gemini vision (OFF lookup failed)".to_string(),
+                    format!("{vision_source} (OFF lookup failed)"),
                 )
             }
         }
@@ -5280,7 +5287,7 @@ async fn handle_food_photo(
         } else {
             format!("{} ({})", analysis.description, caption_rest)
         };
-        (desc, analysis.nutrition, "Gemini vision".to_string())
+        (desc, analysis.nutrition, vision_source.to_string())
     };
 
     println!(

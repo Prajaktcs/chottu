@@ -29,8 +29,8 @@ Empty args → usage + configured member list.
 
 Send a barcode, package, or plated meal (optional caption: `half the bowl` or `praj half the bowl`).
 
-- Barcode → Open Food Facts (no key)
-- Package / plate → Gemini vision (`GEMINI_API_KEY`)
+- Barcode → Open Food Facts (no key) after vision reads the barcode
+- Package / plate → Gemini vision (`GEMINI_API_KEY`), falling back to OpenRouter Qwen vision (`OPENROUTER_API_KEY`) on failure. The original image and caption are sent to the fallback; no caption is required.
 
 Same logging path as `/food` (including Health push).
 

@@ -106,7 +106,7 @@ pub enum FoodPhotoKind {
     Unknown,
 }
 
-/// Gemini vision analysis of a Telegram food photo.
+/// Vision analysis of a food photo, from Gemini or an OpenRouter fallback.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct FoodPhotoAnalysis {
     pub kind: FoodPhotoKind,
@@ -117,6 +117,23 @@ pub struct FoodPhotoAnalysis {
     pub description: String,
     /// Estimated nutrition for the portion shown / described.
     pub nutrition: NutritionEstimation,
+}
+
+fn parse_food_photo_analysis(text: &str) -> Result<FoodPhotoAnalysis, LlmError> {
+    let cleaned = clean_json_response(text);
+    let mut parsed: FoodPhotoAnalysis =
+        serde_json::from_str(&cleaned).map_err(|e| LlmError::JsonParse(e, text.to_string()))?;
+
+    if let Some(code) = &parsed.barcode {
+        let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+        parsed.barcode = if digits.is_empty() {
+            None
+        } else {
+            Some(digits)
+        };
+    }
+    parsed.nutrition = sanitize_nutrition_tags(parsed.nutrition);
+    Ok(parsed)
 }
 
 /// High-level Telegram free-text intents (v1).
@@ -893,16 +910,28 @@ notes from the email metadata and body.";
 // OpenRouter Client
 // -------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenRouterClient {
     client: openrouter::Client,
+    api_key: String,
+}
+
+impl std::fmt::Debug for OpenRouterClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenRouterClient")
+            .field("api_key", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenRouterClient {
     pub fn new(api_key: impl AsRef<str>) -> Result<Self, LlmError> {
         let client = openrouter::Client::new(api_key.as_ref())
             .map_err(|e| LlmError::Client(format!("Failed to init OpenRouter client: {e}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            api_key: api_key.as_ref().to_owned(),
+        })
     }
 
     /// Build from `OPENROUTER_API_KEY`.
@@ -964,6 +993,69 @@ impl OpenRouterClient {
             .extract(user_prompt)
             .await
             .map_err(|e| LlmError::Client(e.to_string()))
+    }
+
+    async fn approximate_nutrition_from_image_at(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        caption: &str,
+        endpoint: &str,
+    ) -> Result<FoodPhotoAnalysis, LlmError> {
+        use base64::prelude::*;
+
+        let prompt =
+            format!(
+            "You are a nutritionist analyzing a food photo. Caption (portion notes, if any): {}.\n\
+Identify BARCODE (digits only when readable), PACKAGE, PLATED, or UNKNOWN (not food). \
+Describe the item and estimate nutrition for the portion shown, using caption notes. \
+For UNKNOWN set nutrition to zero. Return only JSON matching this schema: {}. \
+Pick tags only from this closed list: alcohol, added_sugar, dairy, gluten, red_meat, \
+processed_meat, fried, spicy, nightshades, caffeine, shellfish, eggs, soy, citrus.",
+            if caption.trim().is_empty() { "(no caption)" } else { caption.trim() },
+            serde_json::to_string(&schemars::schema_for!(FoodPhotoAnalysis))
+                .map_err(|e| LlmError::Client(format!("Food-photo schema encoding failed: {e}")))?
+        );
+        let data_url = format!(
+            "data:{mime_type};base64,{}",
+            BASE64_STANDARD.encode(image_bytes)
+        );
+        let payload = serde_json::json!({
+            "model": "qwen/qwen3.8-max-0902",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": data_url}}
+                ]
+            }],
+            "response_format": {"type": "json_object"}
+        });
+
+        let response = reqwest::Client::new()
+            .post(endpoint)
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| LlmError::Client(format!("OpenRouter food-photo request failed: {e}")))?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| LlmError::Client(format!("OpenRouter food-photo response failed: {e}")))?;
+        if !status.is_success() {
+            return Err(LlmError::Client(format!(
+                "OpenRouter food-photo returned {}: {body}",
+                status.as_u16()
+            )));
+        }
+        let response_json: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|e| LlmError::Client(format!("Invalid OpenRouter response JSON: {e}")))?;
+        let text = response_json["choices"][0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| LlmError::Client("OpenRouter food-photo returned no content".into()))?;
+        parse_food_photo_analysis(text)
     }
 }
 
@@ -1101,20 +1193,15 @@ Do not include any explanation or markdown formatting outside the JSON block.";
         Ok(parsed)
     }
 
-    /// Analyze a food photo (barcode, package, or plated meal) with optional caption.
-    pub async fn approximate_nutrition_from_image(
+    async fn approximate_nutrition_from_image_at(
         &self,
         image_bytes: &[u8],
         mime_type: &str,
         caption: &str,
+        url: &str,
     ) -> Result<FoodPhotoAnalysis, LlmError> {
         use base64::prelude::*;
         let base64_data = BASE64_STANDARD.encode(image_bytes);
-
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
-            self.api_key
-        );
 
         let caption_line = if caption.trim().is_empty() {
             "(no caption)".to_string()
@@ -1192,7 +1279,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
 
         let http_client = reqwest::Client::new();
         let res = http_client
-            .post(&url)
+            .post(url)
             .json(&payload)
             .send()
             .await
@@ -1220,22 +1307,68 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
                 ))
             })?;
 
-        let cleaned = clean_json_response(text_response);
-        let mut parsed: FoodPhotoAnalysis = serde_json::from_str(&cleaned)
-            .map_err(|e| LlmError::JsonParse(e, text_response.to_string()))?;
+        parse_food_photo_analysis(text_response)
+    }
 
-        // Normalize barcode to digits only when present.
-        if let Some(ref code) = parsed.barcode {
-            let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
-            parsed.barcode = if digits.is_empty() {
-                None
-            } else {
-                Some(digits)
-            };
+    /// Use OpenRouter vision if Gemini cannot analyze the photo, preserving the same result shape.
+    pub async fn approximate_nutrition_from_image_with_fallback(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        caption: &str,
+    ) -> Result<(FoodPhotoAnalysis, &'static str), LlmError> {
+        let gemini_url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
+            self.api_key
+        );
+        self.approximate_nutrition_from_image_with_fallback_at(
+            OpenRouterClient::from_env,
+            image_bytes,
+            mime_type,
+            caption,
+            &gemini_url,
+            "https://openrouter.ai/api/v1/chat/completions",
+        )
+        .await
+    }
+
+    async fn approximate_nutrition_from_image_with_fallback_at(
+        &self,
+        openrouter: impl FnOnce() -> Result<OpenRouterClient, LlmError>,
+        image_bytes: &[u8],
+        mime_type: &str,
+        caption: &str,
+        gemini_url: &str,
+        openrouter_url: &str,
+    ) -> Result<(FoodPhotoAnalysis, &'static str), LlmError> {
+        match self
+            .approximate_nutrition_from_image_at(image_bytes, mime_type, caption, gemini_url)
+            .await
+        {
+            Ok(analysis) => Ok((analysis, "Gemini vision")),
+            Err(gemini_error) => {
+                eprintln!("Gemini food-photo analysis failed: {gemini_error}");
+                let openrouter = openrouter().map_err(|e| {
+                    LlmError::Client(format!(
+                        "Gemini food-photo failed: {gemini_error}; OpenRouter fallback unavailable: {e}"
+                    ))
+                })?;
+                let analysis = openrouter
+                    .approximate_nutrition_from_image_at(
+                        image_bytes,
+                        mime_type,
+                        caption,
+                        openrouter_url,
+                    )
+                    .await
+                    .map_err(|fallback_error| {
+                        LlmError::Client(format!(
+                            "Gemini food-photo failed: {gemini_error}; OpenRouter vision failed: {fallback_error}"
+                        ))
+                    })?;
+                Ok((analysis, "OpenRouter Qwen vision"))
+            }
         }
-        parsed.nutrition = sanitize_nutrition_tags(parsed.nutrition);
-
-        Ok(parsed)
     }
 
     pub async fn approximate_nutrition(
@@ -1367,6 +1500,16 @@ mod tests {
     use crate::models::EmailClassification;
 
     #[test]
+    fn openrouter_debug_does_not_disclose_api_key() {
+        let client = OpenRouterClient::new("sensitive-router-key").unwrap();
+        for rendered in [format!("{client:?}"), format!("{client:#?}")] {
+            assert!(rendered.contains("OpenRouterClient"));
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(!rendered.contains("sensitive-router-key"));
+        }
+    }
+
+    #[test]
     fn test_clean_json_response() {
         let input1 = "```json\n{\"classification\": \"TRASH\", \"reason\": \"spam\"}\n```";
         assert_eq!(
@@ -1413,9 +1556,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_parse_food_photo_analysis() {
-        let json = r#"{
+    const FOOD_PHOTO_JSON: &str = r#"{
             "kind": "BARCODE",
             "barcode": "737628064502",
             "description": "Thai peanut noodle kit",
@@ -1449,10 +1590,198 @@ mod tests {
                 "trans_fat_g": 0.0
             }
         }"#;
-        let parsed: FoodPhotoAnalysis = serde_json::from_str(json).unwrap();
+
+    #[test]
+    fn test_parse_food_photo_analysis() {
+        let parsed: FoodPhotoAnalysis = serde_json::from_str(FOOD_PHOTO_JSON).unwrap();
         assert_eq!(parsed.kind, FoodPhotoKind::Barcode);
         assert_eq!(parsed.barcode.as_deref(), Some("737628064502"));
         assert_eq!(parsed.nutrition.total_calories, 200);
+    }
+
+    async fn mock_photo_endpoint(
+        status: u16,
+        body: String,
+    ) -> (String, tokio::task::JoinHandle<(String, serde_json::Value)>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                    .await
+                    .expect("food-photo request timed out")
+                    .unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            let (header_end, content_length) = loop {
+                let n = stream.read(&mut buffer).await.unwrap();
+                assert!(n > 0, "request ended before headers");
+                request.extend_from_slice(&buffer[..n]);
+                if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = std::str::from_utf8(&request[..pos]).unwrap();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    break (pos + 4, length);
+                }
+            };
+            while request.len() < header_end + content_length {
+                let n = stream.read(&mut buffer).await.unwrap();
+                assert!(n > 0, "request ended before body");
+                request.extend_from_slice(&buffer[..n]);
+            }
+            let headers = std::str::from_utf8(&request[..header_end])
+                .unwrap()
+                .to_owned();
+            let payload =
+                serde_json::from_slice(&request[header_end..header_end + content_length]).unwrap();
+            let response = format!(
+                "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            (headers, payload)
+        });
+        (url, server)
+    }
+
+    #[tokio::test]
+    async fn food_photo_falls_back_to_openrouter_vision_after_gemini_503() {
+        let (gemini_base, gemini_server) = mock_photo_endpoint(503, "busy".into()).await;
+        let photo_json = FOOD_PHOTO_JSON.replace("737628064502", "73762-8064502");
+        let response = serde_json::json!({
+            "choices": [{"message": {"content": format!("```json\n{photo_json}\n```")}}]
+        })
+        .to_string();
+        let (router_base, router_server) = mock_photo_endpoint(200, response).await;
+        let gemini = GeminiClient::new("gemini-test".into());
+        let (analysis, source) = gemini
+            .approximate_nutrition_from_image_with_fallback_at(
+                || OpenRouterClient::new("router-secret"),
+                b"photo",
+                "image/jpeg",
+                "",
+                &format!(
+                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
+                ),
+                &format!("{router_base}/api/v1/chat/completions"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(source, "OpenRouter Qwen vision");
+        assert_eq!(analysis.kind, FoodPhotoKind::Barcode);
+        assert_eq!(analysis.barcode.as_deref(), Some("737628064502"));
+        assert_eq!(analysis.nutrition.total_calories, 200);
+        let (gemini_headers, gemini_payload) = gemini_server.await.unwrap();
+        assert!(gemini_headers.starts_with(
+            "POST /v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test HTTP/1.1"
+        ));
+        assert_eq!(
+            gemini_payload["contents"][0]["parts"][1]["inlineData"]["data"],
+            "cGhvdG8="
+        );
+        let (router_headers, router_payload) = router_server.await.unwrap();
+        assert!(router_headers.starts_with("POST /api/v1/chat/completions HTTP/1.1"));
+        assert!(router_headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer router-secret"));
+        assert_eq!(router_payload["model"], "qwen/qwen3.8-max-0902");
+        assert_eq!(
+            router_payload["messages"][0]["content"][1]["image_url"]["url"],
+            "data:image/jpeg;base64,cGhvdG8="
+        );
+        assert!(router_payload["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("(no caption)"));
+    }
+
+    #[tokio::test]
+    async fn food_photo_uses_gemini_without_openrouter_when_primary_succeeds() {
+        let response = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": FOOD_PHOTO_JSON}]}}]
+        })
+        .to_string();
+        let (gemini_base, gemini_server) = mock_photo_endpoint(200, response).await;
+        let gemini = GeminiClient::new("gemini-test".into());
+        let (analysis, source) = gemini
+            .approximate_nutrition_from_image_with_fallback_at(
+                || -> Result<OpenRouterClient, LlmError> {
+                    panic!("fallback used on Gemini success")
+                },
+                b"photo",
+                "image/jpeg",
+                "",
+                &format!(
+                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
+                ),
+                "http://127.0.0.1:1/api/v1/chat/completions",
+            )
+            .await
+            .unwrap();
+        assert_eq!(source, "Gemini vision");
+        assert_eq!(analysis.nutrition.total_calories, 200);
+        gemini_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn food_photo_reports_openrouter_failure_after_gemini_failure() {
+        let (gemini_base, gemini_server) = mock_photo_endpoint(503, "busy".into()).await;
+        let (router_base, router_server) =
+            mock_photo_endpoint(401, r#"{"error":{"message":"bad credentials"}}"#.into()).await;
+        let gemini = GeminiClient::new("gemini-test".into());
+        let result = gemini
+            .approximate_nutrition_from_image_with_fallback_at(
+                || OpenRouterClient::new("router-secret"),
+                b"photo",
+                "image/jpeg",
+                "",
+                &format!(
+                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
+                ),
+                &format!("{router_base}/api/v1/chat/completions"),
+            )
+            .await;
+        assert!(matches!(result, Err(LlmError::Client(message))
+            if message.contains("Gemini food-photo failed")
+                && message.contains("OpenRouter vision failed")
+                && message.contains("401")));
+        gemini_server.await.unwrap();
+        router_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn food_photo_reports_missing_openrouter_key_after_gemini_failure() {
+        let (gemini_base, gemini_server) = mock_photo_endpoint(503, "busy".into()).await;
+        let gemini = GeminiClient::new("gemini-test".into());
+        let result = gemini
+            .approximate_nutrition_from_image_with_fallback_at(
+                || {
+                    Err(LlmError::Client(
+                        "OPENROUTER_API_KEY environment variable is not set".into(),
+                    ))
+                },
+                b"photo",
+                "image/jpeg",
+                "",
+                &format!(
+                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
+                ),
+                "http://127.0.0.1:1/api/v1/chat/completions",
+            )
+            .await;
+        assert!(matches!(result, Err(LlmError::Client(message))
+            if message.contains("Gemini food-photo failed")
+                && message.contains("OPENROUTER_API_KEY")));
+        gemini_server.await.unwrap();
     }
 
     #[test]
