@@ -5209,8 +5209,62 @@ async fn handle_food_photo(
         Ok(a) => a,
         Err(e) => {
             eprintln!("Gemini food-photo analysis failed: {:?}", e);
-            send_signal(bot, chat_id, format!("Failed to analyze food photo: {e}")).await?;
-            return Ok(());
+            let caption_for_text = caption_rest.trim();
+            if caption_for_text.is_empty() {
+                send_signal(bot, chat_id, format!("Failed to analyze food photo: {e}")).await?;
+                return Ok(());
+            }
+            eprintln!("Gemini food-photo: trying caption text fallback for member={member_id}");
+            send_signal(
+                bot,
+                chat_id,
+                "Vision is busy — estimating from your caption instead…",
+            )
+            .await?;
+            match gemini_client.approximate_nutrition(caption_for_text).await {
+                Ok(nutrition) => {
+                    let timing = match llm.extract_food_log_context(caption_for_text).await {
+                        Ok(ctx) => {
+                            let food_time =
+                                effective_food_time(caption_for_text, ctx.food_time.as_deref());
+                            resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
+                        }
+                        Err(te) => {
+                            eprintln!(
+                                "Food photo caption timing extract failed (using now): {:?}",
+                                te
+                            );
+                            resolve_food_log_timing(None, None)
+                        }
+                    };
+                    send_signal(
+                        bot,
+                        chat_id,
+                        format!(
+                            "Using caption text (vision unavailable) for *{}*…",
+                            member_id
+                        ),
+                    )
+                    .await?;
+                    persist_food_estimation(
+                        bot,
+                        chat_id,
+                        pool,
+                        config,
+                        &member_id,
+                        caption_for_text,
+                        &nutrition,
+                        &timing,
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Err(e2) => {
+                    eprintln!("Caption text nutrition fallback failed: {:?}", e2);
+                    send_signal(bot, chat_id, format!("Failed to analyze food photo: {e}")).await?;
+                    return Ok(());
+                }
+            }
         }
     };
     if analysis.kind == FoodPhotoKind::Unknown {

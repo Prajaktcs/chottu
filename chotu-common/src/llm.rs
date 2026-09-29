@@ -119,6 +119,25 @@ pub struct FoodPhotoAnalysis {
     pub nutrition: NutritionEstimation,
 }
 
+/// Prefer current flash, then aliases / prior flash when a model is capacity-throttled.
+const FOOD_PHOTO_MODELS: &[&str] = &[
+    "gemini-3.6-flash",
+    "gemini-flash-latest",
+    "gemini-2.5-flash",
+];
+
+fn gemini_capacity_error(status: u16, body: &serde_json::Value) -> bool {
+    if matches!(status, 429 | 503) {
+        return true;
+    }
+    matches!(
+        body.get("error")
+            .and_then(|e| e.get("status"))
+            .and_then(|s| s.as_str()),
+        Some("UNAVAILABLE" | "RESOURCE_EXHAUSTED")
+    )
+}
+
 /// High-level Telegram free-text intents (v1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -1102,6 +1121,9 @@ Do not include any explanation or markdown formatting outside the JSON block.";
     }
 
     /// Analyze a food photo (barcode, package, or plated meal) with optional caption.
+    ///
+    /// Tries [`FOOD_PHOTO_MODELS`] in order. On capacity errors (503/429/UNAVAILABLE),
+    /// retries once on the same model then moves to the next.
     pub async fn approximate_nutrition_from_image(
         &self,
         image_bytes: &[u8],
@@ -1110,11 +1132,6 @@ Do not include any explanation or markdown formatting outside the JSON block.";
     ) -> Result<FoodPhotoAnalysis, LlmError> {
         use base64::prelude::*;
         let base64_data = BASE64_STANDARD.encode(image_bytes);
-
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
-            self.api_key
-        );
 
         let caption_line = if caption.trim().is_empty() {
             "(no caption)".to_string()
@@ -1191,51 +1208,104 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         });
 
         let http_client = reqwest::Client::new();
-        let res = http_client
-            .post(&url)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| LlmError::Client(format!("Gemini food-photo request failed: {:?}", e)))?;
+        let mut last_err: Option<LlmError> = None;
 
-        let status = res.status();
-        let res_json: serde_json::Value = res.json().await.map_err(|e| {
-            LlmError::Client(format!("Failed to parse Gemini food-photo JSON: {:?}", e))
-        })?;
+        for (model_idx, model) in FOOD_PHOTO_MODELS.iter().enumerate() {
+            let url = format!(
+                "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={}",
+                self.api_key
+            );
 
-        if !status.is_success() {
-            return Err(LlmError::Client(format!(
-                "Gemini food-photo returned {}: {}",
-                status.as_u16(),
-                res_json
-            )));
+            // One immediate retry on capacity before switching models.
+            for attempt in 1..=2u8 {
+                let res = match http_client.post(&url).json(&payload).send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        last_err = Some(LlmError::Client(format!(
+                            "Gemini food-photo request failed ({model}): {:?}",
+                            e
+                        )));
+                        break;
+                    }
+                };
+
+                let status = res.status();
+                let res_json: serde_json::Value = match res.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_err = Some(LlmError::Client(format!(
+                            "Failed to parse Gemini food-photo JSON ({model}): {:?}",
+                            e
+                        )));
+                        break;
+                    }
+                };
+
+                let status_u16 = status.as_u16();
+                if !status.is_success() {
+                    let err = LlmError::Client(format!(
+                        "Gemini food-photo returned {} ({model}): {}",
+                        status_u16, res_json
+                    ));
+                    if gemini_capacity_error(status_u16, &res_json) {
+                        eprintln!(
+                            "Gemini food-photo capacity error on {model} attempt {attempt}: {status_u16}"
+                        );
+                        last_err = Some(err);
+                        if attempt == 1 {
+                            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+                            continue;
+                        }
+                        break;
+                    }
+                    return Err(err);
+                }
+
+                let text_response =
+                    match res_json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
+                        Some(t) => t,
+                        None => {
+                            return Err(LlmError::Client(format!(
+                                "Unexpected Gemini food-photo response ({model}): {:?}",
+                                res_json
+                            )));
+                        }
+                    };
+
+                let cleaned = clean_json_response(text_response);
+                let mut parsed: FoodPhotoAnalysis = serde_json::from_str(&cleaned)
+                    .map_err(|e| LlmError::JsonParse(e, text_response.to_string()))?;
+
+                // Normalize barcode to digits only when present.
+                if let Some(code) = &parsed.barcode {
+                    let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
+                    parsed.barcode = if digits.is_empty() {
+                        None
+                    } else {
+                        Some(digits)
+                    };
+                }
+                parsed.nutrition = sanitize_nutrition_tags(parsed.nutrition);
+
+                if model_idx > 0 || attempt > 1 {
+                    eprintln!(
+                        "Gemini food-photo succeeded via fallback model={model} attempt={attempt}"
+                    );
+                }
+                return Ok(parsed);
+            }
+
+            if model_idx + 1 < FOOD_PHOTO_MODELS.len() {
+                eprintln!(
+                    "Gemini food-photo: falling back from {model} to {}",
+                    FOOD_PHOTO_MODELS[model_idx + 1]
+                );
+            }
         }
 
-        let text_response = res_json["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str()
-            .ok_or_else(|| {
-                LlmError::Client(format!(
-                    "Unexpected Gemini food-photo response: {:?}",
-                    res_json
-                ))
-            })?;
-
-        let cleaned = clean_json_response(text_response);
-        let mut parsed: FoodPhotoAnalysis = serde_json::from_str(&cleaned)
-            .map_err(|e| LlmError::JsonParse(e, text_response.to_string()))?;
-
-        // Normalize barcode to digits only when present.
-        if let Some(ref code) = parsed.barcode {
-            let digits: String = code.chars().filter(|c| c.is_ascii_digit()).collect();
-            parsed.barcode = if digits.is_empty() {
-                None
-            } else {
-                Some(digits)
-            };
-        }
-        parsed.nutrition = sanitize_nutrition_tags(parsed.nutrition);
-
-        Ok(parsed)
+        Err(last_err.unwrap_or_else(|| {
+            LlmError::Client("Gemini food-photo failed with no models tried".into())
+        }))
     }
 
     pub async fn approximate_nutrition(
@@ -1453,6 +1523,34 @@ mod tests {
         assert_eq!(parsed.kind, FoodPhotoKind::Barcode);
         assert_eq!(parsed.barcode.as_deref(), Some("737628064502"));
         assert_eq!(parsed.nutrition.total_calories, 200);
+    }
+
+    #[test]
+    fn test_gemini_capacity_error_detects_503_and_status() {
+        let body_503 = serde_json::json!({
+            "error": {
+                "code": 503,
+                "message": "This model is currently experiencing high demand.",
+                "status": "UNAVAILABLE"
+            }
+        });
+        assert!(gemini_capacity_error(503, &body_503));
+        assert!(gemini_capacity_error(429, &serde_json::json!({})));
+        assert!(gemini_capacity_error(
+            500,
+            &serde_json::json!({"error": {"status": "RESOURCE_EXHAUSTED"}})
+        ));
+        assert!(!gemini_capacity_error(
+            400,
+            &serde_json::json!({"error": {"status": "INVALID_ARGUMENT"}})
+        ));
+    }
+
+    #[test]
+    fn test_food_photo_model_fallback_chain() {
+        assert_eq!(FOOD_PHOTO_MODELS[0], "gemini-3.6-flash");
+        assert!(FOOD_PHOTO_MODELS.len() >= 2);
+        assert!(FOOD_PHOTO_MODELS.contains(&"gemini-2.5-flash"));
     }
 
     #[test]

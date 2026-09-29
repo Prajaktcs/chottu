@@ -42,7 +42,7 @@ Signal / IMAP / drop folder / Google APIs
 | :--- | :--- |
 | **Local Ollama** (`OLLAMA_MODEL`, prefer `qwen3.5:9b`) | Email triage, free-text intent, memory answers, evening reflection, coach tips, weekly `/plan`, food date/time phrasing |
 | **Local embeddings** (`nomic-embed-text`) | `/memory` RAG index over journals, newsletter digests, personal references, tasks |
-| **Gemini** (`GEMINI_API_KEY` — **required to start the Signal loop**) | Food photos (package/plate), PDF ingest, unstructured nutrition estimates |
+| **Gemini** (`GEMINI_API_KEY` — **required to start the Signal loop**) | Food photos (package/plate; retries alternate Gemini Flash models on capacity errors), PDF ingest, unstructured nutrition estimates |
 | **OpenRouter** | `/research` propose → score panel (default Sol + Qwen3.8-Max + Kimi K3) → Kimi judge |
 | **Finnhub** (optional) | Research universe market-cap filter |
 | **Yahoo Finance** | Live `/networth` quotes; research cap fallback for class shares, Canadian ETFs, and other international symbols Finnhub mishandles |
@@ -50,6 +50,8 @@ Signal / IMAP / drop folder / Google APIs
 | **Google** | Health two-way nutrition/activity/exercises, Gmail IMAP OAuth, per-member Calendar |
 
 Health Coach scheduled sync still runs if Gemini is missing (omega-3 / triglyceride fills stay zero). `/research` refuses without `OPENROUTER_API_KEY`.
+
+Food-photo caption text is a last-resort estimate after vision analysis fails; it still uses Gemini. OpenRouter is not currently used for photo analysis.
 
 ---
 
