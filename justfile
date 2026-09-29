@@ -198,8 +198,10 @@ run: setup
             exit 1
         fi
         if [ -S "$SIGNAL_CLI_SOCKET" ]; then
-            echo "Removing stale signal-cli socket: $SIGNAL_CLI_SOCKET"
-            rm -f "$SIGNAL_CLI_SOCKET"
+            echo "Existing signal-cli socket did not pass its health check: $SIGNAL_CLI_SOCKET" >&2
+            echo "Leaving the socket intact because its daemon ownership is unknown." >&2
+            echo "Check the external daemon and retry; remove the socket only after confirming no daemon is running." >&2
+            exit 1
         fi
         if [ -z "$SIGNAL_CLI_DATA_DIR" ] || [ -z "$SIGNAL_ACCOUNT" ]; then
             echo "SIGNAL_CLI_DATA_DIR and SIGNAL_ACCOUNT are required to start signal-cli."
@@ -254,8 +256,9 @@ lint: markdownlint
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --locked
 
-# Run unit tests across all crates (matches CI). Used by pre-push.
+# Run Signal startup and workspace tests (matches CI). Used by pre-push.
 test:
+    python3 -m unittest discover -s tests -p 'test_*.py'
     cargo test --workspace --locked --all-targets
 
 # Point this clone at .githooks/ (pre-commit lint, pre-push tests)
