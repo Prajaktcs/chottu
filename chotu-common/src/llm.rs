@@ -910,10 +910,18 @@ notes from the email metadata and body.";
 // OpenRouter Client
 // -------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct OpenRouterClient {
     client: openrouter::Client,
     api_key: String,
+}
+
+impl std::fmt::Debug for OpenRouterClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenRouterClient")
+            .field("api_key", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 impl OpenRouterClient {
@@ -1490,6 +1498,16 @@ pub fn clean_json_response(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::models::EmailClassification;
+
+    #[test]
+    fn openrouter_debug_does_not_disclose_api_key() {
+        let client = OpenRouterClient::new("sensitive-router-key").unwrap();
+        for rendered in [format!("{client:?}"), format!("{client:#?}")] {
+            assert!(rendered.contains("OpenRouterClient"));
+            assert!(rendered.contains("[REDACTED]"));
+            assert!(!rendered.contains("sensitive-router-key"));
+        }
+    }
 
     #[test]
     fn test_clean_json_response() {
