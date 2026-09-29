@@ -1246,24 +1246,27 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
                 };
 
                 let status = res.status();
-                let res_json: serde_json::Value = match res.json().await {
-                    Ok(v) => v,
+                let status_u16 = status.as_u16();
+                let body = match res.text().await {
+                    Ok(body) => body,
                     Err(e) => {
                         last_err = Some(LlmError::Client(format!(
-                            "Failed to parse Gemini food-photo JSON ({model}): {:?}",
-                            e
+                            "Failed to read Gemini food-photo response ({model}): {e}"
                         )));
                         break;
                     }
                 };
 
-                let status_u16 = status.as_u16();
                 if !status.is_success() {
                     let err = LlmError::Client(format!(
                         "Gemini food-photo returned {} ({model}): {}",
-                        status_u16, res_json
+                        status_u16, body
                     ));
-                    if gemini_capacity_error(status_u16, &res_json) {
+                    let capacity_error = matches!(status_u16, 429 | 503)
+                        || serde_json::from_str::<serde_json::Value>(&body)
+                            .ok()
+                            .is_some_and(|json| gemini_capacity_error(status_u16, &json));
+                    if capacity_error {
                         eprintln!(
                             "Gemini food-photo capacity error on {model} attempt {attempt}: {status_u16}"
                         );
@@ -1276,6 +1279,16 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
                     }
                     return Err(err);
                 }
+
+                let res_json: serde_json::Value = match serde_json::from_str(&body) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        last_err = Some(LlmError::Client(format!(
+                            "Failed to parse Gemini food-photo JSON ({model}): {e}"
+                        )));
+                        break;
+                    }
+                };
 
                 let text_response =
                     match res_json["candidates"][0]["content"]["parts"][0]["text"].as_str() {
@@ -1544,6 +1557,7 @@ mod tests {
 
     async fn photo_response_sequence(
         statuses: &[u16],
+        plain_503: bool,
     ) -> (Result<FoodPhotoAnalysis, LlmError>, Vec<String>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
@@ -1594,6 +1608,8 @@ mod tests {
 
                 let body = if status == 200 {
                     serde_json::json!({"candidates": [{"content": {"parts": [{"text": FOOD_PHOTO_JSON}]}}]}).to_string()
+                } else if status == 503 && plain_503 {
+                    "model overloaded".to_string()
                 } else {
                     serde_json::json!({"error": {"status": if status == 400 { "INVALID_ARGUMENT" } else { "UNAVAILABLE" }}}).to_string()
                 };
@@ -1621,7 +1637,7 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_capacity_retries_same_model_before_switching() {
-        let (result, paths) = photo_response_sequence(&[503, 200]).await;
+        let (result, paths) = photo_response_sequence(&[503, 200], false).await;
         assert_eq!(result.unwrap().nutrition.total_calories, 200);
         assert_eq!(
             paths,
@@ -1634,7 +1650,7 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_repeated_capacity_switches_model() {
-        let (result, paths) = photo_response_sequence(&[503, 503, 200]).await;
+        let (result, paths) = photo_response_sequence(&[503, 503, 200], false).await;
         assert_eq!(result.unwrap().nutrition.total_calories, 200);
         assert_eq!(
             paths,
@@ -1648,11 +1664,24 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_non_capacity_error_stops_without_retrying() {
-        let (result, paths) = photo_response_sequence(&[400]).await;
+        let (result, paths) = photo_response_sequence(&[400], false).await;
         assert!(matches!(result, Err(LlmError::Client(msg)) if msg.contains("returned 400")));
         assert_eq!(
             paths,
             vec!["POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",]
+        );
+    }
+
+    #[tokio::test]
+    async fn food_photo_plain_503_retries_same_model() {
+        let (result, paths) = photo_response_sequence(&[503, 200], true).await;
+        assert_eq!(result.unwrap().nutrition.total_calories, 200);
+        assert_eq!(
+            paths,
+            vec![
+                "POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",
+                "POST /v1beta/models/gemini-3.6-flash:generateContent?key=test-key HTTP/1.1",
+            ]
         );
     }
 
