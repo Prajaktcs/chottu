@@ -867,8 +867,25 @@ in YYYY-MM-DD form from the email metadata and body.";
             members,
             text.trim()
         );
-        self.extract_structured(INTENT_CLASSIFIER_SYSTEM_PROMPT, &user_prompt)
+        // Intent routing needs data, not tool execution. Accept schema-constrained
+        // JSON directly so a model that skips the extractor's submit tool still works.
+        let agent = self
+            .client
+            .agent(&self.model)
+            .preamble(INTENT_CLASSIFIER_SYSTEM_PROMPT)
+            .output_schema::<IntentClassification>()
+            .temperature(0.0)
+            .additional_params(serde_json::json!({
+                "think": false,
+                "num_predict": 512,
+            }))
+            .build();
+        let response = agent
+            .prompt(&user_prompt)
             .await
+            .map_err(|e| LlmError::Client(e.to_string()))?;
+        serde_json::from_str(&clean_json_response(&response))
+            .map_err(|e| LlmError::JsonParse(e, response))
     }
 
     /// Resolve meal text + optional log day/time from a food description (for `/food`).
@@ -1554,6 +1571,66 @@ mod tests {
             let parsed: OllamaClassificationResponse = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed.classification, expected);
         }
+    }
+
+    #[tokio::test]
+    async fn intent_accepts_json_content_without_submit_tool() {
+        let content = serde_json::json!({
+            "intent": "FOOD", "member_id": "praj",
+            "food_description": "1/4 Lara bar", "food_time": "17:00",
+            "reason": "snack log"
+        });
+        let body = serde_json::json!({
+            "model": "test", "created_at": "2026-09-29T23:05:00Z",
+            "message": {"role": "assistant", "content": content.to_string()},
+            "done": true
+        })
+        .to_string();
+        let (url, server) = mock_photo_endpoint(200, body).await;
+        let llm = ChotuLlm {
+            client: ollama::Client::builder()
+                .api_key(Nothing)
+                .base_url(&url)
+                .build()
+                .unwrap(),
+            model: "test".into(),
+            prompt_path: None,
+        };
+        let result = llm
+            .classify_intent("Praj snacks 1/4 Lara bar", &["praj".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            result.into_user_intent(),
+            UserIntent::Food {
+                member_id: Some("praj".into()),
+                description: "1/4 Lara bar".into(),
+                date: None,
+                time: Some("17:00".into()),
+            }
+        );
+        let (headers, request) = server.await.unwrap();
+        assert!(headers.starts_with("POST /api/chat "));
+        assert!(request["format"]["properties"]["intent"].is_object());
+        assert_eq!(request["think"], false);
+        assert!(request["tools"]
+            .as_array()
+            .is_none_or(|tools| tools.is_empty()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local Ollama with qwen3.5:9b"]
+    async fn intent_live_snack_shorthand() {
+        let llm = ChotuLlm::new("http://localhost", 11434, "qwen3.5:9b");
+        let result = llm
+            .classify_intent("Praj snacks 1/4 Lara bar", &["praj".into()])
+            .await
+            .unwrap();
+        assert_eq!(result.intent, IntentKind::Food);
+        assert_eq!(result.member_id.as_deref(), Some("praj"));
+        let food = result.food_description.as_deref().unwrap();
+        assert!(food.contains("1/4"), "portion lost: {food}");
+        assert!(food.to_lowercase().contains("lara"), "food lost: {food}");
     }
 
     const FOOD_PHOTO_JSON: &str = r#"{

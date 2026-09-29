@@ -5375,7 +5375,7 @@ async fn dispatch_free_text_intent(
         Ok(c) => c,
         Err(e) => {
             eprintln!("Intent classification failed: {:?}", e);
-            send_signal(&bot, chat_id, "I couldn't understand that just now. Try a slash command (`/status`, `/tasks`, `/food`) or rephrase.",)
+            send_signal(&bot, chat_id, "The local model couldn't process that message just now. Please retry, or use a slash command (`/status`, `/tasks`, `/food`).",)
             .await?;
             return Ok(());
         }
