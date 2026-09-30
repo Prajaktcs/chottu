@@ -10,7 +10,7 @@ Living notes for running the household agent: credentials, services, and how Sig
 | [Day loop](./commands/day-loop.md) | Brief, calendar, tasks, reflection |
 | [Memory](./commands/memory.md) | `/memory` RAG |
 | [Finance](./commands/finance.md) | Monthly, budget, net worth, research |
-| [Condition tracking spec](./condition-tracking-spec.md) | M1–M3 + M5 shipped (food tags, check-ins, watchlists); M4 + M6 still open |
+| [Condition tracking spec](./condition-tracking-spec.md) | M1–M5 shipped (tags, check-ins, watchlists, meal flags, coaching); M6 trends still open |
 | [Relationship graph spec](./relationship-graph-spec.md) | Product intent only: local people graph, multi-channel ingest, brief/cal/memory leverage |
 | [Signal vs Telegram](./signal-vs-telegram.md) | What carried over after the chat transport switch — and what you miss |
 

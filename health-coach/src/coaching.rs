@@ -3,11 +3,13 @@
 use anyhow::{Context, Result};
 use chotu_common::{ChotuLlm, FitnessGoals, HealthFamilySummary, NutritionGoals};
 
+use crate::conditions::ConditionCoachContext;
 use crate::fitness_plan::PlanDay;
 
 const COACH_SYSTEM_PROMPT: &str = "You are Chotu's household fitness and nutrition coach. \
 Write exactly 1–2 short sentences of coaching for one family member. \
 Ground ONLY in the metrics, goals, plan, and constraints provided — never invent numbers or medical diagnoses. \
+You may reference only the member's own condition watchlists and reported scores. Never propose new trigger foods, infer that a food caused symptoms, diagnose, or recommend treatment. Missing scores are unknown, not zero. \
 When an outcome target date is set and they are off-track on food, steps, or today's planned session, briefly reference the timeline (e.g. days remaining) plus one concrete nudge. \
 If they are broadly on track, briefly celebrate a concrete win. \
 Respect listed constraints. No preamble, no bullet lists, no emoji spam. Plain text suitable for Signal, without Markdown formatting. \
@@ -16,6 +18,7 @@ Return only the tip text.";
 /// Structured snapshot fed to the coach LLM (nutrition + fitness outcome).
 #[derive(Debug, Clone)]
 pub struct FitnessCoachContext {
+    pub conditions: Vec<ConditionCoachContext>,
     pub member_name: String,
     /// e.g. "today (2026-08-04)" or "last 7 days (5 logged)"
     pub window_label: String,
@@ -59,7 +62,10 @@ pub type NutritionCoachContext = FitnessCoachContext;
 impl FitnessCoachContext {
     /// True when there is something worth coaching on (any intake, activity, or plan).
     pub fn has_health_data(&self) -> bool {
-        self.calories > 0.0
+        self.conditions
+            .iter()
+            .any(|c| !c.scores.is_empty() || !c.food_hits.is_empty())
+            || self.calories > 0.0
             || self.protein_g > 0.0
             || self.carbs_g > 0.0
             || self.fats_g > 0.0
@@ -84,6 +90,7 @@ impl FitnessCoachContext {
         goals: Option<&NutritionGoals>,
     ) -> Self {
         Self {
+            conditions: Vec::new(),
             member_name: member_name.to_string(),
             window_label: format!("today ({})", summary.date),
             calories: summary.total_calories_ingested as f64,
@@ -169,6 +176,7 @@ impl FitnessCoachContext {
         Self {
             member_name: member_name.to_string(),
             window_label: format!("last {} days ({} logged)", days, logged_days),
+            conditions: Vec::new(),
             calories: avg_cal,
             protein_g: avg_protein,
             carbs_g: avg_carbs,
@@ -333,6 +341,28 @@ impl FitnessCoachContext {
             ));
         }
 
+        for condition in &self.conditions {
+            lines.push(format!("Member-reported condition: {}", condition.label));
+            lines.push(format!(
+                "Own watchlist: {}",
+                if condition.watchlist.is_empty() {
+                    "none".into()
+                } else {
+                    condition.watchlist.join(", ")
+                }
+            ));
+            lines.push(format!("Reported scores in 7 calendar days ending {} (0 calm, 5 worst flare; skipped days unknown): {}", condition.as_of,
+                if condition.scores.is_empty() { "none reported".into() } else { condition.scores.iter().map(|(date, score)| format!("{date}: {score}/5")).collect::<Vec<_>>().join(", ") }));
+            lines.push(format!(
+                "Watchlist food-tag matches on {} (not evidence of triggers): {}",
+                condition.as_of,
+                if condition.food_hits.is_empty() {
+                    "none".into()
+                } else {
+                    condition.food_hits.join(", ")
+                }
+            ));
+        }
         lines.join("\n")
     }
 }
@@ -477,6 +507,25 @@ mod tests {
         s.perceived_energy = None;
         let ctx = FitnessCoachContext::from_day_summary("Praj", &s, None);
         assert!(!ctx.has_health_data());
+    }
+
+    #[test]
+    fn condition_prompt_uses_reported_data_without_inventing_missing_scores() {
+        let mut ctx = FitnessCoachContext::from_day_summary("Alex", &sample_summary(), None);
+        ctx.conditions.push(ConditionCoachContext {
+            label: "Skin symptoms".into(),
+            watchlist: vec!["dairy".into()],
+            scores: vec![("2026-09-29".into(), 0)],
+            food_hits: vec!["dairy".into()],
+            as_of: "2026-09-29".into(),
+        });
+        let prompt = ctx.to_user_prompt();
+        assert!(prompt.contains("2026-09-29: 0/5"));
+        assert!(prompt.contains("Own watchlist: dairy"));
+        assert!(prompt.contains("skipped days unknown"));
+        assert!(prompt.contains("not evidence of triggers"));
+        assert!(COACH_SYSTEM_PROMPT.contains("Never propose new trigger foods"));
+        assert!(COACH_SYSTEM_PROMPT.contains("recommend treatment"));
     }
 
     #[test]

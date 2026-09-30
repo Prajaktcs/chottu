@@ -5,7 +5,7 @@ psoriasis) per family member, tag food logs against a fixed vocabulary, collect
 a daily symptom score during evening reflection, and surface lag-aware trends —
 without Chotu ever inventing medical advice.
 
-**Status:** M1–M3 + M5 shipped (schema, config, food tags, private reflection check-ins, watchlist commands) · remaining M4 + M6 · **Owner agents:** Coordinator (Signal, reflection),
+**Status:** M1–M5 shipped (schema, food tags, private check-ins, watchlists, meal flags and coach context) · remaining M6 · **Owner agents:** Coordinator (Signal, reflection),
 Health Coach (tips, trends)
 
 ---
@@ -188,6 +188,9 @@ After a successful log, if the row's tags intersect the member's
 
 - **Deduped per member per day per tag** — the second beer of the day does not
   re-flag `alcohol`.
+- Successful confirmation deliveries are recorded in `condition_food_flags`.
+  Failed sends do not consume a flag; undo/clear do not reset delivered flags.
+  The day is the meal's logged civil date, including backdated meals.
 - Linked-DM only. Household chats logging for a member do not broadcast that
   member's condition flags.
 - Never blocks or edits the log.
@@ -223,6 +226,13 @@ No score in the reply → no row (skip is fine, never nag twice).
 The coach system prompt already forbids invented diagnoses; add: *"You may
 reference the member's own watchlist and their reported scores. Never propose
 new trigger foods."*
+
+Condition context is supplied only for the matching linked-DM recipient. Household
+tips never receive it. Scores cover seven calendar days ending on the report's
+as-of date; missing days remain absent. Food hits use that civil day's actual
+UTC bounds in the configured timezone, including daylight-saving transitions.
+The prompt also forbids causal claims and treatment recommendations. This stage
+does not compute lagged associations (M6).
 
 ### 5. `/watch` and `/tags` commands (Signal)
 

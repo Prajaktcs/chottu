@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 
 mod coach_enrich;
 mod coaching;
+pub mod conditions;
 mod fitness_plan;
 mod sync;
 mod trends;

@@ -15,7 +15,7 @@ pub async fn build_nutrition_trend_reports(
     only_member_id: Option<&str>,
 ) -> Result<Vec<String>> {
     let days = days.clamp(2, 90);
-    let start_date = (chrono::Local::now() - chrono::Duration::days(days - 1))
+    let start_date = (config.now_in_tz() - chrono::Duration::days(days - 1))
         .format("%Y-%m-%d")
         .to_string();
 
@@ -160,13 +160,14 @@ pub async fn build_nutrition_trend_reports(
                 protein_trend,
                 steps_trend,
             );
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let today = config.now_in_tz().format("%Y-%m-%d").to_string();
             let ctx = crate::coach_enrich::enrich_coach_context(
                 pool,
                 config,
                 &member.id,
                 ctx,
-                crate::coach_enrich::CoachEnrichOpts::for_trends(&start_date, &today),
+                crate::coach_enrich::CoachEnrichOpts::for_trends(&start_date, &today)
+                    .with_private_member(only_member_id),
             )
             .await;
             append_coach_tip(llm, &ctx, &mut msg).await;

@@ -30,7 +30,21 @@ Condition ids come from the member's `health_conditions` in private `config.yaml
 data. Repeated adds/removes are safe. Watchlists are stored locally in SQLite and
 survive restarts; editing them requires no model call or restart.
 
-Meal flags, condition-aware coaching, and lag-aware trends are still upcoming.
+After a successful food log in your linked DM, matching tags add a heads-up:
+
+```text
+⚠️ On your Skin symptoms watchlist: dairy
+```
+
+Each tag is flagged once per member per logged day, even across restarts or food
+undo/clear. Household food confirmations never show condition flags. The meal is
+always saved; flags do not change its nutrients or block logging.
+
+Private `/status` and `/trends` coach tips can reference your own watchlists,
+reported scores from the last seven calendar days, and that day's food-tag matches.
+Skipped scores remain unknown. Household coaching receives no condition details.
+The coach is instructed not to invent triggers, claim food caused symptoms, or
+recommend treatment. Lag-aware associations are still upcoming.
 
 ---
 

@@ -181,6 +181,15 @@ fn oauth_member_target(scope: &CallerScope, requested: &str) -> Result<String, &
     }
 }
 
+fn private_health_member_id<'a>(config: &'a AppConfig, chat_id: &ChatId) -> Option<&'a str> {
+    match chat_id {
+        SignalRecipient::Direct { aci } => {
+            member_for_signal_aci(config, aci).map(|m| m.id.as_str())
+        }
+        SignalRecipient::Group { .. } => None,
+    }
+}
+
 fn resolve_task_target(
     scope: &CallerScope,
     requested: Option<String>,
@@ -1694,7 +1703,7 @@ async fn persist_food_estimation(
         String::new()
     };
 
-    let msg_text = format!(
+    let mut msg_text = format!(
         "✅ Logged for *{}*{}: _{}_\n\
          • {} kcal · {:.1}g P / {:.1}g C / {:.1}g F ({}){}{}{}",
         family_member_id,
@@ -1710,7 +1719,41 @@ async fn persist_food_estimation(
         google_sync_note
     );
 
+    let recipient = private_health_member_id(config, chat_id);
+    let flags = match health_coach::conditions::pending_food_flags(
+        pool,
+        config,
+        recipient,
+        family_member_id,
+        &date_str,
+        &log_id,
+    )
+    .await
+    {
+        Ok(flags) => flags,
+        Err(error) => {
+            eprintln!("Food watchlist flags unavailable: {error:?}");
+            Vec::new()
+        }
+    };
+    for flag in &flags {
+        msg_text.push_str(&flag.confirmation_line());
+    }
+
     send_signal(&bot, chat_id, msg_text).await?;
+
+    if !flags.is_empty() {
+        if let Err(error) = health_coach::conditions::mark_food_flags_sent(
+            pool,
+            family_member_id,
+            &date_str,
+            &flags,
+        )
+        .await
+        {
+            eprintln!("Could not record food flag delivery: {error:?}");
+        }
+    }
 
     Ok(())
 }
@@ -3556,7 +3599,7 @@ async fn handle_trends(
     )
     .await?;
 
-    let only_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
+    let only_member_id = private_health_member_id(config, chat_id);
     match health_coach::build_nutrition_trend_reports(pool, config, days, Some(llm), only_member_id)
         .await
     {
@@ -3908,7 +3951,7 @@ async fn handle_status(
     config: &AppConfig,
     llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Query daily financials and health summaries
     let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
@@ -3949,8 +3992,7 @@ async fn handle_status(
 
     // 2. Build per-member health reports, then coach tips in parallel.
     // Linked personal DMs only see their own health/fitness (goals stay private).
-    let status_member_id =
-        member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.clone());
+    let status_member_id = private_health_member_id(config, chat_id).map(str::to_string);
     let mut pending: Vec<(String, Option<health_coach::NutritionCoachContext>)> = Vec::new();
 
     for h in &healths {
@@ -4220,25 +4262,27 @@ async fn handle_status(
             .map(|g| !g.is_empty())
             .unwrap_or(false);
 
+        let ctx = health_coach::NutritionCoachContext::from_day_summary(name, h, goals);
+        let ctx = health_coach::enrich_coach_context(
+            pool,
+            config,
+            &h.family_member_id,
+            ctx,
+            health_coach::CoachEnrichOpts::for_day(&date_str)
+                .with_private_member(status_member_id.as_deref()),
+        )
+        .await;
         if !has_activity
             && !has_sleep
             && !has_energy
             && !has_nutrition
             && exercises.is_empty()
             && !has_fitness
+            && !ctx.has_health_data()
         {
             member_report.push_str("• _No health telemetry logged today._\n");
             pending.push((member_report, None));
         } else {
-            let ctx = health_coach::NutritionCoachContext::from_day_summary(name, h, goals);
-            let ctx = health_coach::enrich_coach_context(
-                pool,
-                config,
-                &h.family_member_id,
-                ctx,
-                health_coach::CoachEnrichOpts::for_day(&date_str),
-            )
-            .await;
             pending.push((member_report, Some(ctx)));
         }
     }
@@ -6663,6 +6707,35 @@ mod tests {
         assert!(parse_command("food eggs").is_none());
         assert!(
             matches!(parse_command("/tasks complete abcdef12"), Some(Command::Tasks(s)) if s == "complete abcdef12")
+        );
+    }
+
+    #[test]
+    fn condition_recipient_is_explicitly_direct_even_with_blank_configured_aci() {
+        let mut config = AppConfig::default();
+        config.family.members[0].signal_aci = Some("".into());
+        let group = SignalRecipient::Group {
+            group_id: "household".into(),
+        };
+        assert_eq!(private_health_member_id(&config, &group), None);
+        config.family.members[0].signal_aci = Some("aci-alex".into());
+        assert_eq!(
+            private_health_member_id(
+                &config,
+                &SignalRecipient::Direct {
+                    aci: "aci-alex".into()
+                }
+            ),
+            Some("alex")
+        );
+        assert_eq!(
+            private_health_member_id(
+                &config,
+                &SignalRecipient::Direct {
+                    aci: "unknown".into()
+                }
+            ),
+            None
         );
     }
 

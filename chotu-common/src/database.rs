@@ -1124,6 +1124,7 @@ mod tests {
             "food_log_tags",
             "condition_watchlist",
             "condition_checkin",
+            "condition_food_flags",
         ] {
             let exists: (i32,) =
                 sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?")
@@ -1141,6 +1142,29 @@ mod tests {
         assert_eq!(tags.len(), 14);
         assert!(tags.iter().any(|(t,)| t == "alcohol"));
         assert!(tags.iter().any(|(t,)| t == "nightshades"));
+    }
+
+    #[tokio::test]
+    async fn condition_flag_upgrade_preserves_health_rows_and_restarts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("condition-upgrade.db");
+        let pool = init_db(path.to_str().unwrap()).await.unwrap();
+        // Simulate the previous release in this disposable database.
+        sqlx::raw_sql("DROP TABLE condition_food_flags; DELETE FROM _sqlx_migrations WHERE version = 20260929000000; INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories) VALUES ('meal', '2026-09-29T20:00:00Z', 'alex', 'milk', 100); INSERT INTO food_log_tags (food_log_id, tag) VALUES ('meal', 'dairy'); INSERT INTO condition_watchlist (family_member_id, condition_id, tag) VALUES ('alex', 'skin', 'dairy'); INSERT INTO condition_checkin (family_member_id, date, condition_id, score) VALUES ('alex', '2026-09-29', 'skin', 0);")
+            .execute(&pool).await.unwrap();
+        pool.close().await;
+        let pool = init_db(path.to_str().unwrap()).await.unwrap();
+        let preserved: (i64, i64, i64, i64) = sqlx::query_as("SELECT (SELECT estimated_calories FROM food_log WHERE id = 'meal'), (SELECT COUNT(*) FROM food_log_tags WHERE food_log_id = 'meal'), (SELECT COUNT(*) FROM condition_watchlist WHERE family_member_id = 'alex'), (SELECT score FROM condition_checkin WHERE family_member_id = 'alex')")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(preserved, (100, 1, 1, 0));
+        sqlx::raw_sql("INSERT INTO condition_food_flags (family_member_id, date, tag) VALUES ('alex', '2026-09-29', 'dairy')").execute(&pool).await.unwrap();
+        pool.close().await;
+        let pool = init_db(path.to_str().unwrap()).await.unwrap();
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM condition_food_flags")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count.0, 1);
     }
 
     #[tokio::test]
