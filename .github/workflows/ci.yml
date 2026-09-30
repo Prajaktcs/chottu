@@ -75,6 +75,9 @@ jobs:
             exit 1
           fi
 
+      - name: Test Signal daemon startup
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
