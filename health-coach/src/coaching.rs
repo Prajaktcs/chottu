@@ -90,11 +90,11 @@ impl FitnessCoachContext {
         summary: &HealthFamilySummary,
         goals: Option<&NutritionGoals>,
     ) -> Self {
-        Self {
+        let mut ctx = Self {
             conditions: Vec::new(),
             member_name: member_name.to_string(),
             window_label: format!("today ({})", summary.date),
-            metrics_available: true,
+            metrics_available: false,
             calories: summary.total_calories_ingested as f64,
             protein_g: summary.protein_grams,
             carbs_g: summary.carbs_grams,
@@ -119,7 +119,12 @@ impl FitnessCoachContext {
             calorie_trend: None,
             protein_trend: None,
             steps_trend: None,
-        }
+        };
+        // The coordinator also supplies synthetic zero summaries for missing rows.
+        // At construction there are no conditions, plans, or exercises, so this
+        // checks only usable telemetry rather than mistaking symptom data for it.
+        ctx.metrics_available = ctx.has_health_data();
+        ctx
     }
 
     /// Attach fitness outcome, plan session, and exercises.
@@ -241,7 +246,7 @@ impl FitnessCoachContext {
                 lines.push(format!("Perceived energy: {}/10", energy));
             }
         } else {
-            lines.push("Nutrition/activity metrics: unavailable (no summaries; do not infer zero intake or activity)".into());
+            lines.push("Nutrition/activity metrics: unavailable (no usable telemetry; do not infer zero intake or activity)".into());
         }
 
         if let Some(goals) = self
@@ -298,7 +303,11 @@ impl FitnessCoachContext {
             if let Some(focus) = fg.focus {
                 lines.push(format!("  - Focus: {}", focus.as_str()));
             }
-            if let Some(wt) = fg.weekly_targets.as_ref() {
+            if let Some(wt) = fg
+                .weekly_targets
+                .as_ref()
+                .filter(|_| self.metrics_available)
+            {
                 if let Some(target) = wt.active_calories {
                     lines.push(goal_line(
                         "Active calories",
@@ -518,8 +527,34 @@ mod tests {
         s.active_calories_burned = 0;
         s.sleep_hours = None;
         s.perceived_energy = None;
-        let ctx = FitnessCoachContext::from_day_summary("Praj", &s, None);
+        let mut ctx = FitnessCoachContext::from_day_summary("Praj", &s, None);
         assert!(!ctx.has_health_data());
+        assert!(!ctx.metrics_available);
+        ctx.conditions.push(ConditionCoachContext {
+            label: "Skin symptoms".into(),
+            watchlist: vec![],
+            scores: vec![(s.date.clone(), 0)],
+            food_hits: vec![],
+            as_of: s.date,
+        });
+        assert!(ctx.has_health_data());
+        ctx.goals = Some(NutritionGoals {
+            calories: Some(2000),
+            ..NutritionGoals::default()
+        });
+        ctx.fitness_goals = Some(FitnessGoals {
+            weekly_targets: Some(chotu_common::FitnessWeeklyTargets {
+                active_calories: Some(500),
+                ..chotu_common::FitnessWeeklyTargets::default()
+            }),
+            ..FitnessGoals::default()
+        });
+        let prompt = ctx.to_user_prompt();
+        assert!(prompt.contains("Skin symptoms"));
+        assert!(prompt.contains("metrics: unavailable"));
+        assert!(!prompt.contains("Calories: 0"));
+        assert!(!prompt.contains("Steps: 0"));
+        assert!(!prompt.contains("Active calories: 0"));
     }
 
     #[test]
