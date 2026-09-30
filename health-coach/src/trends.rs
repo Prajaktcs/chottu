@@ -181,21 +181,11 @@ pub async fn build_nutrition_trend_reports(
         msg.push_str("```\n");
 
         if let Some(llm) = llm {
-            let ctx = NutritionCoachContext::from_trend_averages(
+            let ctx = NutritionCoachContext::from_trend_summaries(
                 &member.name,
                 days,
-                member_rows.len(),
-                avg_cal,
-                avg_protein,
-                avg_carbs,
-                avg_fats,
-                avg_fiber,
-                avg_steps,
-                avg_sleep,
+                &member_rows,
                 goals,
-                cal_trend,
-                protein_trend,
-                steps_trend,
             );
             let ctx = crate::coach_enrich::enrich_coach_context(
                 pool,
@@ -225,7 +215,7 @@ fn trend_dates(today: chrono::NaiveDate, days: i64) -> (String, String) {
     )
 }
 
-fn trend_arrow(series: &[f64]) -> &'static str {
+pub(crate) fn trend_arrow(series: &[f64]) -> &'static str {
     if series.len() < 2 {
         return "→";
     }

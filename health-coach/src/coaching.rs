@@ -18,18 +18,17 @@ Return only the tip text.";
 /// Structured snapshot fed to the coach LLM (nutrition + fitness outcome).
 #[derive(Debug, Clone)]
 pub struct FitnessCoachContext {
-    pub metrics_available: bool,
     pub conditions: Vec<ConditionCoachContext>,
     pub member_name: String,
     /// e.g. "today (2026-08-04)" or "last 7 days (5 logged)"
     pub window_label: String,
-    pub calories: f64,
-    pub protein_g: f64,
-    pub carbs_g: f64,
-    pub fats_g: f64,
-    pub fiber_g: f64,
-    pub steps: f64,
-    pub active_calories: f64,
+    pub calories: Option<f64>,
+    pub protein_g: Option<f64>,
+    pub carbs_g: Option<f64>,
+    pub fats_g: Option<f64>,
+    pub fiber_g: Option<f64>,
+    pub steps: Option<f64>,
+    pub active_calories: Option<f64>,
     pub sleep_hours: Option<f64>,
     pub perceived_energy: Option<i32>,
     pub goals: Option<NutritionGoals>,
@@ -60,19 +59,25 @@ pub struct FitnessCoachContext {
 /// Backward-compatible name used by `/status` and `/trends`.
 pub type NutritionCoachContext = FitnessCoachContext;
 
+/// Legacy summaries store missing numeric telemetry as zero without provenance.
+/// Treat ambiguous zeroes as unknown independently, including trend averages.
+fn available_metric(value: f64) -> Option<f64> {
+    (value.is_finite() && value > 0.0).then_some(value)
+}
+
 impl FitnessCoachContext {
     /// True when there is something worth coaching on (any intake, activity, or plan).
     pub fn has_health_data(&self) -> bool {
         self.conditions
             .iter()
             .any(|c| !c.scores.is_empty() || !c.food_hits.is_empty())
-            || self.calories > 0.0
-            || self.protein_g > 0.0
-            || self.carbs_g > 0.0
-            || self.fats_g > 0.0
-            || self.fiber_g > 0.0
-            || self.steps > 0.0
-            || self.active_calories > 0.0
+            || self.calories.is_some()
+            || self.protein_g.is_some()
+            || self.carbs_g.is_some()
+            || self.fats_g.is_some()
+            || self.fiber_g.is_some()
+            || self.steps.is_some()
+            || self.active_calories.is_some()
             || self.sleep_hours.is_some()
             || self.perceived_energy.is_some()
             || !self.exercises.is_empty()
@@ -90,18 +95,17 @@ impl FitnessCoachContext {
         summary: &HealthFamilySummary,
         goals: Option<&NutritionGoals>,
     ) -> Self {
-        let mut ctx = Self {
+        Self {
             conditions: Vec::new(),
             member_name: member_name.to_string(),
             window_label: format!("today ({})", summary.date),
-            metrics_available: false,
-            calories: summary.total_calories_ingested as f64,
-            protein_g: summary.protein_grams,
-            carbs_g: summary.carbs_grams,
-            fats_g: summary.fats_grams,
-            fiber_g: summary.fiber_g,
-            steps: summary.step_count as f64,
-            active_calories: summary.active_calories_burned as f64,
+            calories: available_metric(summary.total_calories_ingested as f64),
+            protein_g: available_metric(summary.protein_grams),
+            carbs_g: available_metric(summary.carbs_grams),
+            fats_g: available_metric(summary.fats_grams),
+            fiber_g: available_metric(summary.fiber_g),
+            steps: available_metric(summary.step_count as f64),
+            active_calories: available_metric(summary.active_calories_burned as f64),
             sleep_hours: summary.sleep_hours,
             perceived_energy: summary.perceived_energy,
             goals: goals.cloned(),
@@ -119,12 +123,7 @@ impl FitnessCoachContext {
             calorie_trend: None,
             protein_trend: None,
             steps_trend: None,
-        };
-        // The coordinator also supplies synthetic zero summaries for missing rows.
-        // At construction there are no conditions, plans, or exercises, so this
-        // checks only usable telemetry rather than mistaking symptom data for it.
-        ctx.metrics_available = ctx.has_health_data();
-        ctx
+        }
     }
 
     /// Attach fitness outcome, plan session, and exercises.
@@ -183,15 +182,14 @@ impl FitnessCoachContext {
         Self {
             member_name: member_name.to_string(),
             window_label: format!("last {} days ({} logged)", days, logged_days),
-            metrics_available: logged_days > 0,
             conditions: Vec::new(),
-            calories: avg_cal,
-            protein_g: avg_protein,
-            carbs_g: avg_carbs,
-            fats_g: avg_fats,
-            fiber_g: avg_fiber,
-            steps: avg_steps,
-            active_calories: 0.0,
+            calories: available_metric(avg_cal),
+            protein_g: available_metric(avg_protein),
+            carbs_g: available_metric(avg_carbs),
+            fats_g: available_metric(avg_fats),
+            fiber_g: available_metric(avg_fiber),
+            steps: available_metric(avg_steps),
+            active_calories: None,
             sleep_hours: avg_sleep,
             perceived_energy: None,
             goals: goals.cloned(),
@@ -212,71 +210,123 @@ impl FitnessCoachContext {
         }
     }
 
+    /// Compute each coaching average from that metric's usable observations.
+    /// A nutrition-only row must not dilute activity with synthetic zeroes.
+    pub fn from_trend_summaries(
+        member_name: &str,
+        days: i64,
+        summaries: &[&HealthFamilySummary],
+        goals: Option<&NutritionGoals>,
+    ) -> Self {
+        let values = |metric: fn(&HealthFamilySummary) -> f64| -> Vec<f64> {
+            summaries
+                .iter()
+                .filter_map(|s| available_metric(metric(s)))
+                .collect()
+        };
+        let mean = |values: &[f64]| -> f64 {
+            if values.is_empty() {
+                0.0
+            } else {
+                values.iter().sum::<f64>() / values.len() as f64
+            }
+        };
+        let calories = values(|s| s.total_calories_ingested as f64);
+        let protein = values(|s| s.protein_grams);
+        let steps = values(|s| s.step_count as f64);
+        let sleep: Vec<f64> = summaries.iter().filter_map(|s| s.sleep_hours).collect();
+        let mut ctx = Self::from_trend_averages(
+            member_name,
+            days,
+            summaries.len(),
+            mean(&calories),
+            mean(&protein),
+            mean(&values(|s| s.carbs_grams)),
+            mean(&values(|s| s.fats_grams)),
+            mean(&values(|s| s.fiber_g)),
+            mean(&steps),
+            (!sleep.is_empty()).then(|| mean(&sleep)),
+            goals,
+            crate::trends::trend_arrow(&calories),
+            crate::trends::trend_arrow(&protein),
+            crate::trends::trend_arrow(&steps),
+        );
+        ctx.window_label.push_str(
+            "; coaching averages use each metric's observed days; ambiguous zeroes omitted",
+        );
+        ctx
+    }
+
     /// Plain-text user prompt for the LLM.
     pub fn to_user_prompt(&self) -> String {
         let mut lines = Vec::new();
         lines.push(format!("Member: {}", self.member_name));
         lines.push(format!("Window: {}", self.window_label));
-        if self.metrics_available {
-            lines.push(format!(
-                "Calories: {:.0} kcal{}",
-                self.calories,
-                trend_suffix(self.calorie_trend)
-            ));
-            lines.push(format!(
-                "Protein: {:.1}g{}",
-                self.protein_g,
-                trend_suffix(self.protein_trend)
-            ));
-            lines.push(format!("Carbs: {:.1}g", self.carbs_g));
-            lines.push(format!("Fat: {:.1}g", self.fats_g));
-            lines.push(format!("Fiber: {:.1}g", self.fiber_g));
-            lines.push(format!(
-                "Steps: {:.0}{}",
-                self.steps,
-                trend_suffix(self.steps_trend)
-            ));
-            if self.active_calories > 0.0 {
-                lines.push(format!("Active calories: {:.0}", self.active_calories));
+        lines.push("Omitted telemetry is unknown; do not infer zero intake or activity.".into());
+        for (label, value, unit, decimals, trend) in [
+            ("Calories", self.calories, " kcal", 0, self.calorie_trend),
+            ("Protein", self.protein_g, "g", 1, self.protein_trend),
+            ("Carbs", self.carbs_g, "g", 1, None),
+            ("Fat", self.fats_g, "g", 1, None),
+            ("Fiber", self.fiber_g, "g", 1, None),
+            ("Steps", self.steps, "", 0, self.steps_trend),
+            ("Active calories", self.active_calories, "", 0, None),
+        ] {
+            if let Some(value) = value {
+                lines.push(format!(
+                    "{label}: {value:.decimals$}{unit}{}",
+                    trend_suffix(trend)
+                ));
             }
-            if let Some(sleep) = self.sleep_hours {
-                lines.push(format!("Sleep: {:.1} hours", sleep));
-            }
-            if let Some(energy) = self.perceived_energy {
-                lines.push(format!("Perceived energy: {}/10", energy));
-            }
-        } else {
+        }
+        if let Some(sleep) = self.sleep_hours {
+            lines.push(format!("Sleep: {:.1} hours", sleep));
+        }
+        if let Some(energy) = self.perceived_energy {
+            lines.push(format!("Perceived energy: {}/10", energy));
+        }
+        if [
+            self.calories,
+            self.protein_g,
+            self.carbs_g,
+            self.fats_g,
+            self.fiber_g,
+            self.steps,
+            self.active_calories,
+            self.sleep_hours,
+        ]
+        .iter()
+        .all(Option::is_none)
+            && self.perceived_energy.is_none()
+        {
             lines.push("Nutrition/activity metrics: unavailable (no usable telemetry; do not infer zero intake or activity)".into());
         }
 
-        if let Some(goals) = self
-            .goals
-            .as_ref()
-            .filter(|g| !g.is_empty() && self.metrics_available)
-        {
-            lines.push("Nutrition goals vs actual:".to_string());
-            if let Some(g) = goals.calories {
-                lines.push(goal_line("Calories", self.calories, g as f64, "kcal"));
-            }
-            if let Some(g) = goals.protein_g {
-                lines.push(goal_line("Protein", self.protein_g, g, "g"));
-            }
-            if let Some(g) = goals.carbs_g {
-                lines.push(goal_line("Carbs", self.carbs_g, g, "g"));
-            }
-            if let Some(g) = goals.fats_g {
-                lines.push(goal_line("Fat", self.fats_g, g, "g"));
-            }
-            if let Some(g) = goals.fiber_g {
-                lines.push(goal_line("Fiber", self.fiber_g, g, "g"));
-            }
-            if let Some(g) = goals.steps {
-                lines.push(goal_line("Steps", self.steps, g as f64, ""));
+        if let Some(goals) = self.goals.as_ref().filter(|g| !g.is_empty()) {
+            lines.push("Goals vs actual (omitted actuals unknown):".to_string());
+            for (label, actual, target, unit) in [
+                (
+                    "Calories",
+                    self.calories,
+                    goals.calories.map(f64::from),
+                    "kcal",
+                ),
+                ("Protein", self.protein_g, goals.protein_g, "g"),
+                ("Carbs", self.carbs_g, goals.carbs_g, "g"),
+                ("Fat", self.fats_g, goals.fats_g, "g"),
+                ("Fiber", self.fiber_g, goals.fiber_g, "g"),
+                ("Steps", self.steps, goals.steps.map(f64::from), ""),
+            ] {
+                if let Some(target) = target {
+                    if let Some(actual) = actual {
+                        lines.push(goal_line(label, actual, target, unit));
+                    } else {
+                        lines.push(format!("{label} goal: {target}{unit}; actual unknown"));
+                    }
+                }
             }
         } else {
-            if self.metrics_available {
-                lines.push("Nutrition goals: none configured".to_string());
-            }
+            lines.push("Nutrition goals: none configured".to_string());
         }
 
         if let Some(fg) = self.fitness_goals.as_ref().filter(|g| !g.is_empty()) {
@@ -303,17 +353,12 @@ impl FitnessCoachContext {
             if let Some(focus) = fg.focus {
                 lines.push(format!("  - Focus: {}", focus.as_str()));
             }
-            if let Some(wt) = fg
-                .weekly_targets
-                .as_ref()
-                .filter(|_| self.metrics_available)
-            {
-                if let Some(target) = wt.active_calories {
-                    lines.push(goal_line(
-                        "Active calories",
-                        self.active_calories,
-                        target as f64,
-                        "kcal",
+            if let Some(target) = fg.weekly_targets.as_ref().and_then(|wt| wt.active_calories) {
+                if let Some(actual) = self.active_calories {
+                    lines.push(goal_line("Active calories", actual, target as f64, "kcal"));
+                } else {
+                    lines.push(format!(
+                        "Active calories goal: {target}kcal; actual unknown"
                     ));
                 }
             }
@@ -529,7 +574,8 @@ mod tests {
         s.perceived_energy = None;
         let mut ctx = FitnessCoachContext::from_day_summary("Praj", &s, None);
         assert!(!ctx.has_health_data());
-        assert!(!ctx.metrics_available);
+        assert_eq!(ctx.calories, None);
+        assert_eq!(ctx.steps, None);
         ctx.conditions.push(ConditionCoachContext {
             label: "Skin symptoms".into(),
             watchlist: vec![],
@@ -591,6 +637,74 @@ mod tests {
     fn has_health_data_true_with_calories() {
         let ctx = FitnessCoachContext::from_day_summary("Praj", &sample_summary(), None);
         assert!(ctx.has_health_data());
+    }
+
+    #[test]
+    fn partial_telemetry_never_borrows_availability_from_another_metric() {
+        let goals = NutritionGoals {
+            calories: Some(2000),
+            steps: Some(10000),
+            ..Default::default()
+        };
+        let mut summary = sample_summary();
+        summary.step_count = 0;
+        summary.active_calories_burned = 0;
+        let ctx = FitnessCoachContext::from_day_summary("Alex", &summary, Some(&goals));
+        assert_eq!(ctx.steps, None);
+        assert_eq!(ctx.active_calories, None);
+        let prompt = ctx.to_user_prompt();
+        assert!(prompt.contains("Calories: 1800 kcal"));
+        assert!(prompt.contains("Steps goal: 10000; actual unknown"));
+        assert!(!prompt.contains("Steps: 0"));
+
+        summary.step_count = 5000;
+        summary.total_calories_ingested = 0;
+        summary.protein_grams = 0.0;
+        summary.carbs_grams = 0.0;
+        summary.fats_grams = 0.0;
+        summary.fiber_g = 0.0;
+        let ctx = FitnessCoachContext::from_day_summary("Alex", &summary, Some(&goals));
+        let prompt = ctx.to_user_prompt();
+        assert!(prompt.contains("Steps: 5000"));
+        assert!(prompt.contains("Calories goal: 2000kcal; actual unknown"));
+        assert!(!prompt.contains("Calories: 0"));
+        assert!(!prompt.contains("Protein: 0"));
+
+        // Logged nutrition days cannot establish activity availability in trends.
+        let ctx = FitnessCoachContext::from_trend_averages(
+            "Alex",
+            7,
+            3,
+            1800.0,
+            100.0,
+            200.0,
+            50.0,
+            10.0,
+            0.0,
+            Some(7.0),
+            Some(&goals),
+            "→",
+            "→",
+            "→",
+        );
+        let prompt = ctx.to_user_prompt();
+        assert!(prompt.contains("Calories: 1800 kcal"));
+        assert!(!prompt.contains("Steps: 0"));
+        assert!(!prompt.contains("Active calories: 0"));
+        assert!(prompt.contains("Sleep: 7.0 hours"));
+
+        // A second nutrition-only row must not halve the reported steps average.
+        let mut other_day = summary.clone();
+        other_day.step_count = 0;
+        let ctx = FitnessCoachContext::from_trend_summaries(
+            "Alex",
+            7,
+            &[&summary, &other_day],
+            Some(&goals),
+        );
+        assert_eq!(ctx.steps, Some(5000.0));
+        assert_eq!(ctx.calories, None);
+        assert!(ctx.to_user_prompt().contains("observed days"));
     }
 
     #[test]
