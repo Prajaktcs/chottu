@@ -5,7 +5,7 @@ psoriasis) per family member, tag food logs against a fixed vocabulary, collect
 a daily symptom score during evening reflection, and surface lag-aware trends —
 without Chotu ever inventing medical advice.
 
-**Status:** M1–M3 shipped (schema, config, tag-at-log-time, private reflection check-ins) · remaining M4–M6 · **Owner agents:** Coordinator (Signal, reflection),
+**Status:** M1–M3 + M5 shipped (schema, config, food tags, private reflection check-ins, watchlist commands) · remaining M4 + M6 · **Owner agents:** Coordinator (Signal, reflection),
 Health Coach (tips, trends)
 
 ---
@@ -224,7 +224,7 @@ The coach system prompt already forbids invented diagnoses; add: *"You may
 reference the member's own watchlist and their reported scores. Never propose
 new trigger foods."*
 
-### 5. `/watch` and `/tags` commands (Telegram)
+### 5. `/watch` and `/tags` commands (Signal)
 
 | Command | Behavior |
 | :--- | :--- |

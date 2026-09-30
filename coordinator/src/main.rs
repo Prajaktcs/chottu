@@ -5,6 +5,7 @@ mod brief;
 mod reflection;
 mod scheduled_delivery;
 mod signal;
+mod watchlist;
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -41,6 +41,8 @@ pub enum Command {
     Task(String),
     Memory(String),
     Reflect,
+    Tags(String),
+    Watch(String),
     Chat,
     Whoami,
     Research(String),
@@ -72,6 +74,8 @@ These commands are supported:
 /task <title> [by|due <when>] — add a task
 /memory <question> | /memory reindex
 /reflect — evening reflection.
+/tags — list food tags.
+/watch [add|remove <condition_id> <tag>] — your private condition watchlists.
 /chat — show this Signal conversation.
 /whoami — show the configured family member for this direct conversation.
 /research [companies] — stock research.
@@ -106,6 +110,8 @@ fn parse_command(input: &str) -> Option<Command> {
         "task" => Some(Command::Task(args)),
         "memory" => Some(Command::Memory(args)),
         "reflect" => Some(Command::Reflect),
+        "tags" => Some(Command::Tags(args)),
+        "watch" => Some(Command::Watch(args)),
         "chat" => Some(Command::Chat),
         "whoami" => Some(Command::Whoami),
         "research" => Some(Command::Research(args)),
@@ -925,6 +931,22 @@ async fn handle_command(
                 &bot, &chat_id, &pool, &llm, states, config, &scope, date_str, 1,
             )
             .await?;
+        }
+        Command::Tags(ref args) | Command::Watch(ref args) => {
+            let result = if matches!(&cmd, Command::Tags(_)) {
+                crate::watchlist::tags_reply(&pool, args).await
+            } else {
+                crate::watchlist::watch_reply(&pool, config, scope.member_id(), args).await
+            };
+            let reply = match result {
+                Ok(reply) => reply,
+                Err(error) => {
+                    eprintln!("Condition watchlist command failed: {error:?}");
+                    "Could not load or update food tags or your watchlist. Please retry."
+                        .to_string()
+                }
+            };
+            send_signal(&bot, &chat_id, reply).await?;
         }
         Command::Chat => {
             send_signal(
@@ -6631,6 +6653,11 @@ mod tests {
     #[test]
     fn parse_command_reads_leading_slash_case_insensitively() {
         assert!(matches!(parse_command("/HELP"), Some(Command::Help)));
+        assert_eq!(parse_command("/TAGS"), Some(Command::Tags(String::new())));
+        assert_eq!(
+            parse_command("/watch add skin dairy"),
+            Some(Command::Watch("add skin dairy".into()))
+        );
         assert!(matches!(parse_command("  /Food eggs"), Some(Command::Food(s)) if s == "eggs"));
         assert!(parse_command("/food@bot eggs").is_none());
         assert!(parse_command("food eggs").is_none());

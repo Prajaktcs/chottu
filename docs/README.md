@@ -6,11 +6,11 @@ Living notes for running the household agent: credentials, services, and how Sig
 | :--- | :--- |
 | [Services & credentials](./services-and-credentials.md) | APIs, OAuth, env vars, what breaks if something is missing |
 | [Setup commands](./commands/setup.md) | Signal identity configuration, `/whoami`, `/chat`, `/login` |
-| [Health commands](./commands/health.md) | Food, sync, status, trends, plan |
+| [Health commands](./commands/health.md) | Food, sync, status, trends, plan, tags, watchlists |
 | [Day loop](./commands/day-loop.md) | Brief, calendar, tasks, reflection |
 | [Memory](./commands/memory.md) | `/memory` RAG |
 | [Finance](./commands/finance.md) | Monthly, budget, net worth, research |
-| [Condition tracking spec](./condition-tracking-spec.md) | M1–M2 shipped (schema, config, food tags); M3–M6 still open |
+| [Condition tracking spec](./condition-tracking-spec.md) | M1–M3 + M5 shipped (food tags, check-ins, watchlists); M4 + M6 still open |
 | [Relationship graph spec](./relationship-graph-spec.md) | Product intent only: local people graph, multi-channel ingest, brief/cal/memory leverage |
 | [Signal vs Telegram](./signal-vs-telegram.md) | What carried over after the chat transport switch — and what you miss |
 
