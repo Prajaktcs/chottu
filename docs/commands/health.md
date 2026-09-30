@@ -6,6 +6,34 @@ Linked personal DMs only see **that member’s** health/fitness. Household / unl
 
 ---
 
+## `/tags` · `/watch`
+
+`/tags` lists the closed food-tag vocabulary with examples. Food logs already
+store these tags; choose which ones to track with your conditions' watchlists.
+
+| Command | Behavior |
+| :--- | :--- |
+| `/watch` | Show your configured conditions and current watchlists |
+| `/watch add <condition_id> <tag>` | Add a tag to your condition's watchlist |
+| `/watch remove <condition_id> <tag>` | Remove a tag |
+
+```text
+/tags
+/watch
+/watch add skin dairy
+/watch remove skin dairy
+```
+
+`/watch` works only in a linked personal DM and always targets that member.
+Condition ids come from the member's `health_conditions` in private `config.yaml`;
+`/watch` shows valid ids. Unknown conditions or tags return usage without changing
+data. Repeated adds/removes are safe. Watchlists are stored locally in SQLite and
+survive restarts; editing them requires no model call or restart.
+
+Meal flags, condition-aware coaching, and lag-aware trends are still upcoming.
+
+---
+
 ## `/food [member_id] <description>`
 
 ```text
