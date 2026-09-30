@@ -214,9 +214,7 @@ fn normalize_merchant(value: &str) -> String {
 }
 
 fn match_key(row: &CsvTransaction, date: NaiveDate) -> String {
-    let merchant = if row.account_id == "wealthsimple-credit-card"
-        || !row.entry.institution.starts_with("Wealthsimple:")
-    {
+    let merchant = if row.is_card || !row.entry.institution.starts_with("Wealthsimple:") {
         normalize_merchant(&row.entry.merchant)
     } else if matches!(row.kind.as_str(), "buy" | "sell" | "dividend") {
         // Statements omit FX suffixes present in activities, but identify the same security.

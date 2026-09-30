@@ -21,6 +21,51 @@ fn source(dir: &Path, filename: &str, content: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+async fn explicit_card_accounts_keep_same_value_purchases_at_distinct_merchants() {
+    for activities_first in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let pool = database().await;
+        let mut statements = Vec::new();
+        let mut activities = Vec::new();
+        for merchant in ["Shop A", "Shop B"] {
+            statements.push(source(dir.path(), &format!("statement-{merchant}.csv"),
+                &format!("transaction_date,post_date,type,details,amount,currency,account_id\n2026-05-01,2026-05-01,Purchase,{},12,CAD,card-a\n", merchant.to_uppercase())));
+            activities.push(source(dir.path(), &format!("activities-{merchant}.csv"),
+                &format!("transaction_date,transaction_type,status,merchant,amount,currency,category,account_id\n2026-05-01,Purchase,Completed,{merchant},-12,CAD,Food,card-a\n")));
+        }
+        let order = if activities_first {
+            [&activities, &statements]
+        } else {
+            [&statements, &activities]
+        };
+        let mut inserted = 0;
+        let mut matched = 0;
+        for paths in order {
+            for path in paths {
+                let stats = import_csv_file(path, &pool, "CAD").await.unwrap();
+                inserted += stats.inserted;
+                matched += stats.matched;
+            }
+        }
+        assert_eq!((inserted, matched), (2, 2));
+        let rows: Vec<(String, f64)> = sqlx::query_as(
+            "SELECT lower(merchant), amount FROM financial_ledger ORDER BY lower(merchant)",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![("shop a".to_string(), -12.0), ("shop b".to_string(), -12.0)]
+        );
+        for path in &activities {
+            let rerun = import_csv_file(path, &pool, "CAD").await.unwrap();
+            assert_eq!((rerun.inserted, rerun.matched, rerun.updated), (0, 1, 0));
+        }
+    }
+}
+
+#[tokio::test]
 async fn structural_categories_override_export_labels_and_repair_prior_classification() {
     let dir = TempDir::new().unwrap();
     let pool = database().await;

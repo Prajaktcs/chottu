@@ -9,6 +9,7 @@ use std::path::Path;
 pub(crate) struct CsvTransaction {
     pub(crate) entry: FinancialLedgerEntry,
     pub(crate) account_id: String,
+    pub(crate) is_card: bool,
     pub(crate) kind: String,
     pub(crate) posting_date: Option<NaiveDate>,
     pub(crate) has_time: bool,
@@ -340,6 +341,7 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
                     source_type: "CSV_IMPORT".to_string(),
                 },
                 account_id,
+                is_card,
                 kind,
                 posting_date,
                 has_time,
