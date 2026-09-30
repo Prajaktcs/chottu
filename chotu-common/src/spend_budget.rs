@@ -393,6 +393,86 @@ mod tests {
         assert_eq!(display_category("food"), "Food");
         assert_eq!(display_category("ENTERTAINMENT"), "Entertainment");
     }
+
+    #[tokio::test]
+    async fn no_configured_budgets_produce_no_progress_or_alerts() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE spend_budget_overrides (category TEXT, limit_amount REAL);
+             CREATE TABLE financial_ledger (timestamp TEXT, amount REAL, currency TEXT, category TEXT, source_type TEXT);
+             CREATE TABLE spend_budget_alerts (month TEXT, category TEXT, threshold INTEGER, sent_at TEXT)",
+        )
+            .execute(&pool)
+            .await
+            .unwrap();
+        let config = AppConfig::default();
+        let progress = compute_budget_progress(&pool, &config, "2026-08")
+            .await
+            .unwrap();
+        assert!(progress.is_empty());
+        let display = format_budget_progress_markdown("2026-08", "CAD", &progress);
+        assert!(display.contains("/budget set"));
+        assert!(pending_budget_alerts(&pool, &config, "2026-08")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn progress_status_changes_at_watch_and_limit_boundaries() {
+        for (pct, watch, over) in [
+            (79.99, false, false),
+            (80.0, true, false),
+            (99.99, true, false),
+            (100.0, false, true),
+            (100.01, false, true),
+        ] {
+            let row = BudgetProgress {
+                category: "Food".into(),
+                spent: pct,
+                limit: 100.0,
+                pct,
+            };
+            let display = format_budget_progress_markdown("2026-08", "CAD", &[row]);
+            assert_eq!(display.contains("watch"), watch, "pct={pct}");
+            assert_eq!(display.contains("over"), over, "pct={pct}");
+        }
+    }
+
+    #[test]
+    fn alert_display_reports_remaining_and_overage_amounts_at_boundaries() {
+        for (spent, threshold, expected_amounts) in [
+            (640.0, 80, vec![640, 800, 160]),
+            (800.0, 100, vec![800, 800]),
+            (850.0, 100, vec![850, 800, 50]),
+        ] {
+            let alert = BudgetAlert {
+                category: "Food".into(),
+                spent,
+                limit: 800.0,
+                pct: spent / 800.0 * 100.0,
+                threshold,
+            };
+            let display = alert.format_markdown("CAD");
+            let amounts: Vec<u32> = display
+                .split('$')
+                .skip(1)
+                .map(|part| {
+                    part.split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(amounts, expected_amounts, "spent={spent}");
+        }
+    }
+
     #[tokio::test]
     async fn category_spend_nets_csv_refunds_and_preserves_legacy_expenses() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

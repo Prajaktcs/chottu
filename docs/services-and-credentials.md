@@ -145,6 +145,8 @@ Streamer before Gmail OAuth or IMAP connection. Existing installs default to
 | `schedules.portfolio` | `"18:00"` | Evening `/networth` overview (blank = off) |
 | `schedules.reflection` / health slots | see `config.yaml.example` | Evening reflect + Google Health sync |
 
+Budget progress (`/budget` and `/monthly`) enters watch status at 80% and warns when the limit is reached at 100%. Alerts distinguish the remaining amount below the limit, exactly reaching the limit, and the overage amount above it. With no configured category budgets, the display provides `/budget set` setup guidance and no budget alerts are generated.
+
 Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 
 CSV imports recognize Wealthsimple credit-card statements, already-signed card activities, monthly account statements, and multi-account activity exports from their columns. Generic CSVs must supply signed cash-flow amounts and a stable, nonempty `account_id`/`account` column, or a recognized account ID in the filename; an institution name is not an account identity. New CSV ledger rows use `CSV_IMPORT`: outflows are negative, inflows positive. Structural categories inferred from transaction kinds (Income, Transfer, Investment, Fees, Taxes) take precedence over export labels. Otherwise, real export categories describe spending; merchantless card payments are retained as transfers. Re-import also corrects structural transactions previously stored under export labels.
