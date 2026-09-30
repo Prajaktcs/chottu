@@ -1371,7 +1371,7 @@ async fn reject_foreign_food_mutation(
     target_member_id: &str,
 ) -> Result<bool, SignalError> {
     if let Err(msg) = ensure_food_mutation_allowed(config, chat_id.lookup_aci(), target_member_id) {
-        // Plain text: member ids must not go through Telegram Markdown parse mode.
+        // Keep member ids literal in the plain-text response.
         send_signal(&bot, chat_id, msg).await?;
         return Ok(true);
     }
@@ -1707,7 +1707,7 @@ async fn handle_clear_food(
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    // Preserve Google Health (or other non-food_log) nutrition, then drop Telegram logs.
+    // Preserve Google Health (or other non-food_log) nutrition, then drop local food logs.
     let external =
         match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
             Ok(v) => v,
@@ -1867,7 +1867,7 @@ async fn handle_adjust_food(
 
     let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-    // Infer Google Health (etc.) base, then replace Telegram food_log with a delta
+    // Infer Google Health (etc.) base, then replace local food_log with a delta
     // so that external + food_log == the absolute totals the user requested. That keeps
     // evening /sync (Google + food_log) consistent and makes /undofood rebuild cleanly.
     let external = match health_coach::external_nutrition_base(pool, &member_id, &date_str).await {
@@ -1879,7 +1879,7 @@ async fn handle_adjust_food(
         }
     };
 
-    // Drop previously pushed Telegram meals from Google Health before replacing locally.
+    // Drop previously pushed local meals from Google Health before replacing locally.
     match health_coach::google_data_point_ids_for_day(pool, &member_id, &date_str).await {
         Ok(ids) => {
             if let Err(e) =
@@ -2530,7 +2530,7 @@ async fn create_manual_task(
                             match schedule_at(
                                 &cal_client,
                                 &title,
-                                Some("Created via Telegram"),
+                                Some("Created via Signal"),
                                 start,
                                 TASK_CALENDAR_DURATION_MINUTES,
                             )

@@ -10,7 +10,7 @@ Write exactly 1–2 short sentences of coaching for one family member. \
 Ground ONLY in the metrics, goals, plan, and constraints provided — never invent numbers or medical diagnoses. \
 When an outcome target date is set and they are off-track on food, steps, or today's planned session, briefly reference the timeline (e.g. days remaining) plus one concrete nudge. \
 If they are broadly on track, briefly celebrate a concrete win. \
-Respect listed constraints. No preamble, no bullet lists, no emoji spam. Plain text suitable for Telegram (light Markdown ok). \
+Respect listed constraints. No preamble, no bullet lists, no emoji spam. Plain text suitable for Signal, without Markdown formatting. \
 Return only the tip text.";
 
 /// Structured snapshot fed to the coach LLM (nutrition + fitness outcome).

@@ -38,7 +38,7 @@ Same logging path as `/food` (including Health push).
 
 ## `/undofood [member_id]`
 
-Removes the last Telegram food entry (and its Google Health log if synced). Rebuilds today’s summary from remaining `food_log` rows.
+Removes the last food entry logged through chat (and its Google Health log if synced). Rebuilds today’s summary from remaining `food_log` rows.
 
 ---
 
@@ -48,7 +48,7 @@ Removes the last Telegram food entry (and its Google Health log if synced). Rebu
 /adjustfood 2100 160 200 70
 ```
 
-Overrides today’s totals. Clears Telegram meals from Google Health first so the next sync doesn’t double-count.
+Overrides today’s totals. Clears meals logged through chat from Google Health first so the next sync doesn’t double-count.
 
 ---
 
@@ -60,7 +60,7 @@ Wipes today’s food logs + summary for that member.
 
 ## `/sync`
 
-Manual pull of today’s nutrition/activity for every linked Google Health account. Evening scheduled sync merges Telegram meals instead of overwriting. Late steps sync (~11pm ET by default) can nudge toward the step goal.
+Manual pull of today’s nutrition/activity for every linked Google Health account. Evening scheduled sync merges meals logged through chat instead of overwriting. Late steps sync (~11pm ET by default) can nudge toward the step goal.
 
 **Looks like**
 

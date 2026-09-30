@@ -224,7 +224,7 @@ The coach system prompt already forbids invented diagnoses; add: *"You may
 reference the member's own watchlist and their reported scores. Never propose
 new trigger foods."*
 
-### 5. `/watch` and `/tags` commands (Telegram)
+### 5. `/watch` and `/tags` commands (Signal)
 
 | Command | Behavior |
 | :--- | :--- |

@@ -282,7 +282,7 @@ pub async fn google_data_point_ids_for_day(
 
 /// Syncs Google Health metrics for `member_id` on `date` (YYYY-MM-DD) into SQLite.
 ///
-/// Nutrition is Google Health's daily rollup (which already includes Telegram meals
+/// Nutrition is Google Health's daily rollup (which already includes local meals
 /// that were pushed upstream) **plus** any still-unsynced local `/food` rows.
 pub async fn sync_member_for_date(
     pool: &SqlitePool,
@@ -336,7 +336,7 @@ pub async fn sync_member_for_date(
         .await
         .unwrap_or_default();
 
-    // Local Telegram meals that have not been pushed to Google Health yet.
+    // Local meals that have not been pushed to Google Health yet.
     let manual = sum_unsynced_food_log_for_day(pool, member_id, date)
         .await
         .unwrap_or_default();
@@ -761,7 +761,7 @@ impl DayNutritionTotals {
     }
 }
 
-/// Sum Telegram `/food` (and adjustment) rows for a local calendar day.
+/// Sum local `/food` (and adjustment) rows for a local calendar day.
 pub async fn sum_food_log_for_day(
     pool: &SqlitePool,
     member_id: &str,
@@ -888,7 +888,7 @@ async fn fetch_summary_nutrition(
 }
 
 /// Non-`food_log` portion of today's summary (usually Google Health), inferred as
-/// `summary − sum(food_log)` so Telegram edits can rebuild without another API call.
+/// `summary − sum(food_log)` so chat edits can rebuild without another API call.
 pub async fn external_nutrition_base(
     pool: &SqlitePool,
     member_id: &str,

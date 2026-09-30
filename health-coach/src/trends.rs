@@ -4,7 +4,7 @@ use sqlx::SqlitePool;
 
 use crate::coaching::{append_coach_tip, NutritionCoachContext};
 
-/// Builds one Telegram Markdown report per family member covering the last `days` of nutrition/activity.
+/// Builds one report per family member covering the last `days` of nutrition/activity.
 /// When `llm` is provided, appends a short local-Ollama coach tip for members with logged data.
 /// When `only_member_id` is set, returns at most that member's report (privacy for linked DMs).
 pub async fn build_nutrition_trend_reports(
