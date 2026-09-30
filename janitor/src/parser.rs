@@ -312,19 +312,20 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
             } else {
                 bail!("Missing merchant/description");
             };
-            let real_category = normalize_whitespace(cell(category_idx));
-            // Export placeholders are not real categories: e.g. merchantless card
-            // payments ship as Uncategorized but are transfers, not spending.
-            let (category, category_quality) = if !real_category.is_empty()
-                && !real_category.eq_ignore_ascii_case("Uncategorized")
-            {
-                (real_category, 2)
+            let inferred = inferred_category(&kind, amount);
+            // Structural kinds outrank export labels, including metadata from
+            // earlier imports; asset movements must not become household spend.
+            let (category, category_quality) = if inferred != "Uncategorized" {
+                (inferred.to_string(), 3)
             } else {
-                let category = inferred_category(&kind, amount);
-                (
-                    category.to_string(),
-                    if category == "Uncategorized" { 0 } else { 1 },
-                )
+                let real_category = normalize_whitespace(cell(category_idx));
+                if !real_category.is_empty()
+                    && !real_category.eq_ignore_ascii_case("Uncategorized")
+                {
+                    (real_category, 2)
+                } else {
+                    (inferred.to_string(), 0)
+                }
             };
             Ok(CsvTransaction {
                 entry: FinancialLedgerEntry {

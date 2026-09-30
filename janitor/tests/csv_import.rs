@@ -21,6 +21,59 @@ fn source(dir: &Path, filename: &str, content: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+async fn structural_categories_override_export_labels_and_repair_prior_classification() {
+    let dir = TempDir::new().unwrap();
+    let pool = database().await;
+    let statement = source(dir.path(), "monthly-WK0000001CAD.csv",
+        "date,transaction,description,amount,balance,currency,category\n2026-05-01,TRFOUT,Move to savings,-1000,0,CAD,Savings\n2026-05-01,BUY,Buy shares,-200,0,CAD,Savings\n2026-05-01,SPEND,Shop,-12,0,CAD,Groceries\n2026-05-01,DIV,Dividend,5,0,CAD,Savings\n2026-05-01,FEE,Service fee,-2,0,CAD,Savings\n2026-05-01,TAX,Withholding,-3,0,CAD,Savings\n");
+    import_csv_file(&statement, &pool, "CAD").await.unwrap();
+    let expected = vec![
+        (-1000.0, "Transfer".to_string()),
+        (-200.0, "Investment".to_string()),
+        (-12.0, "Groceries".to_string()),
+        (-3.0, "Taxes".to_string()),
+        (-2.0, "Fees".to_string()),
+        (5.0, "Income".to_string()),
+    ];
+    let rows: Vec<(f64, String)> =
+        sqlx::query_as("SELECT amount, category FROM financial_ledger ORDER BY amount")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, expected);
+
+    // Reproduce metadata written when real export labels outranked structural kinds.
+    sqlx::query("UPDATE financial_ledger SET category = 'Savings' WHERE category != 'Groceries'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE csv_import_records SET category_quality = 2")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let repaired = import_csv_file(&statement, &pool, "CAD").await.unwrap();
+    assert_eq!(
+        (repaired.inserted, repaired.matched, repaired.updated),
+        (0, 6, 5)
+    );
+    let rows: Vec<(f64, String)> =
+        sqlx::query_as("SELECT amount, category FROM financial_ledger ORDER BY amount")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, expected);
+    let spend: f64 = rows
+        .iter()
+        .map(|(amount, category)| {
+            chotu_common::ledger::expense_contribution(*amount, "CSV_IMPORT", category)
+        })
+        .sum();
+    assert_eq!(spend, 17.0);
+    let again = import_csv_file(&statement, &pool, "CAD").await.unwrap();
+    assert_eq!((again.inserted, again.updated), (0, 0));
+}
+
+#[tokio::test]
 async fn overlapping_card_formats_keep_repeats_refunds_payments_and_real_categories() {
     let dir = TempDir::new().unwrap();
     let pool = database().await;
