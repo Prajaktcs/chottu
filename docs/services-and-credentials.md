@@ -155,7 +155,7 @@ Account statements need the account ID in their filename, or an explicit account
 
 ### Repair historical CSV imports
 
-Rehearse on a database copy before repairing the live ledger:
+Rehearse on a separate SQLite database snapshot and archive copy before repairing the live ledger. Before the live run, stop Chotu/Janitor, their supervisor or service, and any other database writers. Keep writers stopped and the archive unchanged throughout backup, repair, verification, and any rollback; restart only after accepting the repaired database or completing rollback. Backup creation and the repair transaction are separate operations: concurrent writes between them would not be recoverable from the pre-repair backup.
 
 ```sh
 cargo run -p janitor --bin repair-csv-ledger -- \
