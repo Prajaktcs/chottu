@@ -21,6 +21,49 @@ fn source(dir: &Path, filename: &str, content: &str) -> std::path::PathBuf {
 }
 
 #[tokio::test]
+async fn partial_deletion_of_repeated_transactions_restores_missing_occurrences() {
+    let dir = TempDir::new().unwrap();
+    let pool = database().await;
+    let header = "transaction_date,transaction_type,status,merchant,amount,currency,category\n";
+    let row = "2026-05-01,Purchase,Completed,Shop,-12,CAD,Food\n";
+    let path = source(dir.path(), "activities.csv", &format!("{header}{row}"));
+    import_csv_file(&path, &pool, "CAD").await.unwrap();
+    let first: String = sqlx::query_scalar("SELECT id FROM financial_ledger")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    std::fs::write(&path, format!("{header}{row}{row}")).unwrap();
+    import_csv_file(&path, &pool, "CAD").await.unwrap();
+    let survivor: String = sqlx::query_scalar("SELECT id FROM financial_ledger WHERE id != ?")
+        .bind(&first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM financial_ledger WHERE id = ?")
+        .bind(first)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let restored = import_csv_file(&path, &pool, "CAD").await.unwrap();
+    assert_eq!(
+        (restored.inserted, restored.matched, restored.updated),
+        (1, 1, 0)
+    );
+    let rows: Vec<(String, f64)> = sqlx::query_as("SELECT id, amount FROM financial_ledger")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.iter().map(|(_, amount)| amount).sum::<f64>(), -24.0);
+    assert!(rows
+        .iter()
+        .any(|(id, amount)| id == &survivor && *amount == -12.0));
+    let again = import_csv_file(&path, &pool, "CAD").await.unwrap();
+    assert_eq!((again.inserted, again.matched, again.updated), (0, 2, 0));
+}
+
+#[tokio::test]
 async fn explicit_card_accounts_keep_same_value_purchases_at_distinct_merchants() {
     for activities_first in [false, true] {
         let dir = TempDir::new().unwrap();

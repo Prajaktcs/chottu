@@ -327,13 +327,29 @@ async fn import_parsed(
             }
             candidate.id.clone()
         } else {
-            let ordinal = existing.len().to_string();
+            let mut ordinal = existing.len();
             let timestamp = if row.has_time {
                 row.entry.timestamp.to_rfc3339()
             } else {
                 String::new()
             };
-            let id = format!("csv-{}", hash_parts(&[&primary, &timestamp, &ordinal]));
+            // Live occurrence counts are not dense ordinals after partial deletions.
+            let id = loop {
+                let id = format!(
+                    "csv-{}",
+                    hash_parts(&[&primary, &timestamp, &ordinal.to_string()])
+                );
+                let occupied: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM financial_ledger WHERE id = ?)",
+                )
+                .bind(&id)
+                .fetch_one(&mut **tx)
+                .await?;
+                if !occupied {
+                    break id;
+                }
+                ordinal += 1;
+            };
             sqlx::query("INSERT INTO financial_ledger (id, timestamp, amount, currency, institution, merchant, category, source_type) VALUES (?, ?, ?, ?, ?, ?, ?, 'CSV_IMPORT')")
                 .bind(&id).bind(row.entry.timestamp).bind(row.entry.amount).bind(&row.entry.currency)
                 .bind(&row.entry.institution).bind(&row.entry.merchant).bind(&row.entry.category)
