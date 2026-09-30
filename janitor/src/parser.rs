@@ -251,10 +251,10 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
                 bail!("Missing currency and default currency");
             }
             let is_card = matches!(schema, Schema::CardStatement | Schema::CardActivities);
-            let account_id = if is_card {
-                "wealthsimple-credit-card".to_string()
-            } else if !cell(account_idx).is_empty() {
+            let account_id = if !cell(account_idx).is_empty() {
                 normalize_whitespace(cell(account_idx))
+            } else if is_card {
+                "wealthsimple-credit-card".to_string()
             } else if schema == Schema::AccountActivities {
                 bail!("Missing account_id");
             } else if let Some(account) = &filename_account {
@@ -265,9 +265,10 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
             } else {
                 bail!("Missing account identity: generic CSV requires a nonempty account_id/account column or a recognized account identity in the filename");
             };
-            let institution = if is_card {
+            let institution = if is_card && account_id == "wealthsimple-credit-card" {
                 "Wealthsimple:credit-card".to_string()
-            } else if matches!(schema, Schema::MonthlyStatement | Schema::AccountActivities)
+            } else if is_card
+                || matches!(schema, Schema::MonthlyStatement | Schema::AccountActivities)
                 || filename_account.is_some()
             {
                 format!("Wealthsimple:{account_id}")

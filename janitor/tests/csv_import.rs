@@ -321,6 +321,54 @@ async fn statement_category_enrichment_does_not_replace_effective_time() {
 }
 
 #[tokio::test]
+async fn card_sources_keep_explicit_accounts_distinct_across_formats_and_import_orders() {
+    for account_column in ["account_id", "account"] {
+        for activities_first in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let pool = database().await;
+            let mut statements = Vec::new();
+            let mut activities = Vec::new();
+            for account in ["card-a", "card-b"] {
+                statements.push(source(dir.path(), &format!("statement-{account}.csv"),
+                    &format!("transaction_date,post_date,type,details,amount,currency,{account_column}\n2026-05-01,2026-05-01,Purchase,Shop,12,CAD,{account}\n")));
+                activities.push(source(dir.path(), &format!("activities-{account}.csv"),
+                    &format!("transaction_date,transaction_type,status,merchant,amount,currency,category,{account_column}\n2026-05-01,Purchase,Completed,Shop,-12,CAD,Food,{account}\n")));
+            }
+            let order = if activities_first {
+                [&activities, &statements]
+            } else {
+                [&statements, &activities]
+            };
+            let mut inserted = 0;
+            let mut matched = 0;
+            for paths in order {
+                for path in paths {
+                    let stats = import_csv_file(path, &pool, "CAD").await.unwrap();
+                    inserted += stats.inserted;
+                    matched += stats.matched;
+                }
+            }
+            assert_eq!((inserted, matched), (2, 2));
+            let rows: Vec<(String, f64)> = sqlx::query_as(
+                "SELECT institution, amount FROM financial_ledger ORDER BY institution",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                rows,
+                vec![
+                    ("Wealthsimple:card-a".to_string(), -12.0),
+                    ("Wealthsimple:card-b".to_string(), -12.0),
+                ]
+            );
+            let rerun = import_csv_file(&activities[0], &pool, "CAD").await.unwrap();
+            assert_eq!((rerun.inserted, rerun.matched, rerun.updated), (0, 1, 0));
+        }
+    }
+}
+
+#[tokio::test]
 async fn preview_metadata_upgrades_preserve_identity_and_cleanup_orphans_without_fks() {
     for foreign_keys in [false, true] {
         let dir = TempDir::new().unwrap();
@@ -358,6 +406,23 @@ async fn preview_metadata_upgrades_preserve_identity_and_cleanup_orphans_without
              DROP TABLE saved_keys;
              DROP TABLE saved_records;",
         ).execute(&pool).await.unwrap();
+        let statement = source(dir.path(), "statement.csv",
+            "transaction_date,post_date,type,details,amount,currency\n2026-04-30,2026-05-01,Purchase,Shop,12,CAD\n");
+        let overlapping = import_csv_file(&statement, &pool, "CAD").await.unwrap();
+        assert_eq!(
+            (
+                overlapping.inserted,
+                overlapping.matched,
+                overlapping.updated
+            ),
+            (0, 1, 0)
+        );
+        let after_statement: (String, String, f64) =
+            sqlx::query_as("SELECT id, timestamp, amount FROM financial_ledger")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after_statement);
         let upgraded = import_csv_file(&path, &pool, "CAD").await.unwrap();
         assert_eq!(
             (upgraded.inserted, upgraded.matched, upgraded.updated),

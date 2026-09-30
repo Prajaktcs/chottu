@@ -100,7 +100,7 @@ async fn ensure_schema(tx: &mut Transaction<'_, Sqlite>) -> Result<()> {
         let save_records = if has_date_quality {
             "CREATE TEMP TABLE csv_saved_records AS SELECT ledger_id, has_time, date_quality, merchant_quality, category_quality FROM csv_import_records"
         } else {
-            "CREATE TEMP TABLE csv_saved_records AS SELECT ledger_id, has_time, CASE WHEN has_time THEN 2 ELSE 0 END AS date_quality, merchant_quality, category_quality FROM csv_import_records"
+            "CREATE TEMP TABLE csv_saved_records AS SELECT ledger_id, has_time, CASE WHEN has_time THEN 2 ELSE 1 END AS date_quality, merchant_quality, category_quality FROM csv_import_records"
         };
         sqlx::query(save_records).execute(&mut **tx).await?;
         sqlx::raw_sql(
