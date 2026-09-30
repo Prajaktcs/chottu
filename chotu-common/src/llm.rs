@@ -855,12 +855,21 @@ in YYYY-MM-DD form from the email metadata and body.";
         text: &str,
         family_member_ids: &[String],
     ) -> Result<IntentClassification, LlmError> {
+        self.classify_intent_on_date(text, family_member_ids, chrono::Local::now().date_naive())
+            .await
+    }
+
+    pub async fn classify_intent_on_date(
+        &self,
+        text: &str,
+        family_member_ids: &[String],
+        today: chrono::NaiveDate,
+    ) -> Result<IntentClassification, LlmError> {
         let members = if family_member_ids.is_empty() {
             "(none configured)".to_string()
         } else {
             family_member_ids.join(", ")
         };
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let user_prompt = format!(
             "Today's local date: {}\nFamily member ids: {}\nUser message: {}\n",
             today,
@@ -890,7 +899,15 @@ in YYYY-MM-DD form from the email metadata and body.";
 
     /// Resolve meal text + optional log day/time from a food description (for `/food`).
     pub async fn extract_food_log_context(&self, text: &str) -> Result<FoodLogContext, LlmError> {
-        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.extract_food_log_context_on_date(text, chrono::Local::now().date_naive())
+            .await
+    }
+
+    pub async fn extract_food_log_context_on_date(
+        &self,
+        text: &str,
+        today: chrono::NaiveDate,
+    ) -> Result<FoodLogContext, LlmError> {
         let system_prompt = "\
 You extract food-log fields from a short user message.\
 \

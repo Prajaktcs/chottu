@@ -18,6 +18,7 @@ Return only the tip text.";
 /// Structured snapshot fed to the coach LLM (nutrition + fitness outcome).
 #[derive(Debug, Clone)]
 pub struct FitnessCoachContext {
+    pub metrics_available: bool,
     pub conditions: Vec<ConditionCoachContext>,
     pub member_name: String,
     /// e.g. "today (2026-08-04)" or "last 7 days (5 logged)"
@@ -93,6 +94,7 @@ impl FitnessCoachContext {
             conditions: Vec::new(),
             member_name: member_name.to_string(),
             window_label: format!("today ({})", summary.date),
+            metrics_available: true,
             calories: summary.total_calories_ingested as f64,
             protein_g: summary.protein_grams,
             carbs_g: summary.carbs_grams,
@@ -176,6 +178,7 @@ impl FitnessCoachContext {
         Self {
             member_name: member_name.to_string(),
             window_label: format!("last {} days ({} logged)", days, logged_days),
+            metrics_available: logged_days > 0,
             conditions: Vec::new(),
             calories: avg_cal,
             protein_g: avg_protein,
@@ -209,35 +212,43 @@ impl FitnessCoachContext {
         let mut lines = Vec::new();
         lines.push(format!("Member: {}", self.member_name));
         lines.push(format!("Window: {}", self.window_label));
-        lines.push(format!(
-            "Calories: {:.0} kcal{}",
-            self.calories,
-            trend_suffix(self.calorie_trend)
-        ));
-        lines.push(format!(
-            "Protein: {:.1}g{}",
-            self.protein_g,
-            trend_suffix(self.protein_trend)
-        ));
-        lines.push(format!("Carbs: {:.1}g", self.carbs_g));
-        lines.push(format!("Fat: {:.1}g", self.fats_g));
-        lines.push(format!("Fiber: {:.1}g", self.fiber_g));
-        lines.push(format!(
-            "Steps: {:.0}{}",
-            self.steps,
-            trend_suffix(self.steps_trend)
-        ));
-        if self.active_calories > 0.0 {
-            lines.push(format!("Active calories: {:.0}", self.active_calories));
-        }
-        if let Some(sleep) = self.sleep_hours {
-            lines.push(format!("Sleep: {:.1} hours", sleep));
-        }
-        if let Some(energy) = self.perceived_energy {
-            lines.push(format!("Perceived energy: {}/10", energy));
+        if self.metrics_available {
+            lines.push(format!(
+                "Calories: {:.0} kcal{}",
+                self.calories,
+                trend_suffix(self.calorie_trend)
+            ));
+            lines.push(format!(
+                "Protein: {:.1}g{}",
+                self.protein_g,
+                trend_suffix(self.protein_trend)
+            ));
+            lines.push(format!("Carbs: {:.1}g", self.carbs_g));
+            lines.push(format!("Fat: {:.1}g", self.fats_g));
+            lines.push(format!("Fiber: {:.1}g", self.fiber_g));
+            lines.push(format!(
+                "Steps: {:.0}{}",
+                self.steps,
+                trend_suffix(self.steps_trend)
+            ));
+            if self.active_calories > 0.0 {
+                lines.push(format!("Active calories: {:.0}", self.active_calories));
+            }
+            if let Some(sleep) = self.sleep_hours {
+                lines.push(format!("Sleep: {:.1} hours", sleep));
+            }
+            if let Some(energy) = self.perceived_energy {
+                lines.push(format!("Perceived energy: {}/10", energy));
+            }
+        } else {
+            lines.push("Nutrition/activity metrics: unavailable (no summaries; do not infer zero intake or activity)".into());
         }
 
-        if let Some(goals) = self.goals.as_ref().filter(|g| !g.is_empty()) {
+        if let Some(goals) = self
+            .goals
+            .as_ref()
+            .filter(|g| !g.is_empty() && self.metrics_available)
+        {
             lines.push("Nutrition goals vs actual:".to_string());
             if let Some(g) = goals.calories {
                 lines.push(goal_line("Calories", self.calories, g as f64, "kcal"));
@@ -258,7 +269,9 @@ impl FitnessCoachContext {
                 lines.push(goal_line("Steps", self.steps, g as f64, ""));
             }
         } else {
-            lines.push("Nutrition goals: none configured".to_string());
+            if self.metrics_available {
+                lines.push("Nutrition goals: none configured".to_string());
+            }
         }
 
         if let Some(fg) = self.fitness_goals.as_ref().filter(|g| !g.is_empty()) {
@@ -526,6 +539,17 @@ mod tests {
         assert!(prompt.contains("not evidence of triggers"));
         assert!(COACH_SYSTEM_PROMPT.contains("Never propose new trigger foods"));
         assert!(COACH_SYSTEM_PROMPT.contains("recommend treatment"));
+    }
+
+    #[test]
+    fn symptom_only_context_does_not_present_missing_metrics_as_zero() {
+        let ctx = FitnessCoachContext::from_trend_averages(
+            "Alex", 7, 0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, None, None, "→", "→", "→",
+        );
+        let prompt = ctx.to_user_prompt();
+        assert!(prompt.contains("metrics: unavailable"));
+        assert!(!prompt.contains("Calories: 0"));
+        assert!(!prompt.contains("Steps: 0"));
     }
 
     #[test]

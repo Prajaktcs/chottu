@@ -51,8 +51,9 @@ pub use finnhub::{
     FinnhubError,
 };
 pub use food_parse::{
-    effective_food_time, meal_of_day_clock_time, resolve_food_log_timing, FoodLogTiming,
-    MEAL_TIME_BREAKFAST, MEAL_TIME_DINNER, MEAL_TIME_LUNCH, MEAL_TIME_SNACK,
+    effective_food_time, meal_of_day_clock_time, resolve_food_log_timing,
+    resolve_food_log_timing_tz, FoodLogTiming, MEAL_TIME_BREAKFAST, MEAL_TIME_DINNER,
+    MEAL_TIME_LUNCH, MEAL_TIME_SNACK,
 };
 pub use food_tags::{
     assign_food_tags, backfill_food_log_keyword_tags, delete_food_log_tags,

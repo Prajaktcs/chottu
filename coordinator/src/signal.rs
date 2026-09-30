@@ -15,7 +15,7 @@ use chotu_common::{
     fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_signal_delivery,
     insert_food_log_tags, is_signal_conversation_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_signal_aci,
-    parse_due_phrase_tz, pending_budget_alerts, reschedule_at, resolve_food_log_timing,
+    parse_due_phrase_tz, pending_budget_alerts, reschedule_at, resolve_food_log_timing_tz,
     save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token, schedule_at,
     set_budget_override, signal_aci_for_member, signal_delivery_targets, spawn_background_reindex,
     split_task_add_args, start_redirect_listener, AppConfig, AssignedFoodTags, CalendarWindow,
@@ -1193,7 +1193,10 @@ async fn handle_food_log(
 
     // Let the LLM resolve relative days/times ("yesterday's dinner…") into YYYY-MM-DD / HH:MM.
     let (description, food_date, food_time) = with_typing_indicator(bot, chat_id, async {
-        match llm.extract_food_log_context(&food_description).await {
+        match llm
+            .extract_food_log_context_on_date(&food_description, config.now_in_tz().date_naive())
+            .await
+        {
             Ok(ctx) => {
                 let desc = if ctx.food_description.trim().is_empty() {
                     food_description.clone()
@@ -1244,7 +1247,7 @@ async fn log_food_for_member(
     timing_utterance: &str,
 ) -> Result<(), SignalError> {
     let food_time = effective_food_time(timing_utterance, food_time);
-    let timing = resolve_food_log_timing(food_date, food_time.as_deref());
+    let timing = resolve_food_log_timing_tz(food_date, food_time.as_deref(), config.resolved_tz());
 
     send_signal(
         &bot,
@@ -1575,8 +1578,8 @@ async fn persist_food_estimation(
     let log_id = uuid::Uuid::new_v4().to_string();
     let log_ts = timing.timestamp;
     let date_str = timing.date.clone();
-    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let yesterday_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+    let today_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let yesterday_str = (config.now_in_tz().date_naive() - chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
 
@@ -1770,7 +1773,7 @@ async fn handle_clear_food(
         return Ok(());
     }
 
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Preserve Google Health (or other non-food_log) nutrition, then drop local food logs.
     let external =
@@ -1930,7 +1933,7 @@ async fn handle_adjust_food(
         }
     };
 
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Infer Google Health (etc.) base, then replace local food_log with a delta
     // so that external + food_log == the absolute totals the user requested. That keeps
@@ -2045,7 +2048,7 @@ async fn handle_undo_food(
         return Ok(());
     }
 
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Snapshot the non-food_log base before mutating food_log.
     let external =
@@ -5406,19 +5409,26 @@ async fn handle_food_photo(
     .await?;
 
     let timing = if caption_rest.trim().is_empty() {
-        resolve_food_log_timing(None, None)
+        resolve_food_log_timing_tz(None, None, config.resolved_tz())
     } else {
-        match llm.extract_food_log_context(&caption_rest).await {
+        match llm
+            .extract_food_log_context_on_date(&caption_rest, config.now_in_tz().date_naive())
+            .await
+        {
             Ok(ctx) => {
                 let food_time = effective_food_time(&caption_rest, ctx.food_time.as_deref());
-                resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
+                resolve_food_log_timing_tz(
+                    ctx.food_date.as_deref(),
+                    food_time.as_deref(),
+                    config.resolved_tz(),
+                )
             }
             Err(e) => {
                 eprintln!(
                     "Food photo caption timing extract failed (using now): {:?}",
                     e
                 );
-                resolve_food_log_timing(None, None)
+                resolve_food_log_timing_tz(None, None, config.resolved_tz())
             }
         }
     };
@@ -5470,7 +5480,8 @@ async fn dispatch_free_text_intent(
             "Still figuring that out — local model is thinking…".to_string(),
         );
         with_typing_indicator(bot, chat_id, async {
-            llm.classify_intent(trimmed, &member_ids).await
+            llm.classify_intent_on_date(trimmed, &member_ids, config.now_in_tz().date_naive())
+                .await
         })
         .await
     };

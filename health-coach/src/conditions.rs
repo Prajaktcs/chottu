@@ -125,10 +125,16 @@ pub async fn load_condition_context(
         let local = date
             .and_hms_opt(0, 0, 0)
             .ok_or_else(|| anyhow::anyhow!("Invalid condition day"))?;
-        tz.from_local_datetime(&local)
-            .earliest()
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .ok_or_else(|| anyhow::anyhow!("No local midnight for condition day"))
+        // Midnight can fall in a gap; a skipped civil date has an empty range.
+        for second in 0..=86_400 {
+            if let Some(dt) = tz
+                .from_local_datetime(&(local + Duration::seconds(second)))
+                .earliest()
+            {
+                return Ok(dt.with_timezone(&chrono::Utc));
+            }
+        }
+        Err(anyhow::anyhow!("No valid boundary for condition day"))
     };
     let hits: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT w.condition_id, w.tag FROM condition_watchlist w JOIN food_log_tags t ON t.tag = w.tag JOIN food_log f ON f.id = t.food_log_id WHERE w.family_member_id = ? AND f.family_member_id = w.family_member_id AND f.timestamp >= ? AND f.timestamp < ? ORDER BY w.tag",
@@ -358,5 +364,21 @@ mod tests {
         assert_eq!(contexts[0].watchlist, vec!["alcohol", "dairy"]);
         assert_eq!(contexts[0].food_hits, vec!["alcohol"]);
         assert_eq!(contexts[0].label, "Skin symptoms");
+    }
+
+    #[tokio::test]
+    async fn midnight_gap_keeps_condition_scores_and_correct_food_window() {
+        let pool = pool().await;
+        let mut config = config();
+        config.timezone = Some("America/Santiago".into());
+        sqlx::raw_sql("INSERT INTO condition_checkin (family_member_id, condition_id, date, score) VALUES ('alex', 'skin', '2026-09-06', 2)").execute(&pool).await.unwrap();
+        food(&pool, "before", "alex", "2026-09-06T03:59:59Z", "dairy").await;
+        food(&pool, "first", "alex", "2026-09-06T04:00:00Z", "alcohol").await;
+        food(&pool, "after", "alex", "2026-09-07T03:00:00Z", "dairy").await;
+        let contexts = load_condition_context(&pool, &config, Some("alex"), "alex", "2026-09-06")
+            .await
+            .unwrap();
+        assert_eq!(contexts[0].scores, vec![("2026-09-06".into(), 2)]);
+        assert_eq!(contexts[0].food_hits, vec!["alcohol"]);
     }
 }

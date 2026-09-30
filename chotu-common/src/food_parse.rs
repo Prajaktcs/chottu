@@ -35,7 +35,24 @@ pub struct FoodLogTiming {
 /// - Missing/invalid `food_time` → now if the day is today, else local noon.
 /// - `food_time` is `HH:MM` or `HH:MM:SS` (24-hour).
 pub fn resolve_food_log_timing(food_date: Option<&str>, food_time: Option<&str>) -> FoodLogTiming {
-    let today = Local::now().date_naive();
+    resolve_food_log_timing_in(food_date, food_time, Local::now())
+}
+
+pub fn resolve_food_log_timing_tz(
+    food_date: Option<&str>,
+    food_time: Option<&str>,
+    timezone: chrono_tz::Tz,
+) -> FoodLogTiming {
+    resolve_food_log_timing_in(food_date, food_time, Utc::now().with_timezone(&timezone))
+}
+
+fn resolve_food_log_timing_in<Tz: TimeZone>(
+    food_date: Option<&str>,
+    food_time: Option<&str>,
+    now: chrono::DateTime<Tz>,
+) -> FoodLogTiming {
+    let today = now.date_naive();
+    let timezone = now.timezone();
     let (date, date_was_explicit) = match food_date.map(str::trim).filter(|s| !s.is_empty()) {
         Some(raw) => match NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
             Ok(d) => (d, true),
@@ -50,16 +67,20 @@ pub fn resolve_food_log_timing(food_date: Option<&str>, food_time: Option<&str>)
         .and_then(parse_hhmm);
 
     let timestamp = match time {
-        Some(t) => local_datetime_to_utc(date, t),
-        None if date == today => Local::now().with_timezone(&Utc),
+        Some(t) => local_datetime_to_utc(&timezone, date, t, now.with_timezone(&Utc)),
+        None if date == today => now.with_timezone(&Utc),
         None => {
             let noon = NaiveTime::from_hms_opt(12, 0, 0).expect("noon is valid");
-            local_datetime_to_utc(date, noon)
+            local_datetime_to_utc(&timezone, date, noon, now.with_timezone(&Utc))
         }
     };
 
     FoodLogTiming {
-        date: date.format("%Y-%m-%d").to_string(),
+        date: timestamp
+            .with_timezone(&timezone)
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string(),
         timestamp,
         date_was_explicit,
     }
@@ -178,9 +199,14 @@ fn parse_hhmm(raw: &str) -> Option<NaiveTime> {
         .ok()
 }
 
-fn local_datetime_to_utc(date: NaiveDate, time: NaiveTime) -> chrono::DateTime<Utc> {
+fn local_datetime_to_utc<Tz: TimeZone>(
+    timezone: &Tz,
+    date: NaiveDate,
+    time: NaiveTime,
+    fallback: chrono::DateTime<Utc>,
+) -> chrono::DateTime<Utc> {
     let local_naive = date.and_time(time);
-    match Local.from_local_datetime(&local_naive) {
+    match timezone.from_local_datetime(&local_naive) {
         chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) => {
             dt.with_timezone(&Utc)
         }
@@ -189,13 +215,13 @@ fn local_datetime_to_utc(date: NaiveDate, time: NaiveTime) -> chrono::DateTime<U
             for h in [time.hour().saturating_add(1), 12, 15, 18] {
                 if let Some(t) = NaiveTime::from_hms_opt(h, 0, 0) {
                     if let chrono::LocalResult::Single(dt) | chrono::LocalResult::Ambiguous(dt, _) =
-                        Local.from_local_datetime(&date.and_time(t))
+                        timezone.from_local_datetime(&date.and_time(t))
                     {
                         return dt.with_timezone(&Utc);
                     }
                 }
             }
-            Utc::now()
+            fallback
         }
     }
 }
@@ -207,6 +233,22 @@ use chrono::Timelike;
 mod tests {
     use super::*;
     use chrono::Duration;
+
+    #[test]
+    fn configured_food_day_and_explicit_clock_agree_near_utc_midnight() {
+        let timezone = chrono_tz::America::Toronto;
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-30T02:00:00Z")
+            .unwrap()
+            .with_timezone(&timezone);
+        let timing = resolve_food_log_timing_in(None, None, now);
+        assert_eq!(timing.date, "2026-09-29");
+        assert_eq!(timing.timestamp, now.with_timezone(&Utc));
+        let dinner = resolve_food_log_timing_in(Some("2026-09-29"), Some("20:45"), now);
+        assert_eq!(dinner.date, "2026-09-29");
+        assert_eq!(dinner.timestamp.to_rfc3339(), "2026-09-30T00:45:00+00:00");
+        let next = resolve_food_log_timing_in(None, None, now + Duration::hours(4));
+        assert_eq!(next.date, "2026-09-30");
+    }
 
     #[test]
     fn missing_fields_default_to_today_now() {
