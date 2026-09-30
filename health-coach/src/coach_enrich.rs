@@ -1,14 +1,14 @@
 //! Load plan/exercises and attach them to [`FitnessCoachContext`].
 
 use chotu_common::{AppConfig, FitnessGoals};
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{Duration, NaiveDate};
 use sqlx::SqlitePool;
 
 use crate::coaching::FitnessCoachContext;
 use crate::fitness_plan::{
-    count_strength_sessions, current_week_start_str, load_weekly_plan, parse_plan_json,
-    plan_cardio_minutes_on_cardio_days, plan_session_adherence, session_for_date,
-    sum_cardio_minutes, week_start_monday, WeeklyFitnessPlan,
+    count_strength_sessions, load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days,
+    plan_session_adherence, session_for_date, sum_cardio_minutes, week_start_monday,
+    WeeklyFitnessPlan,
 };
 use crate::sync::{exercise_entries_for_range, exercises_for_day};
 
@@ -69,10 +69,10 @@ pub async fn enrich_coach_context(
         .and_then(|m| m.fitness_goals.as_ref())
         .filter(|g| !g.is_empty());
 
-    let today = Local::now().date_naive();
+    let today = config.now_in_tz().date_naive();
     let days_until = fitness.and_then(|g| g.days_until_target(today));
 
-    let week_start = current_week_start_str();
+    let week_start = week_start_monday(today).format("%Y-%m-%d").to_string();
     let stored_plan = load_weekly_plan(pool, member_id, &week_start)
         .await
         .ok()

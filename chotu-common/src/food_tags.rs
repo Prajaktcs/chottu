@@ -288,15 +288,18 @@ pub async fn delete_food_log_tags_for_member_day(
     tx: &mut Transaction<'_, Sqlite>,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
 ) -> Result<()> {
+    let (start, end) = crate::civil_day_bounds_utc(date, timezone)?;
     sqlx::query(
         "DELETE FROM food_log_tags WHERE food_log_id IN (\
             SELECT id FROM food_log \
-            WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?\
+            WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)\
          )",
     )
     .bind(member_id)
-    .bind(date)
+    .bind(start)
+    .bind(end)
     .execute(&mut **tx)
     .await
     .context("delete food_log_tags for member/day")?;

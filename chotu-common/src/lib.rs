@@ -1,5 +1,6 @@
 pub mod agenda;
 pub mod calendar;
+pub mod civil_day;
 pub mod database;
 pub mod due_parse;
 pub mod family;
@@ -29,6 +30,7 @@ pub use calendar::{
     schedule_timed_block, CalendarError, CalendarEvent, GoogleCalendarClient,
     TASK_CALENDAR_DURATION_MINUTES,
 };
+pub use civil_day::civil_day_bounds_utc;
 pub use database::{
     complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
 };

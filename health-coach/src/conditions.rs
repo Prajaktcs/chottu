@@ -1,8 +1,8 @@
 //! Member-authored condition context and successful-delivery food flag dedupe.
 
 use anyhow::Result;
-use chotu_common::{AppConfig, FamilyMember};
-use chrono::{Duration, NaiveDate, TimeZone};
+use chotu_common::{civil_day_bounds_utc, AppConfig, FamilyMember};
+use chrono::{Duration, NaiveDate};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -120,25 +120,10 @@ pub async fn load_condition_context(
     .await?;
     let scores: Vec<(String, String, i32)> = sqlx::query_as("SELECT condition_id, date, score FROM condition_checkin WHERE family_member_id = ? AND date BETWEEN ? AND ? AND score BETWEEN 0 AND 5 ORDER BY date")
         .bind(&member.id).bind(&start).bind(as_of).fetch_all(pool).await?;
-    let tz = config.resolved_tz();
-    let midnight = |date: NaiveDate| -> Result<chrono::DateTime<chrono::Utc>> {
-        let local = date
-            .and_hms_opt(0, 0, 0)
-            .ok_or_else(|| anyhow::anyhow!("Invalid condition day"))?;
-        // Midnight can fall in a gap; a skipped civil date has an empty range.
-        for second in 0..=86_400 {
-            if let Some(dt) = tz
-                .from_local_datetime(&(local + Duration::seconds(second)))
-                .earliest()
-            {
-                return Ok(dt.with_timezone(&chrono::Utc));
-            }
-        }
-        Err(anyhow::anyhow!("No valid boundary for condition day"))
-    };
+    let (day_start, day_end) = civil_day_bounds_utc(as_of, config.resolved_tz())?;
     let hits: Vec<(String, String)> = sqlx::query_as(
-        "SELECT DISTINCT w.condition_id, w.tag FROM condition_watchlist w JOIN food_log_tags t ON t.tag = w.tag JOIN food_log f ON f.id = t.food_log_id WHERE w.family_member_id = ? AND f.family_member_id = w.family_member_id AND f.timestamp >= ? AND f.timestamp < ? ORDER BY w.tag",
-    ).bind(&member.id).bind(midnight(day)?).bind(midnight(day + Duration::days(1))?).fetch_all(pool).await?;
+        "SELECT DISTINCT w.condition_id, w.tag FROM condition_watchlist w JOIN food_log_tags t ON t.tag = w.tag JOIN food_log f ON f.id = t.food_log_id WHERE w.family_member_id = ? AND f.family_member_id = w.family_member_id AND julianday(f.timestamp) >= julianday(?) AND julianday(f.timestamp) < julianday(?) ORDER BY w.tag",
+    ).bind(&member.id).bind(day_start).bind(day_end).fetch_all(pool).await?;
     Ok(member
         .health_conditions
         .iter()
@@ -280,7 +265,7 @@ mod tests {
         );
         // Reapplying the additive migration preserves existing delivery state and meals.
         sqlx::raw_sql(include_str!(
-            "../../chotu-common/migrations/20260929000000_condition_food_flags.sql"
+            "../../chotu-common/migrations/20260930000000_condition_food_flags.sql"
         ))
         .execute(&pool)
         .await

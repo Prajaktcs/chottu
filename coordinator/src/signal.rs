@@ -1774,20 +1774,35 @@ async fn handle_clear_food(
     }
 
     let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
+        .expect("current configured civil day has valid bounds");
 
     // Preserve Google Health (or other non-food_log) nutrition, then drop local food logs.
-    let external =
-        match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Failed to compute external nutrition base: {:?}", e);
-                send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
-                return Ok(());
-            }
-        };
+    let external = match health_coach::external_nutrition_base(
+        pool,
+        &target_member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to compute external nutrition base: {:?}", e);
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+            return Ok(());
+        }
+    };
 
     // Remove any meals we previously pushed to Google Health.
-    match health_coach::google_data_point_ids_for_day(pool, &target_member_id, &date_str).await {
+    match health_coach::google_data_point_ids_for_day(
+        pool,
+        &target_member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
         Ok(ids) => {
             if let Err(e) =
                 health_coach::delete_google_nutrition_logs(&target_member_id, config, &ids).await
@@ -1803,12 +1818,19 @@ async fn handle_clear_food(
 
     if let Err(e) = (async {
         let mut tx = pool.begin().await?;
-        delete_food_log_tags_for_member_day(&mut tx, &target_member_id, &date_str).await?;
+        delete_food_log_tags_for_member_day(
+            &mut tx,
+            &target_member_id,
+            &date_str,
+            config.resolved_tz(),
+        )
+        .await?;
         sqlx::query(
-            "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
+            "DELETE FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
         )
         .bind(&target_member_id)
-        .bind(&date_str)
+        .bind(day_start)
+        .bind(day_end)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1825,6 +1847,7 @@ async fn handle_clear_food(
         pool,
         &target_member_id,
         &date_str,
+        config.resolved_tz(),
         &external,
     )
     .await
@@ -1934,11 +1957,20 @@ async fn handle_adjust_food(
     };
 
     let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
+        .expect("current configured civil day has valid bounds");
 
     // Infer Google Health (etc.) base, then replace local food_log with a delta
     // so that external + food_log == the absolute totals the user requested. That keeps
     // evening /sync (Google + food_log) consistent and makes /undofood rebuild cleanly.
-    let external = match health_coach::external_nutrition_base(pool, &member_id, &date_str).await {
+    let external = match health_coach::external_nutrition_base(
+        pool,
+        &member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to compute external nutrition base: {:?}", e);
@@ -1948,7 +1980,14 @@ async fn handle_adjust_food(
     };
 
     // Drop previously pushed local meals from Google Health before replacing locally.
-    match health_coach::google_data_point_ids_for_day(pool, &member_id, &date_str).await {
+    match health_coach::google_data_point_ids_for_day(
+        pool,
+        &member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
         Ok(ids) => {
             if let Err(e) =
                 health_coach::delete_google_nutrition_logs(&member_id, config, &ids).await
@@ -1980,12 +2019,14 @@ async fn handle_adjust_food(
     let assigned = assign_food_tags(Vec::<String>::new(), &desc);
     if let Err(e) = (async {
         let mut tx = pool.begin().await?;
-        delete_food_log_tags_for_member_day(&mut tx, &member_id, &date_str).await?;
+        delete_food_log_tags_for_member_day(&mut tx, &member_id, &date_str, config.resolved_tz())
+            .await?;
         sqlx::query(
-            "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
+            "DELETE FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
         )
         .bind(&member_id)
-        .bind(&date_str)
+        .bind(day_start)
+        .bind(day_end)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -2049,25 +2090,34 @@ async fn handle_undo_food(
     }
 
     let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
+        .expect("current configured civil day has valid bounds");
 
     // Snapshot the non-food_log base before mutating food_log.
-    let external =
-        match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Failed to compute external nutrition base: {:?}", e);
-                send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
-                return Ok(());
-            }
-        };
+    let external = match health_coach::external_nutrition_base(
+        pool,
+        &target_member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to compute external nutrition base: {:?}", e);
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+            return Ok(());
+        }
+    };
 
     let last_log: Option<chotu_common::FoodLog> = match sqlx::query_as::<_, chotu_common::FoodLog>(
         "SELECT * FROM food_log \
-         WHERE family_member_id = ? AND date(timestamp, 'localtime') = ? \
+         WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
          ORDER BY timestamp DESC LIMIT 1",
     )
     .bind(&target_member_id)
-    .bind(&date_str)
+    .bind(day_start)
+    .bind(day_end)
     .fetch_optional(pool)
     .await
     {
@@ -2136,6 +2186,7 @@ async fn handle_undo_food(
         pool,
         &target_member_id,
         &date_str,
+        config.resolved_tz(),
         &external,
     )
     .await
@@ -3690,13 +3741,15 @@ async fn handle_plan(
         return Ok(());
     }
 
-    let week_start = health_coach::current_week_start_str();
+    let week_start = health_coach::week_start_monday(config.now_in_tz().date_naive())
+        .format("%Y-%m-%d")
+        .to_string();
     if !regenerate {
         if let Ok(Some(stored)) =
             health_coach::load_weekly_plan(pool, &member_id, &week_start).await
         {
             let mut msg = stored.plan_md.clone();
-            let today = chrono::Local::now().date_naive();
+            let today = config.now_in_tz().date_naive();
             if let Some(session) = health_coach::session_for_date_from_stored(&stored, today) {
                 let notes = session.notes.trim();
                 msg.push_str("\n📌 *Today:* ");
@@ -3741,7 +3794,7 @@ async fn handle_plan(
     {
         Ok(stored) => {
             let mut msg = stored.plan_md;
-            let today = chrono::Local::now().date_naive();
+            let today = config.now_in_tz().date_naive();
             if let Ok(plan) = health_coach::parse_plan_json(&stored.plan_json) {
                 if let Some(session) =
                     health_coach::session_for_date(&stored.week_start, &plan, today)
@@ -4050,7 +4103,7 @@ async fn handle_status(
             .and_then(|m| m.fitness_goals.as_ref())
             .filter(|g| !g.is_empty())
         {
-            let today = chrono::Local::now().date_naive();
+            let today = config.now_in_tz().date_naive();
             if let Some(block) = fitness.outcome_markdown(today) {
                 member_report.push_str(&block);
                 member_report.push('\n');

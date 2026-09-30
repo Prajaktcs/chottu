@@ -159,15 +159,17 @@ pub async fn get_daily_data(
     date: &str,
     config: &chotu_common::AppConfig,
 ) -> Result<(Vec<SimpleTx>, Vec<HealthFamilySummary>)> {
+    let (start, end) = chotu_common::civil_day_bounds_utc(date, config.resolved_tz())?;
     // Query financials
     let txs = sqlx::query_as::<_, SimpleTx>(
         r#"
         SELECT merchant, amount, category, currency
         FROM financial_ledger
-        WHERE date(timestamp) = ?
+        WHERE julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)
         "#,
     )
-    .bind(date)
+    .bind(start)
+    .bind(end)
     .fetch_all(pool)
     .await
     .context("Failed to query daily financials")?;
@@ -521,6 +523,26 @@ fn escape_yaml_double_quoted(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn daily_financials_use_configured_civil_day_instead_of_utc_date() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let mut config = AppConfig::default();
+        config.timezone = Some("America/Toronto".into());
+        for (id, timestamp) in [
+            ("before", "2026-09-29T03:59:59Z"),
+            ("first", "2026-09-29 04:00:00+00:00"),
+            ("evening", "2026-09-30T02:00:00Z"),
+            ("after", "2026-09-30T00:00:00-04:00"),
+        ] {
+            sqlx::query("INSERT INTO financial_ledger (id, timestamp, amount, currency, institution, merchant, category, source_type) VALUES (?, ?, 10, 'CAD', 'bank', ?, 'food', 'EMAIL_STREAM')")
+                .bind(id).bind(timestamp).bind(id).execute(&pool).await.unwrap();
+        }
+        let (txs, _) = get_daily_data(&pool, "2026-09-29", &config).await.unwrap();
+        let mut merchants: Vec<_> = txs.into_iter().map(|t| t.merchant).collect();
+        merchants.sort();
+        assert_eq!(merchants, vec!["evening", "first"]);
+    }
 
     fn condition(id: &str, label: &str) -> HealthCondition {
         HealthCondition {

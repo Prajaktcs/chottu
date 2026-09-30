@@ -216,15 +216,18 @@ pub async fn push_pending_food_logs(
     client: &GoogleHealthClient,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
 ) -> Result<usize> {
+    let (start, end) = chotu_common::civil_day_bounds_utc(date, timezone)?;
     let pending: Vec<FoodLog> = sqlx::query_as(
         "SELECT * FROM food_log \
-         WHERE family_member_id = ? AND date(timestamp, 'localtime') = ? \
+         WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
            AND (google_data_point_id IS NULL OR google_data_point_id = '') \
          ORDER BY timestamp ASC",
     )
     .bind(member_id)
-    .bind(date)
+    .bind(start)
+    .bind(end)
     .fetch_all(pool)
     .await
     .context("Failed to fetch pending food_log rows")?;
@@ -265,14 +268,17 @@ pub async fn google_data_point_ids_for_day(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
 ) -> Result<Vec<String>> {
+    let (start, end) = chotu_common::civil_day_bounds_utc(date, timezone)?;
     let rows: Vec<(Option<String>,)> = sqlx::query_as(
         "SELECT google_data_point_id FROM food_log \
-         WHERE family_member_id = ? AND date(timestamp, 'localtime') = ? \
+         WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
            AND google_data_point_id IS NOT NULL AND google_data_point_id != ''",
     )
     .bind(member_id)
-    .bind(date)
+    .bind(start)
+    .bind(end)
     .fetch_all(pool)
     .await
     .context("Failed to fetch google_data_point_id values")?;
@@ -294,7 +300,9 @@ pub async fn sync_member_for_date(
     let client = google_health_client_for_member(member_id, config)?;
 
     // Best-effort: push any pending local meals so Google becomes the shared store.
-    if let Err(e) = push_pending_food_logs(pool, &client, member_id, date).await {
+    if let Err(e) =
+        push_pending_food_logs(pool, &client, member_id, date, config.resolved_tz()).await
+    {
         eprintln!(
             "Health Coach: Failed to push pending food logs to Google Health: {:?}",
             e
@@ -337,7 +345,7 @@ pub async fn sync_member_for_date(
         .unwrap_or_default();
 
     // Local meals that have not been pushed to Google Health yet.
-    let manual = sum_unsynced_food_log_for_day(pool, member_id, date)
+    let manual = sum_unsynced_food_log_for_day(pool, member_id, date, config.resolved_tz())
         .await
         .unwrap_or_default();
 
@@ -766,8 +774,9 @@ pub async fn sum_food_log_for_day(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
 ) -> Result<DayNutritionTotals> {
-    sum_food_log_for_day_filtered(pool, member_id, date, FoodLogSyncFilter::All).await
+    sum_food_log_for_day_filtered(pool, member_id, date, timezone, FoodLogSyncFilter::All).await
 }
 
 /// Sum only local `/food` rows that have not been pushed to Google Health yet.
@@ -775,8 +784,16 @@ pub async fn sum_unsynced_food_log_for_day(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
 ) -> Result<DayNutritionTotals> {
-    sum_food_log_for_day_filtered(pool, member_id, date, FoodLogSyncFilter::UnsyncedOnly).await
+    sum_food_log_for_day_filtered(
+        pool,
+        member_id,
+        date,
+        timezone,
+        FoodLogSyncFilter::UnsyncedOnly,
+    )
+    .await
 }
 
 #[derive(Clone, Copy)]
@@ -789,8 +806,10 @@ async fn sum_food_log_for_day_filtered(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
     filter: FoodLogSyncFilter,
 ) -> Result<DayNutritionTotals> {
+    let (start, end) = chotu_common::civil_day_bounds_utc(date, timezone)?;
     // Filter only toggles a fixed clause; AssertSqlSafe is required for sqlx 0.9 SqlSafeStr.
     let sync_clause = match filter {
         FoodLogSyncFilter::All => "",
@@ -828,12 +847,13 @@ async fn sum_food_log_for_day_filtered(
             COALESCE(SUM(estimated_trans_fat_g), 0.0) as trans_fat_g,
             COUNT(*) as entry_count
         FROM food_log
-        WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?{sync_clause}
+        WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?){sync_clause}
         "#
     );
     let totals = sqlx::query_as::<_, DayNutritionTotals>(sqlx::AssertSqlSafe(sql))
         .bind(member_id)
-        .bind(date)
+        .bind(start)
+        .bind(end)
         .fetch_one(pool)
         .await
         .context("Failed to sum food_log for day")?;
@@ -893,9 +913,10 @@ pub async fn external_nutrition_base(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
 ) -> Result<DayNutritionTotals> {
     let summary = fetch_summary_nutrition(pool, member_id, date).await?;
-    let manual = sum_food_log_for_day(pool, member_id, date).await?;
+    let manual = sum_food_log_for_day(pool, member_id, date, timezone).await?;
     Ok(summary.saturating_sub(&manual))
 }
 
@@ -1005,9 +1026,10 @@ pub async fn rebuild_summary_from_food_log(
     pool: &SqlitePool,
     member_id: &str,
     date: &str,
+    timezone: chrono_tz::Tz,
     external: &DayNutritionTotals,
 ) -> Result<DayNutritionTotals> {
-    let manual = sum_food_log_for_day(pool, member_id, date).await?;
+    let manual = sum_food_log_for_day(pool, member_id, date, timezone).await?;
     let combined = external.add(&manual);
     write_summary_nutrition(pool, member_id, date, &combined).await?;
     Ok(combined)
@@ -1019,7 +1041,7 @@ pub async fn sync_primary_today(
     gemini_client: Option<&GeminiClient>,
     config: &AppConfig,
 ) -> Result<HealthSyncReport> {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date = config.now_in_tz().format("%Y-%m-%d").to_string();
     let member_id = config
         .family
         .members
@@ -1035,7 +1057,7 @@ pub async fn sync_configured_members_today(
     gemini_client: Option<&GeminiClient>,
     config: &AppConfig,
 ) -> Result<Vec<HealthSyncReport>> {
-    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date = config.now_in_tz().format("%Y-%m-%d").to_string();
     let mut reports = Vec::new();
     let mut errors = Vec::new();
 
@@ -1076,4 +1098,71 @@ pub async fn sync_configured_members_today(
 /// appear to be configured.
 pub fn credentials_configured() -> bool {
     oauth_app_configured() && any_health_refresh_token_present()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn meal_totals_google_ids_and_tag_deletion_share_the_configured_day() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let tz = chrono_tz::America::Toronto;
+        // Mix timestamp encodings used by old rows and SQLx; compare actual instants.
+        for (id, timestamp, calories, google_id) in [
+            ("before", "2026-09-29T03:59:59Z", 1, Some("before-id")),
+            ("first", "2026-09-29 04:00:00+00:00", 100, Some("first-id")),
+            ("evening", "2026-09-30T02:00:00Z", 200, None),
+            ("after", "2026-09-30T00:00:00-04:00", 2, Some("after-id")),
+        ] {
+            sqlx::query("INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories, google_data_point_id) VALUES (?, ?, 'alex', 'milk', ?, ?)")
+                .bind(id).bind(timestamp).bind(calories).bind(google_id).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO food_log_tags (food_log_id, tag) VALUES (?, 'dairy')")
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let all = sum_food_log_for_day(&pool, "alex", "2026-09-29", tz)
+            .await
+            .unwrap();
+        assert_eq!(all.calories, 300);
+        assert_eq!(all.entry_count, 2);
+        let pending = sum_unsynced_food_log_for_day(&pool, "alex", "2026-09-29", tz)
+            .await
+            .unwrap();
+        assert_eq!(pending.calories, 200);
+        assert_eq!(
+            google_data_point_ids_for_day(&pool, "alex", "2026-09-29", tz)
+                .await
+                .unwrap(),
+            vec!["first-id"]
+        );
+        let external = DayNutritionTotals {
+            calories: 50,
+            ..Default::default()
+        };
+        rebuild_summary_from_food_log(&pool, "alex", "2026-09-29", tz, &external)
+            .await
+            .unwrap();
+        assert_eq!(
+            external_nutrition_base(&pool, "alex", "2026-09-29", tz)
+                .await
+                .unwrap()
+                .calories,
+            50
+        );
+
+        let mut tx = pool.begin().await.unwrap();
+        chotu_common::delete_food_log_tags_for_member_day(&mut tx, "alex", "2026-09-29", tz)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let remaining: Vec<(String,)> =
+            sqlx::query_as("SELECT food_log_id FROM food_log_tags ORDER BY food_log_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, vec![("after".into(),), ("before".into(),)]);
+    }
 }

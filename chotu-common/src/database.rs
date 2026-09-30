@@ -1150,7 +1150,7 @@ mod tests {
         let path = dir.path().join("condition-upgrade.db");
         let pool = init_db(path.to_str().unwrap()).await.unwrap();
         // Simulate the previous release in this disposable database.
-        sqlx::raw_sql("DROP TABLE condition_food_flags; DELETE FROM _sqlx_migrations WHERE version = 20260929000000; INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories) VALUES ('meal', '2026-09-29T20:00:00Z', 'alex', 'milk', 100); INSERT INTO food_log_tags (food_log_id, tag) VALUES ('meal', 'dairy'); INSERT INTO condition_watchlist (family_member_id, condition_id, tag) VALUES ('alex', 'skin', 'dairy'); INSERT INTO condition_checkin (family_member_id, date, condition_id, score) VALUES ('alex', '2026-09-29', 'skin', 0);")
+        sqlx::raw_sql("DROP TABLE condition_food_flags; DELETE FROM _sqlx_migrations WHERE version = 20260930000000; INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories) VALUES ('meal', '2026-09-29T20:00:00Z', 'alex', 'milk', 100); INSERT INTO food_log_tags (food_log_id, tag) VALUES ('meal', 'dairy'); INSERT INTO condition_watchlist (family_member_id, condition_id, tag) VALUES ('alex', 'skin', 'dairy'); INSERT INTO condition_checkin (family_member_id, date, condition_id, score) VALUES ('alex', '2026-09-29', 'skin', 0);")
             .execute(&pool).await.unwrap();
         pool.close().await;
         let pool = init_db(path.to_str().unwrap()).await.unwrap();
