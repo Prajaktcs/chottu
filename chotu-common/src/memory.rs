@@ -1142,6 +1142,22 @@ mod tests {
     }
 
     #[test]
+    fn journal_checkins_are_indexed_with_the_member_owner() {
+        let md = "---\ndate: 2026-09-29\nmember: alex\n---\n\n# Evening Reflection\n## Prompt\nPrivate symptom question\n## Response\n### Condition Check-ins\n- Skin symptoms (skin): 3/5 — itch\n\n### Journal\nGood day overall.\n## Other notes\nNot part of reflection\n";
+        let chunks = chunk_journal(
+            "Journal/2026/09/2026-09-29--alex.md",
+            md,
+            Some("2026-09-29"),
+        );
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].owner_member_id.as_deref(), Some("alex"));
+        assert!(chunks[0].body.contains("Skin symptoms (skin): 3/5 — itch"));
+        assert!(chunks[0].body.contains("Good day overall."));
+        assert!(!chunks[0].body.contains("Private symptom question"));
+        assert!(!chunks[0].body.contains("Not part of reflection"));
+    }
+
+    #[test]
     fn test_content_hash_stable() {
         assert_eq!(content_hash("abc"), content_hash("abc"));
         assert_ne!(content_hash("abc"), content_hash("abd"));

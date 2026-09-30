@@ -105,4 +105,30 @@ Reply directly to this message to record your daily reflection entry in your jou
 
 Your reply is saved under `~/chotu_brain/Journal/` (or `CHOTU_BRAIN_DIR`). Needs Ollama; uses today’s ledger + health rows from SQLite.
 
+In a linked personal DM, conditions configured with `health_conditions[].check_in: true`
+add optional symptom questions. Answer on separate lines, using the condition id
+or full label:
+
+```text
+Good day overall; got my walk in.
+skin: 3 itch and stress
+joint: 1
+```
+
+Scores range from 0 (calm) to 5 (worst flare). With one condition, a reply containing
+only a number also works. Scores and optional notes are saved locally for the
+reflection's date and included in the member's journal for memory search.
+Repeating `/reflect` updates that day's answered scores; skipping leaves them alone.
+Household reflections never ask for or record condition scores.
+
+Enable a condition under the appropriate member in private `config.yaml`, then restart:
+
+```yaml
+health_conditions:
+  - id: skin
+    label: "Skin symptoms"
+    check_in: true
+    lag_window: [1, 3]
+```
+
 `core_values` in `config.yaml` (optional) shape the prompt toward your anchors (default Growth + Contribution when unset in code paths that supply defaults — keep real values only in private config).

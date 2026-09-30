@@ -237,6 +237,7 @@ pub enum ConversationState {
         date: String,
         prompt: String,
         member_id: Option<String>,
+        conditions: Vec<chotu_common::HealthCondition>,
     },
 }
 
@@ -919,7 +920,7 @@ async fn handle_command(
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
         }
         Command::Reflect => {
-            let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
             let _ = handle_reflect_trigger(
                 &bot, &chat_id, &pool, &llm, states, config, &scope, date_str, 1,
             )
@@ -4877,7 +4878,9 @@ async fn handle_reflect_trigger(
     )
     .await
     {
-        Ok(prompt) => {
+        Ok(mut prompt) => {
+            let conditions = crate::reflection::checkin_conditions(config, scope.member_id());
+            crate::reflection::append_checkin_questions(&mut prompt, &conditions);
             let msg_text = format!(
                 "📝 *Evening Journaling Reflection Prompt*:\n\n\
                  _{}_\n\n\
@@ -4901,6 +4904,7 @@ async fn handle_reflect_trigger(
                     date: date_str,
                     prompt,
                     member_id: scope.member_id().map(str::to_string),
+                    conditions,
                 },
             );
             Ok(DeliveryOutcome::Delivered)
@@ -5035,6 +5039,7 @@ async fn handle_message(
         date,
         prompt,
         member_id,
+        conditions,
     }) = active_state
     {
         if inbound
@@ -5081,6 +5086,38 @@ async fn handle_message(
             }
         };
         crate::reflection::filter_health_for_member(&mut healths, member_id.as_deref());
+        // Only the same linked member may persist the private check-in snapshot.
+        let mut checkins = if member_id.as_deref() == scope.member_id() && member_id.is_some() {
+            crate::reflection::parse_condition_checkins(response_text, &conditions)
+        } else {
+            Vec::new()
+        };
+        if let Some(member_id) = member_id
+            .as_deref()
+            .filter(|id| !conditions.is_empty() && Some(*id) == scope.member_id())
+        {
+            match crate::reflection::save_condition_checkins(
+                &pool,
+                member_id,
+                &date,
+                &checkins,
+                &conditions,
+            )
+            .await
+            {
+                Ok(saved) => checkins = saved,
+                Err(e) => {
+                    eprintln!("Failed to save symptom check-ins: {:?}", e);
+                    send_signal(
+                        &bot,
+                        &chat_id,
+                        "Could not save your symptom check-in. Please retry your reflection reply.",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        }
         match crate::reflection::save_reflection(
             &date,
             &prompt,
@@ -5088,6 +5125,7 @@ async fn handle_message(
             &txs,
             &healths,
             member_id.as_deref(),
+            &checkins,
         )
         .await
         {
