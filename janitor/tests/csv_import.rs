@@ -103,7 +103,7 @@ async fn invalid_batch_does_not_partially_commit() {
     let bad = source(
         dir.path(),
         "bank.csv",
-        "Date,Amount,Merchant\n2026-05-01,-10,Shop\n2026-05-02,0,Invalid\n",
+        "Date,Amount,Merchant,account\n2026-05-01,-10,Shop,test-account\n2026-05-02,0,Invalid,test-account\n",
     );
     assert!(import_csv_file(&bad, &pool, "CAD").await.is_err());
     let sum: f64 = sqlx::query_scalar("SELECT COALESCE(SUM(amount), 0.0) FROM financial_ledger")
@@ -124,7 +124,7 @@ async fn repair_preserves_non_csv_rows_and_repeated_source_occurrences() {
     source(
         dir.path(),
         "bank.csv",
-        "Date,Amount,Merchant\n2026-05-01,-10,Shop\n2026-05-01,-10,Shop\n",
+        "Date,Amount,Merchant,account\n2026-05-01,-10,Shop,test-account\n2026-05-01,-10,Shop,test-account\n",
     );
     let result = rebuild_archived_csvs(&pool, dir.path(), "CAD")
         .await
@@ -157,7 +157,7 @@ async fn storage_failure_rolls_back_legacy_removal_and_new_rows() {
     let path = source(
         dir.path(),
         "bank.csv",
-        "Date,Amount,Merchant\n2026-05-01,-10,Shop\n2026-05-02,-20,Reject\n",
+        "Date,Amount,Merchant,account\n2026-05-01,-10,Shop,test-account\n2026-05-02,-20,Reject,test-account\n",
     );
     let error = import_csv_file(&path, &pool, "CAD").await.unwrap_err();
     assert!(error.to_string().contains("storage rejected row"));
@@ -167,4 +167,178 @@ async fn storage_failure_rolls_back_legacy_removal_and_new_rows() {
             .await
             .unwrap();
     assert_eq!(rows, vec![("Shop".into(), -10.0, "BATCH_DROP".into())]);
+}
+
+#[tokio::test]
+async fn generic_accounts_are_required_and_isolated_across_sources() {
+    let dir = TempDir::new().unwrap();
+    let pool = database().await;
+    for (filename, account) in [("alpha.csv", "account-a"), ("beta.csv", "account-b")] {
+        let path = source(
+            dir.path(),
+            filename,
+            &format!("date,amount,merchant,account\n2026-05-01,-10,Shop,{account}\n"),
+        );
+        assert_eq!(
+            import_csv_file(&path, &pool, "CAD").await.unwrap().inserted,
+            1
+        );
+    }
+    let unknown = source(
+        dir.path(),
+        "unknown.csv",
+        "date,amount,merchant\n2026-05-01,-10,Shop\n",
+    );
+    let error = import_csv_file(&unknown, &pool, "CAD").await.unwrap_err();
+    assert!(format!("{error:#}").contains("account"));
+    let total: (i64, f64) = sqlx::query_as("SELECT COUNT(*), SUM(amount) FROM financial_ledger")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(total, (2, -20.0));
+    let overlap = source(
+        dir.path(),
+        "alpha-again.csv",
+        "date,amount,merchant,account\n2026-05-01,-10,Shop,account-a\n",
+    );
+    let stats = import_csv_file(&overlap, &pool, "CAD").await.unwrap();
+    assert_eq!((stats.inserted, stats.matched), (0, 1));
+}
+
+#[tokio::test]
+async fn authoritative_activity_date_is_independent_of_category_and_import_order() {
+    for category in ["", "Uncategorized", "Food"] {
+        for activities_first in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let pool = database().await;
+            let statement = source(dir.path(), "statement.csv",
+                "transaction_date,post_date,type,details,amount,currency\n2026-05-01,2026-05-02,Purchase,Shop,12,CAD\n");
+            let activities = source(dir.path(), "activities.csv",
+                &format!("transaction_date,transaction_type,status,merchant,amount,currency,category\n2026-05-02,Purchase,Completed,Shop,-12,CAD,{category}\n"));
+            let order = if activities_first {
+                [&activities, &statement]
+            } else {
+                [&statement, &activities]
+            };
+            for path in order {
+                import_csv_file(path, &pool, "CAD").await.unwrap();
+            }
+            let row: (String, f64) =
+                sqlx::query_as("SELECT timestamp, amount FROM financial_ledger")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(row, ("2026-05-02T00:00:00+00:00".into(), -12.0));
+            std::fs::write(&activities,
+                "transaction_date,transaction_type,status,merchant,amount,currency,category\n2026-05-02,Purchase,Completed,Shop,-12,CAD,Food\n").unwrap();
+            import_csv_file(&activities, &pool, "CAD").await.unwrap();
+            let row: (String, String) =
+                sqlx::query_as("SELECT timestamp, category FROM financial_ledger")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(row, ("2026-05-02T00:00:00+00:00".into(), "Food".into()));
+        }
+    }
+}
+
+#[tokio::test]
+async fn statement_category_enrichment_does_not_replace_effective_time() {
+    let dir = TempDir::new().unwrap();
+    let pool = database().await;
+    let activities = source(dir.path(), "activities.csv",
+        "effective_date,effective_time,account_id,activity_type,activity_sub_type,description,net_cash_amount,currency\n2026-05-01,10:30:01,WK0000001CAD,MoneyMovement,SPEND,Spend,-12,CAD\n");
+    let statement = source(dir.path(), "monthly-WK0000001CAD.csv",
+        "date,transaction,description,amount,balance,currency,category\n2026-05-01,SPEND,Shop,-12,100,CAD,Groceries\n");
+    import_csv_file(&activities, &pool, "CAD").await.unwrap();
+    import_csv_file(&statement, &pool, "CAD").await.unwrap();
+    let row: (String, String, String) =
+        sqlx::query_as("SELECT timestamp, merchant, category FROM financial_ledger")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        row,
+        (
+            "2026-05-01T10:30:01+00:00".into(),
+            "Shop".into(),
+            "Groceries".into()
+        )
+    );
+}
+
+#[tokio::test]
+async fn preview_metadata_upgrades_preserve_identity_and_cleanup_orphans_without_fks() {
+    for foreign_keys in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let pool = database().await;
+        sqlx::query(if foreign_keys {
+            "PRAGMA foreign_keys = ON"
+        } else {
+            "PRAGMA foreign_keys = OFF"
+        })
+        .execute(&pool)
+        .await
+        .unwrap();
+        let path = source(dir.path(), "activities.csv",
+            "transaction_date,transaction_type,status,merchant,amount,currency,category\n2026-05-01,Purchase,Completed,Shop,-12,CAD,Food\n");
+        import_csv_file(&path, &pool, "CAD").await.unwrap();
+        let before: (String, String, f64) =
+            sqlx::query_as("SELECT id, timestamp, amount FROM financial_ledger")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::raw_sql(
+            "CREATE TEMP TABLE saved_records AS SELECT ledger_id, has_time, merchant_quality, category_quality FROM csv_import_records;
+             CREATE TEMP TABLE saved_keys AS SELECT * FROM csv_import_keys;
+             DROP TABLE csv_import_keys;
+             DROP TABLE csv_import_records;
+             CREATE TABLE csv_import_records (
+                 ledger_id TEXT PRIMARY KEY REFERENCES financial_ledger(id) ON DELETE CASCADE,
+                 has_time INTEGER NOT NULL, merchant_quality INTEGER NOT NULL, category_quality INTEGER NOT NULL);
+             CREATE TABLE csv_import_keys (
+                 match_key TEXT NOT NULL,
+                 ledger_id TEXT NOT NULL REFERENCES csv_import_records(ledger_id) ON DELETE CASCADE,
+                 PRIMARY KEY (match_key, ledger_id));
+             INSERT INTO csv_import_records SELECT * FROM saved_records;
+             INSERT INTO csv_import_keys SELECT * FROM saved_keys;
+             DROP TABLE saved_keys;
+             DROP TABLE saved_records;",
+        ).execute(&pool).await.unwrap();
+        let upgraded = import_csv_file(&path, &pool, "CAD").await.unwrap();
+        assert_eq!(
+            (upgraded.inserted, upgraded.matched, upgraded.updated),
+            (0, 1, 0)
+        );
+        let after: (String, String, f64) =
+            sqlx::query_as("SELECT id, timestamp, amount FROM financial_ledger")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        sqlx::query("DELETE FROM financial_ledger")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dangling: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM csv_import_records")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            dangling, 1,
+            "logical references must not depend on FK cascades"
+        );
+        let restored = import_csv_file(&path, &pool, "CAD").await.unwrap();
+        assert_eq!((restored.inserted, restored.matched), (1, 0));
+        let after: (String, String, f64) =
+            sqlx::query_as("SELECT id, timestamp, amount FROM financial_ledger")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        let stale_keys: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM csv_import_keys k LEFT JOIN csv_import_records r ON r.ledger_id = k.ledger_id WHERE r.ledger_id IS NULL",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(stale_keys, 0);
+    }
 }

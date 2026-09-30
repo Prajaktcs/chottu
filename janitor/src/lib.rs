@@ -170,8 +170,9 @@ async fn process_dropped_file(
                 .await
                 .context("CSV import failure")?;
             println!(
-                "Imported {} source rows: {} new transactions, {} overlapping rows, {} metadata updates, {} blank rows.",
-                stats.source_rows, stats.inserted, stats.matched, stats.updated, stats.blank_rows
+                "Imported {} source rows: {} new transactions, {} overlapping rows, {} metadata updates, {} blank rows, {} non-posted rows skipped.",
+                stats.source_rows, stats.inserted, stats.matched, stats.updated, stats.blank_rows,
+                stats.non_posted_rows
             );
 
             // Move to archive

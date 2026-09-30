@@ -12,6 +12,7 @@ pub(crate) struct CsvTransaction {
     pub(crate) kind: String,
     pub(crate) posting_date: Option<NaiveDate>,
     pub(crate) has_time: bool,
+    pub(crate) date_quality: u8,
     pub(crate) merchant_quality: u8,
     pub(crate) category_quality: u8,
 }
@@ -21,6 +22,7 @@ pub(crate) struct ParsedCsv {
     pub(crate) transactions: Vec<CsvTransaction>,
     pub(crate) legacy_ids: Vec<String>,
     pub(crate) blank_rows: usize,
+    pub(crate) non_posted_rows: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,7 +89,6 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
     } else if columns.has(&[
         "transaction_date",
         "transaction_type",
-        "status",
         "merchant",
         "amount",
         "category",
@@ -153,6 +154,11 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
         }
     };
     let subtype_idx = columns.exact(&["activity_sub_type", "activity_subtype"]);
+    let status_idx = if schema == Schema::CardActivities {
+        Some(columns.required(&["status"], "status")?)
+    } else {
+        None
+    };
     let time_idx = if schema == Schema::AccountActivities {
         columns.exact(&["effective_time"])
     } else {
@@ -170,6 +176,7 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
         transactions: Vec::new(),
         legacy_ids: Vec::new(),
         blank_rows: 0,
+        non_posted_rows: 0,
     };
 
     for (index, result) in reader.records().enumerate() {
@@ -186,6 +193,33 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
         // Migration ownership only: reproduce the old parser's signature, never use it for new IDs.
         if let Some(id) = legacy.id(&record, default_currency) {
             parsed.legacy_ids.push(id);
+        }
+        if let Some(status_idx) = status_idx {
+            let status = record.get(status_idx).unwrap_or("").trim();
+            if !status.eq_ignore_ascii_case("completed") && !status.eq_ignore_ascii_case("posted") {
+                if [
+                    "pending",
+                    "declined",
+                    "cancelled",
+                    "canceled",
+                    "failed",
+                    "void",
+                    "voided",
+                    "reversed",
+                    "authorized",
+                    "authorised",
+                ]
+                .iter()
+                .any(|state| status.eq_ignore_ascii_case(state))
+                {
+                    parsed.non_posted_rows += 1;
+                    continue;
+                }
+                bail!(
+                    "{}: CSV row {row}: Unknown or empty card activity status: {status:?}",
+                    path.display()
+                );
+            }
         }
         let transaction = (|| -> Result<CsvTransaction> {
             let cell = |idx: Option<usize>| idx.and_then(|i| record.get(i)).unwrap_or("").trim();
@@ -229,7 +263,7 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
                 // An unidentifiable monthly statement cannot safely be merged across accounts.
                 bail!("Missing account identity in monthly statement filename: {filename}");
             } else {
-                inferred_institution.clone()
+                bail!("Missing account identity: generic CSV requires a nonempty account_id/account column or a recognized account identity in the filename");
             };
             let institution = if is_card {
                 "Wealthsimple:credit-card".to_string()
@@ -307,6 +341,10 @@ pub(crate) fn parse_csv_file(path: &Path, default_currency: &str) -> Result<Pars
                 kind,
                 posting_date,
                 has_time,
+                date_quality: match schema {
+                    Schema::CardActivities | Schema::AccountActivities => 2,
+                    _ => 1,
+                },
                 merchant_quality,
                 category_quality,
             })
@@ -858,7 +896,7 @@ mod tests {
     fn parentheses_amounts_are_negative_and_bad_rows_report_context() {
         let (_dir, path) = csv(
             "generic.csv",
-            "date,amount,merchant,currency\n2026-05-01,\"($1,234.50)\",Grocer,\n , , , \n",
+            "date,amount,merchant,currency,account_id\n2026-05-01,\"($1,234.50)\",Grocer,,household\n , , , , \n",
         );
         let parsed = parse_csv_file(&path, "CAD").unwrap();
         assert_eq!(parsed.transactions[0].entry.amount, -1234.50);
@@ -866,13 +904,16 @@ mod tests {
         for bad in ["NaN", "inf", "12oops", "(12", "(-12)", ""] {
             let (_dir, path) = csv(
                 "malformed.csv",
-                &format!("date,amount,merchant\n2026-05-01,{bad},Grocer\n"),
+                &format!("date,amount,merchant,account_id\n2026-05-01,{bad},Grocer,household\n"),
             );
             let error = format!("{:#}", parse_csv_file(&path, "CAD").unwrap_err());
             assert!(error.contains("CSV row 2"), "{error}");
             assert!(error.to_lowercase().contains("amount"), "{error}");
         }
-        let (_dir, path) = csv("bad-date.csv", "date,amount,merchant\ninvalid,12,Grocer\n");
+        let (_dir, path) = csv(
+            "bad-date.csv",
+            "date,amount,merchant,account_id\ninvalid,12,Grocer,household\n",
+        );
         let error = format!("{:#}", parse_csv_file(&path, "CAD").unwrap_err());
         assert!(
             error.contains("CSV row 2") && error.contains("Unsupported date"),
@@ -888,12 +929,133 @@ mod tests {
             parsed.legacy_ids,
             ["aad351c7c812b127d045d8c0e307ce7c7a20520af008c4b0464bf5d806dcad21"]
         );
-        let (_dir, path) = csv("activity.csv", "transaction_date,amount,description,effective_date,net_cash_amount,currency\n2026-04-30,\"($12.50)\",Spend,2026-05-01,-30,CAD\n");
+        let (_dir, path) = csv("activity.csv", "transaction_date,amount,description,effective_date,net_cash_amount,currency,account\n2026-04-30,\"($12.50)\",Spend,2026-05-01,-30,CAD,household\n");
         let parsed = parse_csv_file(&path, "CAD").unwrap();
         assert_eq!(
             parsed.legacy_ids,
             ["d57b2039d47c5fb2e7f19b75a389fb3ad518fd2b92fc7aa4c44c78b5fd564884"]
         );
         assert_eq!(parsed.transactions[0].entry.amount, -12.5);
+    }
+
+    #[test]
+    fn generic_rows_require_account_identity_and_preserve_distinct_accounts() {
+        for content in [
+            "date,amount,merchant\n2026-05-01,-20,Grocer\n",
+            "date,amount,merchant,account_id\n2026-05-01,-20,Grocer,   \n",
+        ] {
+            let (_dir, path) = csv("wealthsimple-generic.csv", content);
+            let error = format!("{:#}", parse_csv_file(&path, "CAD").unwrap_err());
+            assert!(error.contains("CSV row 2"), "{error}");
+            assert!(error.contains("account_id/account column"), "{error}");
+        }
+        let (_dir, path) = csv("generic.csv",
+            "date,amount,merchant,account\n2026-05-01,-20,Grocer,household\n2026-05-01,-20,Grocer,business\n");
+        let parsed = parse_csv_file(&path, "CAD").unwrap();
+        assert_eq!(parsed.transactions[0].account_id, "household");
+        assert_eq!(parsed.transactions[1].account_id, "business");
+        assert_eq!(
+            parsed.transactions[0].entry.amount,
+            parsed.transactions[1].entry.amount
+        );
+        let (_dir, path) = csv(
+            "2026-05-WK0000001CAD.csv",
+            "date,amount,merchant\n2026-05-01,-20,Grocer\n",
+        );
+        let parsed = parse_csv_file(&path, "CAD").unwrap();
+        assert_eq!(parsed.transactions[0].account_id, "WK0000001CAD");
+    }
+
+    #[test]
+    fn card_status_filters_nonposted_spending_but_retains_legacy_cleanup_ids() {
+        let header = "transaction_date,transaction_type,status,merchant,amount,category,currency\n";
+        let mut content = format!("{header}2026-05-01,Purchase, Completed ,Grocer,-20,Groceries,CAD\n2026-05-02,Purchase,pOsTeD,Shop,-10,,CAD\n");
+        let states = [
+            "Pending",
+            "Declined",
+            "Cancelled",
+            "Canceled",
+            "Failed",
+            "Void",
+            "Voided",
+            "Reversed",
+            "Authorized",
+            "Authorised",
+        ];
+        for (index, status) in states.iter().enumerate() {
+            content.push_str(&format!(
+                "2026-05-{:02},Purchase,{status},Excluded merchant,-99,Shopping,CAD\n",
+                index + 3
+            ));
+        }
+        let (_dir, path) = csv("credit-card-activities.csv", &content);
+        let parsed = parse_csv_file(&path, "CAD").unwrap();
+        assert_eq!(
+            parsed
+                .transactions
+                .iter()
+                .map(|t| (t.entry.merchant.as_str(), t.entry.amount))
+                .collect::<Vec<_>>(),
+            [("Grocer", -20.0), ("Shop", -10.0)]
+        );
+        assert_eq!(parsed.non_posted_rows, states.len());
+        // The deployed parser ignored status. Repair must still own each excluded row.
+        let headers = csv::StringRecord::from(header.trim_end().split(',').collect::<Vec<_>>());
+        let legacy = LegacyColumns::new(&headers, "credit-card-activities.csv");
+        let mut old_reader = csv::Reader::from_reader(content.as_bytes());
+        let old_ids: Vec<_> = old_reader
+            .records()
+            .map(|row| legacy.id(&row.unwrap(), "CAD").unwrap())
+            .collect();
+        assert_eq!(parsed.legacy_ids, old_ids);
+        assert_eq!(parsed.legacy_ids.len(), states.len() + 2);
+        assert_ne!(
+            parsed.transactions[0].category_quality,
+            parsed.transactions[1].category_quality
+        );
+        assert_eq!(parsed.transactions[0].date_quality, 2);
+        assert_eq!(parsed.transactions[1].date_quality, 2);
+    }
+
+    #[test]
+    fn unknown_or_empty_card_status_reports_row_context_and_missing_column_errors() {
+        for status in ["Processing", ""] {
+            let (_dir, path) = csv("card.csv", &format!(
+                "transaction_date,transaction_type,status,merchant,amount,category\n2026-05-01,Purchase,{status},Grocer,-20,Food\n"
+            ));
+            let error = format!("{:#}", parse_csv_file(&path, "CAD").unwrap_err());
+            assert!(error.contains("CSV row 2"), "{error}");
+            assert!(error.contains("status"), "{error}");
+        }
+        let (_dir, path) = csv("card.csv",
+            "transaction_date,transaction_type,merchant,amount,category\n2026-05-01,Purchase,Grocer,-20,Food\n");
+        let error = format!("{:#}", parse_csv_file(&path, "CAD").unwrap_err());
+        assert!(error.contains("Missing status column"), "{error}");
+    }
+
+    #[test]
+    fn account_activity_dates_outrank_monthly_dates_independently_of_categories() {
+        let (_dir, path) = csv("2026-05-WK0000001CAD.csv",
+            "date,transaction,description,amount,balance,currency,category\n2026-05-02,SPEND,Grocer,-20,80,CAD,Groceries\n");
+        let monthly = parse_csv_file(&path, "CAD").unwrap();
+        let (_dir, path) = csv("activities.csv",
+            "effective_date,net_cash_amount,account_id,activity_type,description,category\n2026-05-01,-20,WK0000001CAD,SPEND,Grocer,\n2026-05-03,-10,WK0000001CAD,SPEND,Shop,Shopping\n");
+        let activities = parse_csv_file(&path, "CAD").unwrap();
+        let statement = &monthly.transactions[0];
+        let activity = &activities.transactions[0];
+        assert_eq!(statement.account_id, activity.account_id);
+        assert_eq!(statement.entry.amount, activity.entry.amount);
+        assert_ne!(statement.entry.timestamp, activity.entry.timestamp);
+        assert!(statement.category_quality > activity.category_quality);
+        assert!(activity.date_quality > statement.date_quality);
+        assert!(!activity.has_time);
+        assert_eq!(
+            activity.date_quality,
+            activities.transactions[1].date_quality
+        );
+        assert_ne!(
+            activity.category_quality,
+            activities.transactions[1].category_quality
+        );
     }
 }
