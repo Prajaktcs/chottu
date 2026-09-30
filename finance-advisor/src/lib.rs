@@ -111,7 +111,7 @@ pub struct ResearchRunArtifacts {
     pub finnhub_used: bool,
 }
 
-/// Stage updates for UX (Telegram, logs, etc.).
+/// Stage updates for UX (chat, logs, etc.).
 #[derive(Debug, Clone)]
 pub enum ResearchProgress {
     /// Discovery run: propose → universe → score → judge (4 stages).
@@ -591,7 +591,7 @@ impl StockResearcher {
         let system_prompt = format!(
             "You are a skeptical equity research editor. Multiple analyst models scored the SAME \
              shared ticker universe for an investment philosophy specializing in {}. Focus areas: {}. \
-             Produce a clean Telegram-ready Markdown report with:\n\
+             Produce a clean plain-text report for Signal without Markdown formatting. Include:\n\
              1. Ranked shortlist of 2–3 picks (ONLY tickers from the shared universe — never invent tickers)\n\
              2. For each pick: thesis, catalysts, risks, which scorers supported it\n\
              3. Explicit disagreements between scorers on the same names\n\
@@ -623,7 +623,7 @@ impl StockResearcher {
             ));
         }
         user_prompt.push_str(
-            "Synthesize the final Markdown research memo for the household investment chat.",
+            "Synthesize the final plain-text research memo for the household investment chat.",
         );
 
         client

@@ -136,7 +136,7 @@ fn parse_food_photo_analysis(text: &str) -> Result<FoodPhotoAnalysis, LlmError> 
     Ok(parsed)
 }
 
-/// High-level Telegram free-text intents (v1).
+/// High-level chat free-text intents (v1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum IntentKind {
@@ -380,7 +380,7 @@ impl IntentClassification {
 }
 
 const INTENT_CLASSIFIER_SYSTEM_PROMPT: &str = "\
-You classify short personal-assistant messages from Telegram into exactly one intent.\
+You classify short personal-assistant chat messages into exactly one intent.\
 \
 Intents:\
 - BRIEF: full morning / day-ahead digest (calendar + tasks + bills + nutrition), e.g. \"morning brief\", \"brief me\", \"day ahead digest\".\
@@ -849,7 +849,7 @@ in YYYY-MM-DD form from the email metadata and body.";
             .await
     }
 
-    /// Classifies free-text Telegram messages into a structured user intent.
+    /// Classifies free-text chat messages into a structured user intent.
     pub async fn classify_intent(
         &self,
         text: &str,
@@ -1227,7 +1227,7 @@ Do not include any explanation or markdown formatting outside the JSON block.";
         };
 
         let prompt_text = format!(
-            "You are a professional nutritionist analyzing a Telegram food photo.\n\
+            "You are a professional nutritionist analyzing a food photo sent in chat.\n\
 User caption (may include family member id and portion notes): {caption_line}\n\n\
 Decide what the image shows:\n\
 - BARCODE: a product barcode is clearly readable — set barcode to the digits only.\n\

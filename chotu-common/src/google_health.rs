@@ -1,7 +1,7 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-/// OAuth scopes for Google Health read + nutrition write (Telegram `/food` push).
+/// OAuth scopes for Google Health read + nutrition write (chat `/food` push).
 pub const GOOGLE_HEALTH_OAUTH_SCOPES: &str = concat!(
     "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly ",
     "https://www.googleapis.com/auth/googlehealth.nutrition.readonly ",

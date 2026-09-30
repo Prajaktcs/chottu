@@ -1,4 +1,4 @@
-//! Household category spend budgets: progress, Telegram overrides, and alert dedupe.
+//! Household category spend budgets: progress, chat overrides, and alert dedupe.
 
 use std::collections::HashMap;
 
@@ -141,7 +141,7 @@ pub async fn effective_budgets(
         .collect())
 }
 
-/// Upsert a Telegram override for a category monthly limit.
+/// Upsert a chat override for a category monthly limit.
 pub async fn set_budget_override(
     pool: &SqlitePool,
     category: &str,
@@ -166,7 +166,7 @@ pub async fn set_budget_override(
     Ok(())
 }
 
-/// Remove a Telegram override (falls back to YAML if present).
+/// Remove a chat override (falls back to YAML if present).
 pub async fn clear_budget_override(pool: &SqlitePool, category: &str) -> Result<bool, sqlx::Error> {
     let norm = normalize_category(category);
     let result = sqlx::query("DELETE FROM spend_budget_overrides WHERE lower(category) = ?")

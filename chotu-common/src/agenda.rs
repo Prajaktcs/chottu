@@ -372,7 +372,7 @@ fn format_week_timeline(events: &[CalendarEvent], cap: usize) -> String {
         }
         let day = event_civil_day(ev);
         if day != last_day {
-            // %e pads day-of-month with a space; collapse for Telegram.
+            // %e pads day-of-month with a space; collapse for the chat display.
             // All-day: UTC civil date from Google date-only; timed: local wall clock.
             let heading = if is_all_day(ev) {
                 format!("{}", ev.start.format("%a %b %e"))

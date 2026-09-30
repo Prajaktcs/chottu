@@ -736,7 +736,7 @@ pub async fn answer_memory_query(
     let system_prompt = "\
 You are Chotu's personal memory assistant. Answer ONLY from the retrieved snippets. \
 If insufficient, say so. Cite briefly like [journal: 2026-06-07] or [personal_reference: Title]. \
-Max 120 words. Telegram Markdown sparingly. No preamble.";
+Max 120 words. Use plain text without Markdown formatting. No preamble.";
     let user_prompt = format!("Question: {query}\n\nMemories:\n{context}");
 
     if let Some(llm) = ollama {
