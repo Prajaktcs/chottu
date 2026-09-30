@@ -2502,6 +2502,7 @@ async fn add_manual_task(
             member_id,
             title,
             due_raw,
+            fallback_due: None,
             source_text: args,
         },
         llm,
@@ -2513,6 +2514,8 @@ struct ManualTaskInput<'a> {
     member_id: Option<String>,
     title: String,
     due_raw: Option<String>,
+    /// Classifier date used only if context extraction fails.
+    fallback_due: Option<String>,
     source_text: &'a str,
 }
 
@@ -2530,6 +2533,7 @@ fn prepare_manual_task(
     source: &str,
     extraction: Result<chotu_common::llm::ManualTaskContext, chotu_common::llm::LlmError>,
     tz: chrono_tz::Tz,
+    fallback_due: Option<String>,
 ) -> PreparedManualTask {
     let valid = extraction.ok().filter(|context| {
         !context.title.trim().is_empty()
@@ -2562,7 +2566,7 @@ fn prepare_manual_task(
         None => (
             title,
             None,
-            None,
+            fallback_due,
             Some("Context extraction failed; saved the original task."),
         ),
     };
@@ -2599,6 +2603,7 @@ async fn create_manual_task(
         member_id,
         title,
         due_raw,
+        fallback_due,
         source_text,
     } = input;
     let title = title.trim().to_string();
@@ -2623,6 +2628,7 @@ async fn create_manual_task(
         source_text,
         extraction,
         config.resolved_tz(),
+        fallback_due,
     );
     let title = prepared.title;
     let due_raw = prepared.due_raw;
@@ -5598,7 +5604,7 @@ async fn dispatch_free_text_intent(
         UserIntent::TaskAdd {
             member_id,
             title,
-            due_raw: _,
+            due_raw,
         } => match resolve_task_target(scope, member_id, config) {
             Ok(member_id) => {
                 let explicit_due =
@@ -5612,6 +5618,7 @@ async fn dispatch_free_text_intent(
                         member_id,
                         title,
                         due_raw: explicit_due,
+                        fallback_due: due_raw,
                         source_text: trimmed,
                     },
                     llm,
@@ -7186,7 +7193,7 @@ mod manual_task_context_tests {
     #[test]
     fn appointment_preserves_details_and_uses_toronto_time() {
         let tz = chrono_tz::America::Toronto;
-        let task = prepare_manual_task(SOURCE.into(), None, SOURCE, Ok(appointment()), tz);
+        let task = prepare_manual_task(SOURCE.into(), None, SOURCE, Ok(appointment()), tz, None);
         assert_eq!(
             task.title,
             "Attend dental appointment at HealthOne Dental North York"
@@ -7216,6 +7223,7 @@ mod manual_task_context_tests {
                 SOURCE,
                 Ok(context),
                 chrono_tz::UTC,
+                None,
             );
             assert_eq!(task.due_raw.as_deref(), Some("tomorrow 9am"));
             assert!(task.note.is_none());
@@ -7226,7 +7234,14 @@ mod manual_task_context_tests {
     fn ambiguity_does_not_schedule_a_guessed_date() {
         let mut context = appointment();
         context.ambiguous_due = true;
-        let task = prepare_manual_task(SOURCE.into(), None, SOURCE, Ok(context), chrono_tz::UTC);
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            None,
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            None,
+        );
         assert!(task.due_raw.is_none());
         assert!(task.note.unwrap().contains("ambiguous"));
     }
@@ -7251,11 +7266,57 @@ mod manual_task_context_tests {
                 SOURCE,
                 output,
                 chrono_tz::UTC,
+                None,
             );
             assert_eq!(task.title, SOURCE);
             assert_eq!(task.due_raw.as_deref(), Some("tomorrow"));
             assert!(task.description.ends_with(SOURCE));
             assert!(task.note.unwrap().contains("failed"));
+        }
+    }
+
+    #[test]
+    fn conversational_due_survives_failed_or_invalid_context_extraction() {
+        let source = "remind me to call the dentist tomorrow 3pm";
+        assert!(split_task_add_args(source, &[]).unwrap().2.is_none());
+        let mut invalid = appointment();
+        invalid.title.clear();
+        for output in [Err(LlmError::Client("unavailable".into())), Ok(invalid)] {
+            let task = prepare_manual_task(
+                "call the dentist".into(),
+                None,
+                source,
+                output,
+                chrono_tz::UTC,
+                Some("tomorrow 3pm".into()),
+            );
+            assert_eq!(task.due_raw.as_deref(), Some("tomorrow 3pm"));
+            assert!(task.note.unwrap().contains("failed"));
+        }
+    }
+
+    #[test]
+    fn classifier_fallback_cannot_override_successful_extraction_or_explicit_due() {
+        let mut ambiguous = appointment();
+        ambiguous.ambiguous_due = true;
+        for (output, explicit_due, expected) in [
+            (Ok(appointment()), None, Some("2026-09-30 19:40")),
+            (Ok(ambiguous), None, None),
+            (
+                Err(LlmError::Client("unavailable".into())),
+                Some("friday".into()),
+                Some("friday"),
+            ),
+        ] {
+            let task = prepare_manual_task(
+                SOURCE.into(),
+                explicit_due,
+                SOURCE,
+                output,
+                chrono_tz::UTC,
+                Some("tomorrow 3pm".into()),
+            );
+            assert_eq!(task.due_raw.as_deref(), expected);
         }
     }
 
@@ -7273,6 +7334,7 @@ mod manual_task_context_tests {
             "buy milk",
             Ok(context),
             chrono_tz::UTC,
+            None,
         );
         assert_eq!(task.title, "buy milk");
         assert!(task.due_raw.is_none());
@@ -7284,7 +7346,14 @@ mod manual_task_context_tests {
     fn past_inferred_dates_remain_available_for_existing_rejection() {
         let mut context = appointment();
         context.due_raw = Some("2000-01-01 19:40".into());
-        let task = prepare_manual_task(SOURCE.into(), None, SOURCE, Ok(context), chrono_tz::UTC);
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            None,
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            None,
+        );
         let due = parse_due_phrase_tz(task.due_raw.as_deref().unwrap(), chrono_tz::UTC).unwrap();
         assert!(chrono::DateTime::parse_from_rfc3339(&due.due_at).unwrap() < chrono::Utc::now());
     }
