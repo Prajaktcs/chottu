@@ -128,7 +128,12 @@ enum Command {
 
 struct PendingRequest {
     deadline: Instant,
-    response: oneshot::Sender<Result<Value, SignalError>>,
+    response: PendingResponse,
+}
+
+enum PendingResponse {
+    Caller(oneshot::Sender<Result<Value, SignalError>>),
+    ReceiveSubscription,
 }
 
 enum ReaderEvent {
@@ -274,7 +279,7 @@ async fn run_io_loop(
                 if let Some(current) = writer.as_mut() {
                     let request_id = next_id;
                     next_id = next_id.wrapping_add(1).max(1);
-                    pending.insert(request_id, PendingRequest { deadline, response });
+                    pending.insert(request_id, PendingRequest { deadline, response: PendingResponse::Caller(response) });
                     match tokio::time::timeout_at(
                         deadline,
                         write_request(current, request_id, method, params),
@@ -307,14 +312,16 @@ async fn run_io_loop(
                     ReaderEvent::Frame { generation: event_generation, frame }
                         if event_generation == generation && writer.is_some() =>
                     {
-                        if let Err(error) = dispatch_frame(&frame, &mut pending, &inbound) {
-                            disconnect(
+                        match dispatch_frame(&frame, &mut pending, &inbound) {
+                            Ok(true) => backoff_index = 0,
+                            Ok(false) => {}
+                            Err(error) => disconnect(
                                 &mut writer,
                                 &mut pending,
                                 &mut reconnect_deadline,
                                 &mut backoff_index,
                                 error,
-                            );
+                            ),
                         }
                     }
                     ReaderEvent::Closed { generation: event_generation, error }
@@ -338,18 +345,23 @@ async fn run_io_loop(
                         writer = Some(new_writer);
                         generation = generation.wrapping_add(1);
                         reconnect_deadline = None;
-                        backoff_index = 0;
+                        if !subscription_requested {
+                            backoff_index = 0;
+                        }
                         spawn_reader(reader, events.clone(), generation);
                         if subscription_requested {
-                            // Fire-and-forget: do not park a pending waiter. The oneshot
-                            // receiver would be dropped immediately, so a missing daemon
-                            // reply could leave orphan pending entries across reconnects.
-                            // dispatch_frame already ignores unknown response ids.
+                            // Track the handshake without an abandoned caller waiter.
+                            // Its deadline participates in normal request timeout handling.
                             let request_id = next_id;
                             next_id = next_id.wrapping_add(1).max(1);
+                            let deadline = Instant::now() + request_timeout;
+                            pending.insert(request_id, PendingRequest {
+                                deadline,
+                                response: PendingResponse::ReceiveSubscription,
+                            });
                             let current = writer.as_mut().expect("just connected");
-                            match tokio::time::timeout(
-                                request_timeout,
+                            match tokio::time::timeout_at(
+                                deadline,
                                 write_request(current, request_id, "subscribeReceive", json!({})),
                             ).await {
                                 Ok(Ok(())) => {}
@@ -449,11 +461,12 @@ async fn write_request(
     writer.write_all(&frame).await
 }
 
+// Returns true only when the current reconnect subscription is confirmed.
 fn dispatch_frame(
     frame: &[u8],
     pending: &mut HashMap<u64, PendingRequest>,
     inbound: &broadcast::Sender<SignalInbound>,
-) -> Result<(), SignalError> {
+) -> Result<bool, SignalError> {
     let frame = str::from_utf8(frame)
         .map_err(|error| SignalError::Utf8(error.to_string()))?
         .trim_end_matches(&['\r', '\n'][..]);
@@ -461,10 +474,17 @@ fn dispatch_frame(
         serde_json::from_str(frame).map_err(|error| SignalError::Json(error.to_string()))?;
 
     if message.get("method").and_then(Value::as_str) == Some("receive") {
-        if let Some(receive) = parse_receive(&message)? {
-            let _ = inbound.send(receive);
+        // A reconnected socket is not ready for inbound delivery until the
+        // daemon confirms its receive subscription.
+        if !pending
+            .values()
+            .any(|request| matches!(request.response, PendingResponse::ReceiveSubscription))
+        {
+            if let Some(receive) = parse_receive(&message)? {
+                let _ = inbound.send(receive);
+            }
         }
-        return Ok(());
+        return Ok(false);
     }
 
     let id = message
@@ -472,25 +492,40 @@ fn dispatch_frame(
         .and_then(Value::as_u64)
         .ok_or_else(|| SignalError::Protocol("response did not contain an integer id".into()))?;
     let Some(pending_request) = pending.remove(&id) else {
-        return Ok(());
+        return Ok(false);
     };
-    let waiter = pending_request.response;
-    if let Some(error) = message.get("error") {
+    if matches!(
+        pending_request.response,
+        PendingResponse::ReceiveSubscription
+    ) && (message.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || message.get("result").is_some() == message.get("error").is_some())
+    {
+        return Err(SignalError::Protocol(
+            "malformed receive subscription response".into(),
+        ));
+    }
+    let result = if let Some(error) = message.get("error") {
         let code = error.get("code").and_then(Value::as_i64);
         let message = error
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("unknown signal daemon error")
             .to_string();
-        let _ = waiter.send(Err(SignalError::Rpc {
+        Err(SignalError::Rpc {
             code,
             message,
             data: error.get("data").cloned(),
-        }));
+        })
     } else {
-        let _ = waiter.send(Ok(message.get("result").cloned().unwrap_or(Value::Null)));
+        Ok(message.get("result").cloned().unwrap_or(Value::Null))
+    };
+    match pending_request.response {
+        PendingResponse::Caller(waiter) => {
+            let _ = waiter.send(result);
+            Ok(false)
+        }
+        PendingResponse::ReceiveSubscription => result.map(|_| true),
     }
-    Ok(())
 }
 
 fn parse_receive(message: &Value) -> Result<Option<SignalInbound>, SignalError> {
@@ -609,7 +644,9 @@ fn disconnect(
 ) {
     *writer = None;
     for (_, request) in pending.drain() {
-        let _ = request.response.send(Err(error_for_pending(&error)));
+        if let PendingResponse::Caller(waiter) = request.response {
+            let _ = waiter.send(Err(error_for_pending(&error)));
+        }
     }
     *reconnect_deadline = Some(Instant::now() + RECONNECT_BACKOFF[*backoff_index]);
     *backoff_index = (*backoff_index + 1).min(RECONNECT_BACKOFF.len() - 1);
@@ -772,6 +809,249 @@ mod tests {
         assert_eq!(parse_receive(&message).unwrap(), None);
     }
 
+    async fn send_frame(writer: &mut OwnedWriteHalf, frame: Value) {
+        writer
+            .write_all(format!("{frame}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    fn receive_frame(text: &str) -> Value {
+        json!({
+            "jsonrpc":"2.0", "method":"receive", "params":{"result":{"envelope":{
+                "sourceUuid":"aci-1", "dataMessage":{"message":text}
+            }}}
+        })
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_waits_for_ack_before_inbound_delivery() {
+        let (_dir, listener, path) = socket().await;
+        let (early_tx, early_rx) = oneshot::channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let initial = request(&mut reader).await;
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":initial["id"],"result":{}}),
+            )
+            .await;
+            drop(reader);
+            drop(write);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let subscribe = request(&mut reader).await;
+            assert_eq!(subscribe["method"], "subscribeReceive");
+            assert_ne!(subscribe["id"], initial["id"]);
+            // A response from the previous connection cannot confirm this subscription.
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":initial["id"],"result":{}}),
+            )
+            .await;
+            send_frame(&mut write, receive_frame("before ack")).await;
+            early_tx.send(()).unwrap();
+            ack_rx.await.unwrap();
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":subscribe["id"],"result":{}}),
+            )
+            .await;
+            send_frame(&mut write, receive_frame("after ack")).await;
+        });
+        let client = SignalClient::connect_with_timeout(&path, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut receives = client.subscribe_receive().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), early_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), receives.recv())
+                .await
+                .is_err()
+        );
+        ack_tx.send(()).unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(2), receives.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.text.as_deref(), Some("after ack"));
+        server.await.unwrap();
+    }
+
+    // Keep the failed peer connected: recovery must be driven by its subscription
+    // response (or deadline), rather than an EOF from the daemon.
+    async fn assert_failed_resubscription_recovers(response: Option<Value>) {
+        let (_dir, listener, path) = socket().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let initial = request(&mut reader).await;
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":initial["id"],"result":{}}),
+            )
+            .await;
+            drop(reader);
+            drop(write);
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut failed_write) = stream.into_split();
+            let mut failed_reader = BufReader::new(read);
+            let failed = request(&mut failed_reader).await;
+            assert_eq!(failed["method"], "subscribeReceive");
+            send_frame(&mut failed_write, receive_frame("unconfirmed")).await;
+            if let Some(mut response) = response {
+                response["id"] = failed["id"].clone();
+                send_frame(&mut failed_write, response).await;
+            }
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let retry = request(&mut reader).await;
+            assert_eq!(retry["method"], "subscribeReceive");
+            assert_ne!(retry["id"], failed["id"]);
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":retry["id"],"result":{}}),
+            )
+            .await;
+            send_frame(&mut write, receive_frame("recovered")).await;
+        });
+        let client = SignalClient::connect_with_timeout(&path, Duration::from_millis(200))
+            .await
+            .unwrap();
+        let mut receives = client.subscribe_receive().await.unwrap();
+        let received = tokio::time::timeout(Duration::from_secs(5), receives.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.text.as_deref(), Some("recovered"));
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_failures_back_off_and_ack_resets_delay() {
+        let (_dir, listener, path) = socket().await;
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let initial = request(&mut reader).await;
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":initial["id"],"result":{}}),
+            )
+            .await;
+            drop(reader);
+            drop(write);
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut failed_peers = Vec::new();
+            // Initial disconnection waits one second. Each rejected subscription
+            // must keep advancing the delay instead of resetting it at connect.
+            for delay in [RECONNECT_BACKOFF[1], RECONNECT_BACKOFF[2]] {
+                let (read, mut write) = stream.into_split();
+                let mut reader = BufReader::new(read);
+                let subscribe = request(&mut reader).await;
+                assert_eq!(subscribe["method"], "subscribeReceive");
+                let rejected_at = Instant::now();
+                send_frame(&mut write, json!({"jsonrpc":"2.0","id":subscribe["id"],"error":{"code":-1,"message":"rejected"}})).await;
+                let (next, _) =
+                    tokio::time::timeout(delay + Duration::from_secs(3), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert!(rejected_at.elapsed() >= delay - Duration::from_millis(100));
+                failed_peers.push((reader, write)); // Rejection, not EOF, drives retry.
+                stream = next;
+            }
+
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let subscribe = request(&mut reader).await;
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":subscribe["id"],"result":{}}),
+            )
+            .await;
+            send_frame(&mut write, receive_frame("recovered")).await;
+            drop(reader);
+            drop(write);
+
+            // A confirmed subscription resets the next disconnect to one second,
+            // rather than retaining the eight-second delay from earlier failures.
+            let (stream, _) = tokio::time::timeout(Duration::from_secs(3), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let (read, mut write) = stream.into_split();
+            let mut reader = BufReader::new(read);
+            let subscribe = request(&mut reader).await;
+            send_frame(
+                &mut write,
+                json!({"jsonrpc":"2.0","id":subscribe["id"],"result":{}}),
+            )
+            .await;
+            send_frame(&mut write, receive_frame("reset")).await;
+        });
+        let client = SignalClient::connect_with_timeout(&path, Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut receives = client.subscribe_receive().await.unwrap();
+        for text in ["recovered", "reset"] {
+            let received = tokio::time::timeout(Duration::from_secs(12), receives.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received.text.as_deref(), Some(text));
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_rpc_error_retries() {
+        assert_failed_resubscription_recovers(Some(json!({
+            "jsonrpc":"2.0", "error":{"code":-1,"message":"subscription rejected"}
+        })))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_missing_result_retries() {
+        assert_failed_resubscription_recovers(Some(json!({"jsonrpc":"2.0"}))).await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_invalid_version_retries() {
+        assert_failed_resubscription_recovers(Some(json!({"jsonrpc":"1.0","result":{}}))).await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_ambiguous_response_retries() {
+        assert_failed_resubscription_recovers(Some(json!({
+            "jsonrpc":"2.0", "result":{}, "error":{"code":-1,"message":"rejected"}
+        })))
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reconnect_subscription_timeout_retries() {
+        assert_failed_resubscription_recovers(None).await;
+    }
+
     #[tokio::test]
     async fn silent_peer_times_out_and_next_request_recovers_after_reconnect() {
         let (_dir, listener, path) = socket().await;
@@ -842,14 +1122,14 @@ mod tests {
                 1,
                 PendingRequest {
                     deadline,
-                    response: first_tx,
+                    response: PendingResponse::Caller(first_tx),
                 },
             ),
             (
                 2,
                 PendingRequest {
                     deadline,
-                    response: second_tx,
+                    response: PendingResponse::Caller(second_tx),
                 },
             ),
         ]);

@@ -4622,11 +4622,15 @@ async fn handle_monthly(
 
     for entry in &entries {
         let amt = config.convert_to_base(entry.amount, &entry.currency, &rates);
-        if entry.category.to_lowercase() == "income" {
+        if entry.category.trim().eq_ignore_ascii_case("income") {
             total_income += amt;
         } else {
-            total_spend += amt;
-            *category_totals.entry(entry.category.clone()).or_insert(0.0) += amt;
+            let spend =
+                chotu_common::expense_contribution(amt, &entry.source_type, &entry.category);
+            total_spend += spend;
+            if spend != 0.0 {
+                *category_totals.entry(entry.category.clone()).or_insert(0.0) += spend;
+            }
         }
     }
 
@@ -4663,7 +4667,7 @@ async fn handle_monthly(
     msg.push_str("\n*Largest Transactions:*\n");
     let mut spend_entries: Vec<&chotu_common::FinancialLedgerEntry> = entries
         .iter()
-        .filter(|e| e.category.to_lowercase() != "income")
+        .filter(|e| chotu_common::expense_contribution(e.amount, &e.source_type, &e.category) > 0.0)
         .collect();
     spend_entries.sort_by(|a, b| {
         let a_base = config.convert_to_base(a.amount, &a.currency, &rates).abs();
@@ -4674,7 +4678,11 @@ async fn handle_monthly(
     });
 
     for entry in spend_entries.iter().take(5) {
-        let amt_base = config.convert_to_base(entry.amount, &entry.currency, &rates);
+        let amt_base = config.convert_to_base(
+            chotu_common::expense_contribution(entry.amount, &entry.source_type, &entry.category),
+            &entry.currency,
+            &rates,
+        );
         msg.push_str(&format!(
             "  - {}: ${:.2} {} at *{}*\n",
             entry.category, amt_base, base, entry.merchant

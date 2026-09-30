@@ -65,8 +65,8 @@ pub use google_health::{
     NutritionLogWrite, GOOGLE_HEALTH_OAUTH_SCOPES,
 };
 pub use ledger::{
-    looks_like_non_transaction_alert, validate_ledger_amount, LedgerAmountReject,
-    LEDGER_ABS_AMOUNT_HARD_MAX, LEDGER_USD_EQUIV_MAX,
+    expense_contribution, looks_like_non_transaction_alert, validate_ledger_amount,
+    LedgerAmountReject, LEDGER_ABS_AMOUNT_HARD_MAX, LEDGER_USD_EQUIV_MAX,
 };
 pub use llm::{
     ActionItemExtraction, ChotuLlm, FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind, GeminiClient,

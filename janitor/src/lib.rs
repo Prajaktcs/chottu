@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+pub mod csv_import;
 mod parser;
 mod watcher;
 
@@ -165,45 +166,14 @@ async fn process_dropped_file(
     match ext.as_str() {
         "csv" => {
             println!("CSV file detected. Initiating parsing: {}", filename);
-            let entries =
-                parser::parse_csv_file(path, default_currency).context("CSV parsing failure")?;
-
+            let stats = csv_import::import_csv_file(path, pool, default_currency)
+                .await
+                .context("CSV import failure")?;
             println!(
-                "Parsed {} transactions from CSV. Saving to database...",
-                entries.len()
+                "Imported {} source rows: {} new transactions, {} overlapping rows, {} metadata updates, {} blank rows, {} non-posted rows skipped.",
+                stats.source_rows, stats.inserted, stats.matched, stats.updated, stats.blank_rows,
+                stats.non_posted_rows
             );
-            let mut inserted_count = 0;
-
-            for entry in entries {
-                if let Err(reason) =
-                    chotu_common::validate_ledger_amount(entry.amount, &entry.currency)
-                {
-                    println!(
-                        "Skipping CSV row {} ({} {}): {}",
-                        entry.merchant, entry.amount, entry.currency, reason
-                    );
-                    continue;
-                }
-                let res = sqlx::query(
-                    "INSERT OR IGNORE INTO financial_ledger (id, timestamp, amount, currency, institution, merchant, category, source_type) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-                )
-                .bind(&entry.id)
-                .bind(entry.timestamp)
-                .bind(entry.amount)
-                .bind(&entry.currency)
-                .bind(&entry.institution)
-                .bind(&entry.merchant)
-                .bind(&entry.category)
-                .bind(&entry.source_type)
-                .execute(pool)
-                .await?;
-
-                if res.rows_affected() > 0 {
-                    inserted_count += 1;
-                }
-            }
-
-            println!("Successfully inserted {} new transactions into financial_ledger (duplicates ignored).", inserted_count);
 
             // Move to archive
             watcher::safe_archive_file(path, archive_dir)
