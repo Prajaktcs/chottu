@@ -6,7 +6,7 @@ use chrono::Local;
 use sqlx::SqlitePool;
 
 use crate::agenda::escape_md;
-use crate::{fetch_exchange_rates, AppConfig};
+use crate::{expense_contribution, fetch_exchange_rates, AppConfig};
 
 pub const BUDGET_THRESHOLDS: [i32; 2] = [80, 100];
 
@@ -181,6 +181,7 @@ struct LedgerSpendRow {
     amount: f64,
     currency: String,
     category: String,
+    source_type: String,
 }
 
 async fn category_spend_for_month(
@@ -190,7 +191,7 @@ async fn category_spend_for_month(
     rates: &HashMap<String, f64>,
 ) -> Result<HashMap<String, f64>, sqlx::Error> {
     let entries: Vec<LedgerSpendRow> = sqlx::query_as(
-        "SELECT amount, currency, category \
+        "SELECT amount, currency, category, source_type \
          FROM financial_ledger \
          WHERE strftime('%Y-%m', timestamp) = ?",
     )
@@ -204,10 +205,14 @@ async fn category_spend_for_month(
         if norm.is_empty() || norm == "income" {
             continue;
         }
-        let amt = config
-            .convert_to_base(entry.amount, &entry.currency, rates)
-            .abs();
-        *totals.entry(norm).or_insert(0.0) += amt;
+        let amt = config.convert_to_base(
+            expense_contribution(entry.amount, &entry.source_type, &entry.category),
+            &entry.currency,
+            rates,
+        );
+        if amt != 0.0 {
+            *totals.entry(norm).or_insert(0.0) += amt;
+        }
     }
     Ok(totals)
 }
@@ -389,55 +394,131 @@ mod tests {
         assert_eq!(display_category("ENTERTAINMENT"), "Entertainment");
     }
 
-    #[test]
-    fn format_progress_empty() {
-        let md = format_budget_progress_markdown("2026-08", "CAD", &[]);
-        assert!(md.contains("No category budgets"));
+    #[tokio::test]
+    async fn no_configured_budgets_produce_no_progress_or_alerts() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE spend_budget_overrides (category TEXT, limit_amount REAL);
+             CREATE TABLE financial_ledger (timestamp TEXT, amount REAL, currency TEXT, category TEXT, source_type TEXT);
+             CREATE TABLE spend_budget_alerts (month TEXT, category TEXT, threshold INTEGER, sent_at TEXT)",
+        )
+            .execute(&pool)
+            .await
+            .unwrap();
+        let config = AppConfig::default();
+        let progress = compute_budget_progress(&pool, &config, "2026-08")
+            .await
+            .unwrap();
+        assert!(progress.is_empty());
+        let display = format_budget_progress_markdown("2026-08", "CAD", &progress);
+        assert!(display.contains("/budget set"));
+        assert!(pending_budget_alerts(&pool, &config, "2026-08")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn format_progress_flags() {
-        let rows = vec![
-            BudgetProgress {
+    fn progress_status_changes_at_watch_and_limit_boundaries() {
+        for (pct, watch, over) in [
+            (79.99, false, false),
+            (80.0, true, false),
+            (99.99, true, false),
+            (100.0, false, true),
+            (100.01, false, true),
+        ] {
+            let row = BudgetProgress {
                 category: "Food".into(),
-                spent: 710.0,
-                limit: 800.0,
-                pct: 88.75,
-            },
-            BudgetProgress {
-                category: "Shopping".into(),
-                spent: 120.0,
-                limit: 400.0,
-                pct: 30.0,
-            },
-        ];
-        let md = format_budget_progress_markdown("2026-08", "CAD", &rows);
-        assert!(md.contains("watch"));
-        assert!(md.contains("Food"));
-        assert!(md.contains("Shopping"));
+                spent: pct,
+                limit: 100.0,
+                pct,
+            };
+            let display = format_budget_progress_markdown("2026-08", "CAD", &[row]);
+            assert_eq!(display.contains("watch"), watch, "pct={pct}");
+            assert_eq!(display.contains("over"), over, "pct={pct}");
+        }
     }
 
     #[test]
-    fn format_alert_messages() {
-        let watch = BudgetAlert {
-            category: "Food".into(),
-            spent: 710.0,
-            limit: 800.0,
-            pct: 89.0,
-            threshold: 80,
-        };
-        let md = watch.format_markdown("CAD");
-        assert!(md.contains("left"));
-        assert!(md.contains("Food"));
+    fn alert_display_reports_remaining_and_overage_amounts_at_boundaries() {
+        for (spent, threshold, expected_amounts) in [
+            (640.0, 80, vec![640, 800, 160]),
+            (800.0, 100, vec![800, 800]),
+            (850.0, 100, vec![850, 800, 50]),
+        ] {
+            let alert = BudgetAlert {
+                category: "Food".into(),
+                spent,
+                limit: 800.0,
+                pct: spent / 800.0 * 100.0,
+                threshold,
+            };
+            let display = alert.format_markdown("CAD");
+            let amounts: Vec<u32> = display
+                .split('$')
+                .skip(1)
+                .map(|part| {
+                    part.split(|c: char| !c.is_ascii_digit())
+                        .next()
+                        .unwrap()
+                        .parse()
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(amounts, expected_amounts, "spent={spent}");
+        }
+    }
 
-        let over = BudgetAlert {
-            category: "Food".into(),
-            spent: 850.0,
-            limit: 800.0,
-            pct: 106.0,
-            threshold: 100,
-        };
-        let md = over.format_markdown("CAD");
-        assert!(md.contains("over by"));
+    #[tokio::test]
+    async fn category_spend_nets_csv_refunds_and_preserves_legacy_expenses() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE financial_ledger (
+                timestamp TEXT, amount REAL, currency TEXT, category TEXT, source_type TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = AppConfig::default();
+        for (amount, category, source, timestamp) in [
+            (-120.0, "Food", "CSV_IMPORT", "2026-08-01"),
+            (25.0, "Food", "CSV_IMPORT", "2026-08-02"),
+            (30.0, "Food", "EMAIL_STREAM", "2026-08-03"),
+            (-10.0, "Food", "BATCH_DROP", "2026-08-04"),
+            (-500.0, "Transfer", "CSV_IMPORT", "2026-08-05"),
+            (-600.0, "Investment", "CSV_IMPORT", "2026-08-06"),
+            (1000.0, "Income", "CSV_IMPORT", "2026-08-07"),
+            (-900.0, "Food", "CSV_IMPORT", "2026-07-31"),
+        ] {
+            sqlx::query(
+                "INSERT INTO financial_ledger
+                 (timestamp, amount, currency, category, source_type) VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(timestamp)
+            .bind(amount)
+            .bind(config.currency())
+            .bind(category)
+            .bind(source)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let totals = category_spend_for_month(&pool, &config, "2026-08", &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(totals["food"], 135.0);
+        assert_eq!(totals.values().sum::<f64>(), 135.0);
+        assert!(!totals.contains_key("income"));
+        assert!(!totals.contains_key("transfer"));
+        assert!(!totals.contains_key("investment"));
     }
 }
