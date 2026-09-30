@@ -15,6 +15,8 @@ Ledger rows come from email triage (Streamer) and `~/chotu_drop/` imports (Janit
 
 Spend summary for the month in your `config.yaml` base currency. Includes budget progress when `spend_budgets` (or `/budget set` overrides) exist.
 
+CSV spending is purchases minus refunds. Credit-card payments, account transfers, FX exchanges, and investment trades are excluded from household spending; income is reported separately. Email and receipt entries retain their existing positive-expense convention.
+
 Plain text: `monthly spend`.
 
 ---

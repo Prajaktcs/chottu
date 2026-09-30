@@ -147,6 +147,28 @@ Streamer before Gmail OAuth or IMAP connection. Existing installs default to
 
 Drop folder for CSV/PDF ingest: `~/chotu_drop/` (created by setup / janitor).
 
+CSV imports recognize Wealthsimple credit-card statements, already-signed card activities, monthly account statements, and multi-account activity exports from their columns. Generic CSVs must supply signed cash-flow amounts. New CSV ledger rows use `CSV_IMPORT`: outflows are negative, inflows positive. Real spending categories take precedence over transaction/account types; merchantless card payments are retained as transfers.
+
+Account statements need the account ID in their filename, or an explicit account column. Activity exports retain account IDs and effective times; timestamps without a timezone are stored as UTC. Overlapping exports reuse transactions, while repeated rows within one source remain separate. Statement posting/execution dates bridge the supported statement/activity formats. Without transaction IDs or times, overlapping date-only exports are reconciled by occurrence count: import complete exports for each covered date, not disjoint partial slices of identical transactions.
+
+### Repair historical CSV imports
+
+Rehearse on a database copy before repairing the live ledger:
+
+```sh
+cargo run -p janitor --bin repair-csv-ledger -- \
+  --apply --database chotu.db --archive "$HOME/chotu_drop/archive" \
+  --backup chotu.before-csv-repair.db --currency CAD
+```
+
+Use the configured base currency for `--currency`. The command creates a consistent SQLite backup including committed WAL contents and refuses to overwrite an existing backup. It validates every archived CSV before a single atomic rebuild, removing only legacy CSV records identified by source hashes. Email/receipt records and unrelated tables stay untouched. Reruns reconcile existing corrected rows rather than adding duplicates; use a new backup filename each time.
+
+To roll back, stop Chotu before restoring the backup with SQLite's `.restore` command; do not copy over a database while its WAL is open:
+
+```sh
+sqlite3 chotu.db ".restore chotu.before-csv-repair.db"
+```
+
 ---
 
 ## What degrades gracefully

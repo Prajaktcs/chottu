@@ -1,5 +1,22 @@
 //! Guards for financial_ledger inserts — blocks absurd / non-transaction parses.
 
+/// Household spending contribution, preserving legacy positive-expense records.
+/// Signed CSV inflows reduce spending; income and asset movements never count.
+pub fn expense_contribution(amount: f64, source_type: &str, category: &str) -> f64 {
+    let category = category.trim();
+    if category.eq_ignore_ascii_case("income")
+        || category.eq_ignore_ascii_case("transfer")
+        || category.eq_ignore_ascii_case("investment")
+    {
+        return 0.0;
+    }
+    if source_type == "CSV_IMPORT" {
+        -amount
+    } else {
+        amount.abs()
+    }
+}
+
 /// Absolute raw-amount ceiling (any currency). Catches volume/balance hallucinations.
 pub const LEDGER_ABS_AMOUNT_HARD_MAX: f64 = 1_000_000.0;
 
@@ -102,6 +119,52 @@ pub fn looks_like_non_transaction_alert(subject: &str, body_preview: Option<&str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn signed_csv_refunds_net_against_purchases() {
+        let purchase = expense_contribution(-120.0, "CSV_IMPORT", "Food");
+        let refund = expense_contribution(25.0, "CSV_IMPORT", "Food");
+        assert_eq!(purchase, 120.0);
+        assert_eq!(refund, -25.0);
+        assert_eq!(purchase + refund, 95.0);
+    }
+
+    #[test]
+    fn household_spend_excludes_income_and_asset_movements() {
+        for source in ["CSV_IMPORT", "EMAIL_STREAM", "BATCH_DROP"] {
+            for category in [" Income ", "TRANSFER", "investment"] {
+                for amount in [-200.0, 200.0] {
+                    assert_eq!(expense_contribution(amount, source, category), 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn legacy_expenses_preserve_absolute_amount_convention() {
+        for source in ["EMAIL_STREAM", "BATCH_DROP"] {
+            assert_eq!(expense_contribution(40.0, source, "Food"), 40.0);
+            assert_eq!(expense_contribution(-40.0, source, "Food"), 40.0);
+        }
+    }
+    #[test]
+    fn largest_expense_candidates_exclude_refunds_and_asset_movements() {
+        let rows = [
+            (-120.0, "CSV_IMPORT", "Food"),
+            (25.0, "CSV_IMPORT", "Food"),
+            (-500.0, "CSV_IMPORT", "Transfer"),
+            (-600.0, "CSV_IMPORT", "Investment"),
+            (1000.0, "CSV_IMPORT", "Income"),
+            (40.0, "EMAIL_STREAM", "Food"),
+            (-10.0, "BATCH_DROP", "Food"),
+        ];
+        let expenses: Vec<f64> = rows
+            .iter()
+            .map(|(amount, source, category)| expense_contribution(*amount, source, category))
+            .filter(|amount| *amount > 0.0)
+            .collect();
+        assert_eq!(expenses, vec![120.0, 40.0, 10.0]);
+    }
+
     use super::*;
 
     #[test]
