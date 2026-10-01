@@ -82,7 +82,7 @@ Smaller 3–4B models work but misclassify more often; prefer `qwen3.5:9b` when 
 | Service | Env | Required? | Powers |
 | :--- | :--- | :--- | :--- |
 | Gemini | `GEMINI_API_KEY` | **Required for Signal (`just run`)** | Primary food-photo vision, PDF ingest, some nutrition parsing. Health Coach scheduled sync can still run without multimodal Gemini fills. |
-| OpenRouter | `OPENROUTER_API_KEY` | Optional for food photos; required for `/research` | Qwen3.8 Max vision analyzes the original photo if Gemini fails (including photos without captions); also powers the `/research` panel. Without the key, failed Gemini photos report an error. |
+| OpenRouter | `OPENROUTER_API_KEY` | Optional for text meals and food photos; required for `/research` | Qwen3.8 Max estimates text meals or analyzes the original photo if Gemini fails (including photos without captions); also powers the `/research` panel. Without the key, failed Gemini nutrition requests report that the fallback is unavailable. |
 | Finnhub | `FINNHUB_API_KEY` | Optional | Market-cap filter on research universe; without it, model-estimated bands are used. |
 
 Optional research overrides:

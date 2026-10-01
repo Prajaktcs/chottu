@@ -55,7 +55,7 @@ recommend treatment. Lag-aware associations are still upcoming.
 /food praj yesterday's dinner pasta
 ```
 
-Defaults member to the linked DM. Relative day/time phrases are resolved via local Ollama before logging; nutrients often go through Gemini when configured. Pushes to Google Health when that member is linked.
+Defaults member to the linked DM. Relative day/time phrases are resolved via local Ollama before logging. Nutrition estimates use Gemini, falling back to OpenRouter Qwen (`OPENROUTER_API_KEY`) if Gemini fails. Without the OpenRouter key, a failed Gemini estimate reports that the fallback is unavailable. Pushes to Google Health when that member is linked.
 
 **Looks like**
 

@@ -1409,6 +1409,15 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         &self,
         food_description: &str,
     ) -> Result<NutritionEstimation, LlmError> {
+        self.approximate_nutrition_with_fallback(food_description, OpenRouterClient::from_env)
+            .await
+    }
+
+    async fn approximate_nutrition_with_fallback(
+        &self,
+        food_description: &str,
+        openrouter: impl FnOnce() -> Result<OpenRouterClient, LlmError>,
+    ) -> Result<NutritionEstimation, LlmError> {
         let system_prompt = format!(
             "You are a professional nutritionist. Analyze the food description provided by the user, estimate its calories, macronutrients (protein, carbs, fat in grams), and key micronutrients: \
              omega-3 DHA (mg), cholesterol (mg), saturated fat (g), unsaturated fat (g), triglycerides (mg), iron (mg), vitamin B's (mg), vitamin C (mg), \
@@ -1424,10 +1433,29 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             .preamble(&system_prompt)
             .build();
 
-        let response = extractor
-            .extract(&user_prompt)
-            .await
-            .map_err(|e| LlmError::Client(e.to_string()))?;
+        let response = match extractor.extract(&user_prompt).await {
+            Ok(response) => response,
+            Err(gemini_error) => {
+                eprintln!("Gemini text nutrition failed; trying OpenRouter: {gemini_error}");
+                let openrouter = openrouter().map_err(|e| {
+                    LlmError::Client(format!(
+                        "Gemini text nutrition failed: {gemini_error}; OpenRouter fallback unavailable: {e}"
+                    ))
+                })?;
+                openrouter
+                    .generate_structured::<NutritionEstimation>(
+                        "qwen/qwen3.8-max-0902",
+                        &system_prompt,
+                        &user_prompt,
+                    )
+                    .await
+                    .map_err(|fallback_error| {
+                        LlmError::Client(format!(
+                            "Gemini text nutrition failed: {gemini_error}; OpenRouter text nutrition failed: {fallback_error}"
+                        ))
+                    })?
+            }
+        };
 
         Ok(sanitize_nutrition_tags(response))
     }
@@ -1745,6 +1773,123 @@ mod tests {
             (headers, payload)
         });
         (url, server)
+    }
+
+    #[tokio::test]
+    async fn text_nutrition_falls_back_to_openrouter_after_gemini_503() {
+        let (gemini_base, gemini_server) = mock_photo_endpoint(
+            503,
+            r#"{"error":{"code":503,"message":"This model is currently experiencing high demand","status":"UNAVAILABLE"}}"#.into(),
+        )
+        .await;
+        let mut nutrition = serde_json::from_str::<serde_json::Value>(FOOD_PHOTO_JSON).unwrap()
+            ["nutrition"]
+            .clone();
+        nutrition["tags"] = serde_json::json!(["fried", "invented_tag"]);
+        let response = serde_json::json!({
+            "id": "test", "object": "chat.completion", "created": 0,
+            "model": "qwen/qwen3.8-max-0902",
+            "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": null,
+                "tool_calls": [{"id": "test", "type": "function", "function": {
+                    "name": "submit", "arguments": nutrition.to_string()
+                }}]
+            }}]
+        });
+        let (router_base, router_server) = mock_photo_endpoint(200, response.to_string()).await;
+        let gemini = GeminiClient::with_base_url("gemini-test".into(), gemini_base);
+        let description = "Nashville hot chicken sub one and half 6 inch";
+        let estimate = gemini
+            .approximate_nutrition_with_fallback(description, || {
+                Ok(OpenRouterClient {
+                    client: openrouter::Client::builder()
+                        .api_key("router-secret")
+                        .base_url(&router_base)
+                        .build()
+                        .unwrap(),
+                    api_key: "router-secret".into(),
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(estimate.total_calories, 200);
+        assert_eq!(estimate.tags, vec!["fried"]);
+        let (_, gemini_payload) = gemini_server.await.unwrap();
+        assert!(gemini_payload.to_string().contains(description));
+        let (headers, payload) = router_server.await.unwrap();
+        assert!(headers
+            .to_ascii_lowercase()
+            .contains("authorization: bearer router-secret"));
+        assert_eq!(payload["model"], "qwen/qwen3.8-max-0902");
+        assert_eq!(payload["tool_choice"], "auto");
+        assert!(payload.to_string().contains(description));
+        assert!(payload.to_string().contains("sodium_mg"));
+    }
+
+    #[tokio::test]
+    async fn text_nutrition_does_not_use_openrouter_on_gemini_success() {
+        let nutrition = serde_json::from_str::<serde_json::Value>(FOOD_PHOTO_JSON).unwrap()
+            ["nutrition"]
+            .clone();
+        let response = serde_json::json!({
+            "responseId": "test",
+            "candidates": [{"content": {"role": "model", "parts": [{
+                "functionCall": {"name": "submit", "args": nutrition}
+            }]}}]
+        });
+        let (base, server) = mock_photo_endpoint(200, response.to_string()).await;
+        let gemini = GeminiClient::with_base_url("gemini-test".into(), base);
+        let estimate = gemini
+            .approximate_nutrition_with_fallback("2 eggs", || {
+                panic!("fallback used on Gemini success")
+            })
+            .await
+            .unwrap();
+        assert_eq!(estimate.total_calories, 200);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_nutrition_reports_missing_openrouter_key_after_gemini_failure() {
+        let (base, server) = mock_photo_endpoint(503, "busy".into()).await;
+        let gemini = GeminiClient::with_base_url("gemini-test".into(), base);
+        let result = gemini
+            .approximate_nutrition_with_fallback("2 eggs", || {
+                Err(LlmError::Client(
+                    "OPENROUTER_API_KEY environment variable is not set".into(),
+                ))
+            })
+            .await;
+        assert!(matches!(result, Err(LlmError::Client(message))
+            if message.contains("Gemini text nutrition failed")
+                && message.contains("OpenRouter fallback unavailable")
+                && message.contains("OPENROUTER_API_KEY")));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn text_nutrition_reports_both_provider_failures() {
+        let (base, server) = mock_photo_endpoint(503, "busy".into()).await;
+        let (router_base, router_server) =
+            mock_photo_endpoint(401, r#"{"error":{"message":"bad credentials"}}"#.into()).await;
+        let gemini = GeminiClient::with_base_url("gemini-test".into(), base);
+        let result = gemini
+            .approximate_nutrition_with_fallback("2 eggs", || {
+                Ok(OpenRouterClient {
+                    client: openrouter::Client::builder()
+                        .api_key("router-secret")
+                        .base_url(&router_base)
+                        .build()
+                        .unwrap(),
+                    api_key: "router-secret".into(),
+                })
+            })
+            .await;
+        assert!(matches!(result, Err(LlmError::Client(message))
+            if message.contains("Gemini text nutrition failed")
+                && message.contains("OpenRouter text nutrition failed")));
+        server.await.unwrap();
+        router_server.await.unwrap();
     }
 
     #[tokio::test]
