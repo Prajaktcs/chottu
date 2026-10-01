@@ -1290,7 +1290,7 @@ async fn log_food_for_member(
             .await?;
         }
         Err(e) => {
-            eprintln!("Gemini client error: {:?}", e);
+            eprintln!("Nutrition estimation error: {:?}", e);
             send_signal(
                 &bot,
                 chat_id,
