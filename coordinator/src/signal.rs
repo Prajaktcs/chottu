@@ -2529,7 +2529,7 @@ struct PreparedManualTask {
 
 fn prepare_manual_task(
     title: String,
-    explicit_due: Option<String>,
+    mut explicit_due: Option<String>,
     source: &str,
     extraction: Result<chotu_common::llm::ManualTaskContext, chotu_common::llm::LlmError>,
     tz: chrono_tz::Tz,
@@ -2549,6 +2549,12 @@ fn prepare_manual_task(
                     normalized && parse_due_phrase_tz(raw, tz).is_some()
                 }))
     });
+    if valid
+        .as_ref()
+        .is_some_and(|context| context.due_marker_is_prose)
+    {
+        explicit_due = None;
+    }
     let (title, details, inferred_due, note) = match valid {
         Some(context) => (
             context.title.trim().to_string(),
@@ -2631,6 +2637,7 @@ async fn create_manual_task(
             source_text,
             &config.now_in_tz().format("%Y-%m-%d").to_string(),
             &config.resolved_timezone_name(),
+            due_raw.as_deref(),
         ),
     )
     .await;
@@ -7199,6 +7206,7 @@ mod manual_task_context_tests {
             details: Some("5292 Yonge St, North York, ON. Changes require 2 business days’ notice; cancellations or reschedules incur a $75 fee.".into()),
             due_raw: Some("2026-09-30 19:40".into()),
             ambiguous_due: false,
+            due_marker_is_prose: false,
         }
     }
 
@@ -7378,12 +7386,55 @@ mod manual_task_context_tests {
     }
 
     #[test]
+    fn appointment_policy_markers_do_not_override_primary_time() {
+        for source in [
+            "appointment on 2026-10-05 10:00; cancel by 2026-10-03",
+            "appointment on 2026-10-05 10:00; balance due at visit",
+        ] {
+            let explicit_due = split_task_add_args(source, &[]).unwrap().2;
+            assert!(explicit_due.is_some());
+            let mut context = appointment();
+            context.due_raw = Some("2026-10-05 10:00".into());
+            context.details = Some(source.into());
+            context.due_marker_is_prose = true;
+            let task = prepare_manual_task(
+                source.into(),
+                explicit_due,
+                source,
+                Ok(context),
+                chrono_tz::UTC,
+                None,
+            );
+            assert_eq!(task.due_raw.as_deref(), Some("2026-10-05 10:00"));
+            assert!(task.description.contains(source));
+        }
+    }
+
+    #[test]
+    fn prose_due_marker_cannot_override_ambiguous_primary_time() {
+        let mut context = appointment();
+        context.ambiguous_due = true;
+        context.due_marker_is_prose = true;
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            Some("2026-10-03".into()),
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            Some("2026-10-03".into()),
+        );
+        assert!(task.due_raw.is_none());
+        assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
     fn simple_task_has_no_invented_due_or_details() {
         let context = ManualTaskContext {
             title: "buy milk".into(),
             details: None,
             due_raw: None,
             ambiguous_due: false,
+            due_marker_is_prose: false,
         };
         let task = prepare_manual_task(
             "buy milk".into(),
