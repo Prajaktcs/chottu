@@ -15,19 +15,19 @@ pub async fn build_nutrition_trend_reports(
     only_member_id: Option<&str>,
 ) -> Result<Vec<String>> {
     let days = days.clamp(2, 90);
-    let start_date = (chrono::Local::now() - chrono::Duration::days(days - 1))
-        .format("%Y-%m-%d")
-        .to_string();
+    let today = config.now_in_tz().date_naive();
+    let (start_date, end_date) = trend_dates(today, days);
 
     let rows = sqlx::query_as::<_, HealthFamilySummary>(
         r#"
         SELECT *
         FROM health_family_summary
-        WHERE date >= ?
+        WHERE date BETWEEN ? AND ?
         ORDER BY date ASC
         "#,
     )
     .bind(&start_date)
+    .bind(&end_date)
     .fetch_all(pool)
     .await
     .context("Failed to query health_family_summary for trends")?;
@@ -46,10 +46,47 @@ pub async fn build_nutrition_trend_reports(
             .collect();
 
         if member_rows.is_empty() {
-            reports.push(format!(
+            let mut report = format!(
                 "📈 *Nutrition Trends: {}* (last {} days)\n\n_No health summaries logged in this window._",
                 member.name, days
-            ));
+            );
+            let ctx = NutritionCoachContext::from_trend_averages(
+                &member.name,
+                days,
+                0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                None,
+                member.nutrition_goals.as_ref(),
+                "→",
+                "→",
+                "→",
+            );
+            let ctx = crate::coach_enrich::enrich_coach_context(
+                pool,
+                config,
+                &member.id,
+                ctx,
+                crate::coach_enrich::CoachEnrichOpts::for_trends(&start_date, &end_date)
+                    .with_private_member(only_member_id),
+            )
+            .await;
+            for condition in &ctx.conditions {
+                if let Some((date, score)) = condition.scores.last() {
+                    report.push_str(&format!(
+                        "\n• Reported symptoms — {}: {}/5 ({})",
+                        condition.label, score, date
+                    ));
+                }
+            }
+            if let Some(llm) = llm {
+                append_coach_tip(llm, &ctx, &mut report).await;
+            }
+            reports.push(report);
             continue;
         }
 
@@ -144,29 +181,19 @@ pub async fn build_nutrition_trend_reports(
         msg.push_str("```\n");
 
         if let Some(llm) = llm {
-            let ctx = NutritionCoachContext::from_trend_averages(
+            let ctx = NutritionCoachContext::from_trend_summaries(
                 &member.name,
                 days,
-                member_rows.len(),
-                avg_cal,
-                avg_protein,
-                avg_carbs,
-                avg_fats,
-                avg_fiber,
-                avg_steps,
-                avg_sleep,
+                &member_rows,
                 goals,
-                cal_trend,
-                protein_trend,
-                steps_trend,
             );
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
             let ctx = crate::coach_enrich::enrich_coach_context(
                 pool,
                 config,
                 &member.id,
                 ctx,
-                crate::coach_enrich::CoachEnrichOpts::for_trends(&start_date, &today),
+                crate::coach_enrich::CoachEnrichOpts::for_trends(&start_date, &end_date)
+                    .with_private_member(only_member_id),
             )
             .await;
             append_coach_tip(llm, &ctx, &mut msg).await;
@@ -179,7 +206,16 @@ pub async fn build_nutrition_trend_reports(
 }
 
 /// Compare first-half average vs second-half average of a series.
-fn trend_arrow(series: &[f64]) -> &'static str {
+fn trend_dates(today: chrono::NaiveDate, days: i64) -> (String, String) {
+    (
+        (today - chrono::Duration::days(days - 1))
+            .format("%Y-%m-%d")
+            .to_string(),
+        today.format("%Y-%m-%d").to_string(),
+    )
+}
+
+pub(crate) fn trend_arrow(series: &[f64]) -> &'static str {
     if series.len() < 2 {
         return "→";
     }
@@ -207,6 +243,41 @@ fn spark_bar(value: f64, series: &[f64]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trend_dates_count_civil_days_across_spring_forward() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-09T04:30:00Z")
+            .unwrap()
+            .with_timezone(&chrono_tz::America::Toronto);
+        assert_eq!(
+            trend_dates(now.date_naive(), 2),
+            ("2026-03-08".into(), "2026-03-09".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn symptom_only_trends_are_private_and_not_skipped() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let mut config = AppConfig::default();
+        config.family.members[0].health_conditions = vec![chotu_common::HealthCondition {
+            id: "skin".into(),
+            label: "Skin symptoms".into(),
+            check_in: true,
+            lag_window: [1, 3],
+            notes: None,
+        }];
+        let date = config.now_in_tz().format("%Y-%m-%d").to_string();
+        sqlx::query("INSERT INTO condition_checkin (family_member_id, condition_id, date, score) VALUES ('alex', 'skin', ?, 0)").bind(&date).execute(&pool).await.unwrap();
+        let private = build_nutrition_trend_reports(&pool, &config, 7, None, Some("alex"))
+            .await
+            .unwrap();
+        assert!(private[0].contains("Skin symptoms: 0/5"));
+        let household = build_nutrition_trend_reports(&pool, &config, 7, None, None)
+            .await
+            .unwrap();
+        assert!(!household[0].contains("Skin symptoms"));
+        assert!(!household[0].contains("Reported symptoms"));
+    }
 
     #[test]
     fn test_trend_arrow_up() {

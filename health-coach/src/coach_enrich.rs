@@ -1,20 +1,22 @@
 //! Load plan/exercises and attach them to [`FitnessCoachContext`].
 
 use chotu_common::{AppConfig, FitnessGoals};
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{Duration, NaiveDate};
 use sqlx::SqlitePool;
 
 use crate::coaching::FitnessCoachContext;
 use crate::fitness_plan::{
-    count_strength_sessions, current_week_start_str, load_weekly_plan, parse_plan_json,
-    plan_cardio_minutes_on_cardio_days, plan_session_adherence, session_for_date,
-    sum_cardio_minutes, week_start_monday, WeeklyFitnessPlan,
+    count_strength_sessions, load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days,
+    plan_session_adherence, session_for_date, sum_cardio_minutes, week_start_monday,
+    WeeklyFitnessPlan,
 };
 use crate::sync::{exercise_entries_for_range, exercises_for_day};
 
 /// Options for [`enrich_coach_context`].
 #[derive(Debug, Clone, Copy)]
 pub struct CoachEnrichOpts<'a> {
+    /// Only the authenticated private recipient may receive condition context.
+    pub private_member_id: Option<&'a str>,
     /// When true, attach today's planned session (for `/status`). Trends should pass false.
     pub include_today_plan: bool,
     /// Load exercise blurbs for a single civil day (YYYY-MM-DD).
@@ -27,6 +29,7 @@ impl<'a> CoachEnrichOpts<'a> {
     /// `/status`-style: today's plan + that day's exercises.
     pub fn for_day(exercise_date: &'a str) -> Self {
         Self {
+            private_member_id: None,
             include_today_plan: true,
             exercise_date: Some(exercise_date),
             exercise_range: None,
@@ -36,10 +39,16 @@ impl<'a> CoachEnrichOpts<'a> {
     /// `/trends`-style: no today's plan; exercises across the trend window.
     pub fn for_trends(start: &'a str, end: &'a str) -> Self {
         Self {
+            private_member_id: None,
             include_today_plan: false,
             exercise_date: None,
             exercise_range: Some((start, end)),
         }
+    }
+
+    pub fn with_private_member(mut self, member_id: Option<&'a str>) -> Self {
+        self.private_member_id = member_id;
+        self
     }
 }
 
@@ -60,10 +69,10 @@ pub async fn enrich_coach_context(
         .and_then(|m| m.fitness_goals.as_ref())
         .filter(|g| !g.is_empty());
 
-    let today = Local::now().date_naive();
+    let today = config.now_in_tz().date_naive();
     let days_until = fitness.and_then(|g| g.days_until_target(today));
 
-    let week_start = current_week_start_str();
+    let week_start = week_start_monday(today).format("%Y-%m-%d").to_string();
     let stored_plan = load_weekly_plan(pool, member_id, &week_start)
         .await
         .ok()
@@ -137,7 +146,7 @@ pub async fn enrich_coach_context(
         (None, None, None)
     };
 
-    ctx.with_fitness(
+    let mut ctx = ctx.with_fitness(
         fitness,
         days_until,
         planned.as_ref(),
@@ -149,7 +158,30 @@ pub async fn enrich_coach_context(
         plan_matched,
         plan_planned,
         plan_cardio,
+    );
+    let as_of = opts
+        .exercise_range
+        .map(|(_, end)| end)
+        .or(opts.exercise_date)
+        .map(str::to_string)
+        .unwrap_or_else(|| config.now_in_tz().format("%Y-%m-%d").to_string());
+    // Clear any previous condition context before applying this recipient boundary.
+    ctx.conditions = match crate::conditions::load_condition_context(
+        pool,
+        config,
+        opts.private_member_id,
+        member_id,
+        &as_of,
     )
+    .await
+    {
+        Ok(conditions) => conditions,
+        Err(error) => {
+            eprintln!("Condition coach context unavailable: {error:?}");
+            Vec::new()
+        }
+    };
+    ctx
 }
 
 /// Outcome + today's session lines for briefs (indented under a member bullet).

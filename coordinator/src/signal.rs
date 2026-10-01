@@ -15,7 +15,7 @@ use chotu_common::{
     fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_signal_delivery,
     insert_food_log_tags, is_signal_conversation_allowed, list_completable_open_tasks,
     looks_like_task_add_query, lookup_barcode, mark_budget_alert_sent, member_for_signal_aci,
-    parse_due_phrase_tz, pending_budget_alerts, reschedule_at, resolve_food_log_timing,
+    parse_due_phrase_tz, pending_budget_alerts, reschedule_at, resolve_food_log_timing_tz,
     save_calendar_refresh_token, save_google_refresh_token, save_health_refresh_token, schedule_at,
     set_budget_override, signal_aci_for_member, signal_delivery_targets, spawn_background_reindex,
     split_task_add_args, start_redirect_listener, AppConfig, AssignedFoodTags, CalendarWindow,
@@ -178,6 +178,15 @@ fn oauth_member_target(scope: &CallerScope, requested: &str) -> Result<String, &
         CallerScope::LinkedDm { .. } => {
             Err("OAuth setup in a direct conversation can only target your own member account.")
         }
+    }
+}
+
+fn private_health_member_id<'a>(config: &'a AppConfig, chat_id: &ChatId) -> Option<&'a str> {
+    match chat_id {
+        SignalRecipient::Direct { aci } => {
+            member_for_signal_aci(config, aci).map(|m| m.id.as_str())
+        }
+        SignalRecipient::Group { .. } => None,
     }
 }
 
@@ -1184,7 +1193,10 @@ async fn handle_food_log(
 
     // Let the LLM resolve relative days/times ("yesterday's dinner…") into YYYY-MM-DD / HH:MM.
     let (description, food_date, food_time) = with_typing_indicator(bot, chat_id, async {
-        match llm.extract_food_log_context(&food_description).await {
+        match llm
+            .extract_food_log_context_on_date(&food_description, config.now_in_tz().date_naive())
+            .await
+        {
             Ok(ctx) => {
                 let desc = if ctx.food_description.trim().is_empty() {
                     food_description.clone()
@@ -1235,7 +1247,7 @@ async fn log_food_for_member(
     timing_utterance: &str,
 ) -> Result<(), SignalError> {
     let food_time = effective_food_time(timing_utterance, food_time);
-    let timing = resolve_food_log_timing(food_date, food_time.as_deref());
+    let timing = resolve_food_log_timing_tz(food_date, food_time.as_deref(), config.resolved_tz());
 
     send_signal(
         &bot,
@@ -1566,8 +1578,8 @@ async fn persist_food_estimation(
     let log_id = uuid::Uuid::new_v4().to_string();
     let log_ts = timing.timestamp;
     let date_str = timing.date.clone();
-    let today_str = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let yesterday_str = (chrono::Local::now().date_naive() - chrono::Duration::days(1))
+    let today_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let yesterday_str = (config.now_in_tz().date_naive() - chrono::Duration::days(1))
         .format("%Y-%m-%d")
         .to_string();
 
@@ -1694,7 +1706,7 @@ async fn persist_food_estimation(
         String::new()
     };
 
-    let msg_text = format!(
+    let mut msg_text = format!(
         "✅ Logged for *{}*{}: _{}_\n\
          • {} kcal · {:.1}g P / {:.1}g C / {:.1}g F ({}){}{}{}",
         family_member_id,
@@ -1710,7 +1722,41 @@ async fn persist_food_estimation(
         google_sync_note
     );
 
+    let recipient = private_health_member_id(config, chat_id);
+    let flags = match health_coach::conditions::pending_food_flags(
+        pool,
+        config,
+        recipient,
+        family_member_id,
+        &date_str,
+        &log_id,
+    )
+    .await
+    {
+        Ok(flags) => flags,
+        Err(error) => {
+            eprintln!("Food watchlist flags unavailable: {error:?}");
+            Vec::new()
+        }
+    };
+    for flag in &flags {
+        msg_text.push_str(&flag.confirmation_line());
+    }
+
     send_signal(&bot, chat_id, msg_text).await?;
+
+    if !flags.is_empty() {
+        if let Err(error) = health_coach::conditions::mark_food_flags_sent(
+            pool,
+            family_member_id,
+            &date_str,
+            &flags,
+        )
+        .await
+        {
+            eprintln!("Could not record food flag delivery: {error:?}");
+        }
+    }
 
     Ok(())
 }
@@ -1727,21 +1773,36 @@ async fn handle_clear_food(
         return Ok(());
     }
 
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
+        .expect("current configured civil day has valid bounds");
 
     // Preserve Google Health (or other non-food_log) nutrition, then drop local food logs.
-    let external =
-        match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Failed to compute external nutrition base: {:?}", e);
-                send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
-                return Ok(());
-            }
-        };
+    let external = match health_coach::external_nutrition_base(
+        pool,
+        &target_member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to compute external nutrition base: {:?}", e);
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+            return Ok(());
+        }
+    };
 
     // Remove any meals we previously pushed to Google Health.
-    match health_coach::google_data_point_ids_for_day(pool, &target_member_id, &date_str).await {
+    match health_coach::google_data_point_ids_for_day(
+        pool,
+        &target_member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
         Ok(ids) => {
             if let Err(e) =
                 health_coach::delete_google_nutrition_logs(&target_member_id, config, &ids).await
@@ -1757,12 +1818,19 @@ async fn handle_clear_food(
 
     if let Err(e) = (async {
         let mut tx = pool.begin().await?;
-        delete_food_log_tags_for_member_day(&mut tx, &target_member_id, &date_str).await?;
+        delete_food_log_tags_for_member_day(
+            &mut tx,
+            &target_member_id,
+            &date_str,
+            config.resolved_tz(),
+        )
+        .await?;
         sqlx::query(
-            "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
+            "DELETE FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
         )
         .bind(&target_member_id)
-        .bind(&date_str)
+        .bind(day_start)
+        .bind(day_end)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -1779,6 +1847,7 @@ async fn handle_clear_food(
         pool,
         &target_member_id,
         &date_str,
+        config.resolved_tz(),
         &external,
     )
     .await
@@ -1887,12 +1956,21 @@ async fn handle_adjust_food(
         }
     };
 
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
+        .expect("current configured civil day has valid bounds");
 
     // Infer Google Health (etc.) base, then replace local food_log with a delta
     // so that external + food_log == the absolute totals the user requested. That keeps
     // evening /sync (Google + food_log) consistent and makes /undofood rebuild cleanly.
-    let external = match health_coach::external_nutrition_base(pool, &member_id, &date_str).await {
+    let external = match health_coach::external_nutrition_base(
+        pool,
+        &member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
         Ok(v) => v,
         Err(e) => {
             eprintln!("Failed to compute external nutrition base: {:?}", e);
@@ -1902,7 +1980,14 @@ async fn handle_adjust_food(
     };
 
     // Drop previously pushed local meals from Google Health before replacing locally.
-    match health_coach::google_data_point_ids_for_day(pool, &member_id, &date_str).await {
+    match health_coach::google_data_point_ids_for_day(
+        pool,
+        &member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
         Ok(ids) => {
             if let Err(e) =
                 health_coach::delete_google_nutrition_logs(&member_id, config, &ids).await
@@ -1934,12 +2019,14 @@ async fn handle_adjust_food(
     let assigned = assign_food_tags(Vec::<String>::new(), &desc);
     if let Err(e) = (async {
         let mut tx = pool.begin().await?;
-        delete_food_log_tags_for_member_day(&mut tx, &member_id, &date_str).await?;
+        delete_food_log_tags_for_member_day(&mut tx, &member_id, &date_str, config.resolved_tz())
+            .await?;
         sqlx::query(
-            "DELETE FROM food_log WHERE family_member_id = ? AND date(timestamp, 'localtime') = ?",
+            "DELETE FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
         )
         .bind(&member_id)
-        .bind(&date_str)
+        .bind(day_start)
+        .bind(day_end)
         .execute(&mut *tx)
         .await?;
         sqlx::query(
@@ -2002,26 +2089,35 @@ async fn handle_undo_food(
         return Ok(());
     }
 
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
+    let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
+        .expect("current configured civil day has valid bounds");
 
     // Snapshot the non-food_log base before mutating food_log.
-    let external =
-        match health_coach::external_nutrition_base(pool, &target_member_id, &date_str).await {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("Failed to compute external nutrition base: {:?}", e);
-                send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
-                return Ok(());
-            }
-        };
+    let external = match health_coach::external_nutrition_base(
+        pool,
+        &target_member_id,
+        &date_str,
+        config.resolved_tz(),
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to compute external nutrition base: {:?}", e);
+            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+            return Ok(());
+        }
+    };
 
     let last_log: Option<chotu_common::FoodLog> = match sqlx::query_as::<_, chotu_common::FoodLog>(
         "SELECT * FROM food_log \
-         WHERE family_member_id = ? AND date(timestamp, 'localtime') = ? \
+         WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
          ORDER BY timestamp DESC LIMIT 1",
     )
     .bind(&target_member_id)
-    .bind(&date_str)
+    .bind(day_start)
+    .bind(day_end)
     .fetch_optional(pool)
     .await
     {
@@ -2090,6 +2186,7 @@ async fn handle_undo_food(
         pool,
         &target_member_id,
         &date_str,
+        config.resolved_tz(),
         &external,
     )
     .await
@@ -3556,7 +3653,7 @@ async fn handle_trends(
     )
     .await?;
 
-    let only_member_id = member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.as_str());
+    let only_member_id = private_health_member_id(config, chat_id);
     match health_coach::build_nutrition_trend_reports(pool, config, days, Some(llm), only_member_id)
         .await
     {
@@ -3644,13 +3741,15 @@ async fn handle_plan(
         return Ok(());
     }
 
-    let week_start = health_coach::current_week_start_str();
+    let week_start = health_coach::week_start_monday(config.now_in_tz().date_naive())
+        .format("%Y-%m-%d")
+        .to_string();
     if !regenerate {
         if let Ok(Some(stored)) =
             health_coach::load_weekly_plan(pool, &member_id, &week_start).await
         {
             let mut msg = stored.plan_md.clone();
-            let today = chrono::Local::now().date_naive();
+            let today = config.now_in_tz().date_naive();
             if let Some(session) = health_coach::session_for_date_from_stored(&stored, today) {
                 let notes = session.notes.trim();
                 msg.push_str("\n📌 *Today:* ");
@@ -3695,7 +3794,7 @@ async fn handle_plan(
     {
         Ok(stored) => {
             let mut msg = stored.plan_md;
-            let today = chrono::Local::now().date_naive();
+            let today = config.now_in_tz().date_naive();
             if let Ok(plan) = health_coach::parse_plan_json(&stored.plan_json) {
                 if let Some(session) =
                     health_coach::session_for_date(&stored.week_start, &plan, today)
@@ -3908,7 +4007,7 @@ async fn handle_status(
     config: &AppConfig,
     llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
-    let date_str = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let date_str = config.now_in_tz().format("%Y-%m-%d").to_string();
 
     // Query daily financials and health summaries
     let (txs, healths) = match crate::reflection::get_daily_data(pool, &date_str, config).await {
@@ -3949,8 +4048,7 @@ async fn handle_status(
 
     // 2. Build per-member health reports, then coach tips in parallel.
     // Linked personal DMs only see their own health/fitness (goals stay private).
-    let status_member_id =
-        member_for_signal_aci(config, chat_id.lookup_aci()).map(|m| m.id.clone());
+    let status_member_id = private_health_member_id(config, chat_id).map(str::to_string);
     let mut pending: Vec<(String, Option<health_coach::NutritionCoachContext>)> = Vec::new();
 
     for h in &healths {
@@ -4005,7 +4103,7 @@ async fn handle_status(
             .and_then(|m| m.fitness_goals.as_ref())
             .filter(|g| !g.is_empty())
         {
-            let today = chrono::Local::now().date_naive();
+            let today = config.now_in_tz().date_naive();
             if let Some(block) = fitness.outcome_markdown(today) {
                 member_report.push_str(&block);
                 member_report.push('\n');
@@ -4220,25 +4318,27 @@ async fn handle_status(
             .map(|g| !g.is_empty())
             .unwrap_or(false);
 
+        let ctx = health_coach::NutritionCoachContext::from_day_summary(name, h, goals);
+        let ctx = health_coach::enrich_coach_context(
+            pool,
+            config,
+            &h.family_member_id,
+            ctx,
+            health_coach::CoachEnrichOpts::for_day(&date_str)
+                .with_private_member(status_member_id.as_deref()),
+        )
+        .await;
         if !has_activity
             && !has_sleep
             && !has_energy
             && !has_nutrition
             && exercises.is_empty()
             && !has_fitness
+            && !ctx.has_health_data()
         {
             member_report.push_str("• _No health telemetry logged today._\n");
             pending.push((member_report, None));
         } else {
-            let ctx = health_coach::NutritionCoachContext::from_day_summary(name, h, goals);
-            let ctx = health_coach::enrich_coach_context(
-                pool,
-                config,
-                &h.family_member_id,
-                ctx,
-                health_coach::CoachEnrichOpts::for_day(&date_str),
-            )
-            .await;
             pending.push((member_report, Some(ctx)));
         }
     }
@@ -5370,19 +5470,26 @@ async fn handle_food_photo(
     .await?;
 
     let timing = if caption_rest.trim().is_empty() {
-        resolve_food_log_timing(None, None)
+        resolve_food_log_timing_tz(None, None, config.resolved_tz())
     } else {
-        match llm.extract_food_log_context(&caption_rest).await {
+        match llm
+            .extract_food_log_context_on_date(&caption_rest, config.now_in_tz().date_naive())
+            .await
+        {
             Ok(ctx) => {
                 let food_time = effective_food_time(&caption_rest, ctx.food_time.as_deref());
-                resolve_food_log_timing(ctx.food_date.as_deref(), food_time.as_deref())
+                resolve_food_log_timing_tz(
+                    ctx.food_date.as_deref(),
+                    food_time.as_deref(),
+                    config.resolved_tz(),
+                )
             }
             Err(e) => {
                 eprintln!(
                     "Food photo caption timing extract failed (using now): {:?}",
                     e
                 );
-                resolve_food_log_timing(None, None)
+                resolve_food_log_timing_tz(None, None, config.resolved_tz())
             }
         }
     };
@@ -5434,7 +5541,8 @@ async fn dispatch_free_text_intent(
             "Still figuring that out — local model is thinking…".to_string(),
         );
         with_typing_indicator(bot, chat_id, async {
-            llm.classify_intent(trimmed, &member_ids).await
+            llm.classify_intent_on_date(trimmed, &member_ids, config.now_in_tz().date_naive())
+                .await
         })
         .await
     };
@@ -6671,6 +6779,35 @@ mod tests {
         assert!(parse_command("food eggs").is_none());
         assert!(
             matches!(parse_command("/tasks complete abcdef12"), Some(Command::Tasks(s)) if s == "complete abcdef12")
+        );
+    }
+
+    #[test]
+    fn condition_recipient_is_explicitly_direct_even_with_blank_configured_aci() {
+        let mut config = AppConfig::default();
+        config.family.members[0].signal_aci = Some("".into());
+        let group = SignalRecipient::Group {
+            group_id: "household".into(),
+        };
+        assert_eq!(private_health_member_id(&config, &group), None);
+        config.family.members[0].signal_aci = Some("aci-alex".into());
+        assert_eq!(
+            private_health_member_id(
+                &config,
+                &SignalRecipient::Direct {
+                    aci: "aci-alex".into()
+                }
+            ),
+            Some("alex")
+        );
+        assert_eq!(
+            private_health_member_id(
+                &config,
+                &SignalRecipient::Direct {
+                    aci: "unknown".into()
+                }
+            ),
+            None
         );
     }
 
