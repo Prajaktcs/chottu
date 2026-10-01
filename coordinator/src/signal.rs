@@ -2537,16 +2537,17 @@ fn prepare_manual_task(
 ) -> PreparedManualTask {
     let valid = extraction.ok().filter(|context| {
         !context.title.trim().is_empty()
-            && context.due_raw.as_deref().is_none_or(|raw| {
-                // Only accept normalized dates, never arbitrary model-generated phrases.
-                let normalized = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
-                    .map(|d| d.format("%Y-%m-%d").to_string() == raw)
-                    .unwrap_or(false)
-                    || chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M")
-                        .map(|d| d.format("%Y-%m-%d %H:%M").to_string() == raw)
-                        .unwrap_or(false);
-                normalized && parse_due_phrase_tz(raw, tz).is_some()
-            })
+            && (context.ambiguous_due
+                || context.due_raw.as_deref().is_none_or(|raw| {
+                    // Only accept normalized dates, never arbitrary model-generated phrases.
+                    let normalized = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                        .map(|d| d.format("%Y-%m-%d").to_string() == raw)
+                        .unwrap_or(false)
+                        || chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M")
+                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string() == raw)
+                            .unwrap_or(false);
+                    normalized && parse_due_phrase_tz(raw, tz).is_some()
+                }))
     });
     let (title, details, inferred_due, note) = match valid {
         Some(context) => (
@@ -2581,6 +2582,17 @@ fn prepare_manual_task(
         due_raw: explicit_due.or(inferred_due),
         note,
     }
+}
+
+/// Conversational prose may contain non-date markers such as "signed by Alice".
+fn conversational_explicit_due(
+    text: &str,
+    member_ids: &[String],
+    tz: chrono_tz::Tz,
+) -> Option<String> {
+    split_task_add_args(text, member_ids)
+        .and_then(|(_, _, due)| due)
+        .filter(|raw| parse_due_phrase_tz(raw, tz).is_some())
 }
 
 fn format_task_due(date: Option<&str>, at: Option<&str>, tz: chrono_tz::Tz) -> String {
@@ -5608,7 +5620,7 @@ async fn dispatch_free_text_intent(
         } => match resolve_task_target(scope, member_id, config) {
             Ok(member_id) => {
                 let explicit_due =
-                    split_task_add_args(trimmed, &member_ids).and_then(|(_, _, due)| due);
+                    conversational_explicit_due(trimmed, &member_ids, config.resolved_tz());
                 create_manual_task(
                     bot,
                     chat_id,
@@ -7318,6 +7330,51 @@ mod manual_task_context_tests {
             );
             assert_eq!(task.due_raw.as_deref(), expected);
         }
+    }
+
+    #[test]
+    fn ambiguous_date_ignores_invalid_model_date_and_classifier_fallback() {
+        let mut context = appointment();
+        context.ambiguous_due = true;
+        context.due_raw = Some("next Friday or Saturday".into());
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            None,
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            Some("friday".into()),
+        );
+        assert!(task.due_raw.is_none());
+        assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
+    fn conversational_markers_require_a_parseable_due_suffix() {
+        let tz = chrono_tz::America::Toronto;
+        for source in [
+            "send the form signed by Alice on Friday",
+            "finish before the meeting on Friday",
+            "pay the amount due on Friday",
+        ] {
+            assert!(conversational_explicit_due(source, &[], tz).is_none());
+        }
+        assert_eq!(
+            conversational_explicit_due("send the form by friday 15:00", &[], tz).as_deref(),
+            Some("friday 15:00")
+        );
+        let source = "send the form signed by Alice on Friday";
+        // Use the same selection path as conversational dispatch.
+        let explicit_due = conversational_explicit_due(source, &[], tz);
+        let task = prepare_manual_task(
+            "send the signed form".into(),
+            explicit_due,
+            source,
+            Ok(appointment()),
+            tz,
+            Some("friday".into()),
+        );
+        assert_eq!(task.due_raw.as_deref(), Some("2026-09-30 19:40"));
     }
 
     #[test]
