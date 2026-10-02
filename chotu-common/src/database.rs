@@ -374,7 +374,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             email_subject       TEXT,
             due_at              TEXT,
             reminded_at         TEXT,
-            due_has_time        INTEGER NOT NULL DEFAULT 1
+            due_has_time        INTEGER NOT NULL DEFAULT 0
         );",
     )
     .execute(&mut *tx)
@@ -473,7 +473,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         email_subject = col("email_subject", "NULL"),
         due_at = col("due_at", "NULL"),
         reminded_at = col("reminded_at", "NULL"),
-        due_has_time = col("due_has_time", "1"),
+        due_has_time = col("due_has_time", "0"),
     );
 
     // Column names come from pragma_table_info / allowlisted fallbacks only.
@@ -546,7 +546,7 @@ async fn drop_tasks_telegram_message_id(
     let due_precision = if has_due_precision {
         "due_has_time"
     } else {
-        "1"
+        "0"
     };
     let mut tx = pool.begin().await?;
     sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
@@ -577,7 +577,7 @@ async fn drop_tasks_telegram_message_id(
             email_subject       TEXT,
             due_at              TEXT,
             reminded_at         TEXT,
-            due_has_time        INTEGER NOT NULL DEFAULT 1
+            due_has_time        INTEGER NOT NULL DEFAULT 0
         );",
     )
     .execute(&mut *tx)
