@@ -2972,6 +2972,7 @@ type DueTaskReminderRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    bool,
 );
 
 async fn load_routable_due_task_reminders(
@@ -2981,7 +2982,7 @@ async fn load_routable_due_task_reminders(
     now: &str,
 ) -> Result<Vec<DueTaskReminderRow>, sqlx::Error> {
     let mut due_query = sqlx::QueryBuilder::new(
-        "SELECT id, title, due_date, due_at, assigned_to FROM tasks \
+        "SELECT id, title, due_date, due_at, assigned_to, due_has_time FROM tasks \
          WHERE status = 'open' \
            AND due_at IS NOT NULL \
            AND due_at <= ",
@@ -3027,7 +3028,7 @@ async fn poll_due_task_reminders(
     let rows =
         load_routable_due_task_reminders(pool, config, group_fallback_configured, &now_s).await?;
 
-    for (id, title, due_date, due_at, assigned_to) in rows {
+    for (id, title, due_date, due_at, assigned_to, due_has_time) in rows {
         // No destination is not a delivery failure. Leave reminded_at NULL so a
         // later member link or household-group configuration makes it eligible.
         let targets = task_reminder_targets(config, assigned_to.as_deref(), &household_targets);
@@ -3052,19 +3053,13 @@ async fn poll_due_task_reminders(
         }
 
         let short_id: String = id.chars().take(8).collect();
-        let when = due_at
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| {
-                dt.with_timezone(&chrono::Local)
-                    .format("%a %b %e %H:%M")
-                    .to_string()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .or(due_date)
-            .unwrap_or_else(|| "now".to_string());
+        let when = format_task_due(
+            due_date.as_deref(),
+            due_at.as_deref(),
+            due_has_time,
+            config.resolved_tz(),
+        );
+        let when = when.strip_prefix(" · due ").unwrap_or("now");
 
         let msg = format!(
             "Reminder\n`{}` {}\nDue {}\n{}",
@@ -6943,6 +6938,7 @@ mod tests {
                 title TEXT NOT NULL,
                 due_date TEXT,
                 due_at TEXT,
+                due_has_time INTEGER NOT NULL DEFAULT 0,
                 assigned_to TEXT,
                 status TEXT NOT NULL,
                 reminded_at TEXT
