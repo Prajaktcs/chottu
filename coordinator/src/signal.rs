@@ -929,7 +929,7 @@ async fn handle_command(
             handle_trends(&bot, &chat_id, args, &pool, &config, &llm).await?;
         }
         Command::Tasks(args) | Command::Task(args) => {
-            handle_tasks(&bot, &chat_id, args, &pool, config, &scope).await?;
+            handle_tasks(&bot, &chat_id, args, &pool, config, &scope, &llm).await?;
         }
         Command::Memory(args) => {
             handle_memory(&bot, &chat_id, args, &pool, &config, &llm, &gemini_client).await?;
@@ -2227,6 +2227,8 @@ struct TaskListRow {
     title: String,
     status: String,
     due_date: Option<String>,
+    due_at: Option<String>,
+    due_has_time: bool,
     assigned_to: Option<String>,
     email_subject: Option<String>,
 }
@@ -2238,6 +2240,7 @@ async fn handle_tasks(
     pool: &SqlitePool,
     config: &AppConfig,
     scope: &CallerScope,
+    llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     let first = tokens.first().copied().unwrap_or("");
@@ -2254,7 +2257,7 @@ async fn handle_tasks(
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            return add_manual_task(bot, chat_id, pool, config, scope, &rest).await;
+            return add_manual_task(bot, chat_id, pool, config, scope, &rest, llm).await;
         }
         "complete" => {
             return match second.map(|s| s.to_lowercase()) {
@@ -2354,7 +2357,7 @@ async fn handle_tasks(
     // args aren't a plain list filter (status / member / status+member).
     let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
     if looks_like_task_add_query(&tokens, &member_ids) {
-        return add_manual_task(bot, chat_id, pool, config, scope, args.trim()).await;
+        return add_manual_task(bot, chat_id, pool, config, scope, args.trim(), llm).await;
     }
 
     let mut status_filter = "open";
@@ -2409,7 +2412,7 @@ async fn handle_tasks(
 
     // sqlx 0.9: build dynamic filters with QueryBuilder (SqlSafeStr rejects String).
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT id, title, status, due_date, assigned_to, email_subject FROM tasks WHERE ",
+        "SELECT id, title, status, due_date, due_at, due_has_time, assigned_to, email_subject FROM tasks WHERE ",
     );
     qb.push(status_clause);
     if let Some(ref member_id) = member_filter {
@@ -2446,11 +2449,12 @@ async fn handle_tasks(
     let mut actionable: Vec<(String, String)> = Vec::new();
     for row in &rows {
         let short_id: String = row.id.chars().take(8).collect();
-        let due = row
-            .due_date
-            .as_deref()
-            .map(|d| format!(" · due {}", d))
-            .unwrap_or_default();
+        let due = format_task_due(
+            row.due_date.as_deref(),
+            row.due_at.as_deref(),
+            row.due_has_time,
+            config.resolved_tz(),
+        );
         let assignee = row
             .assigned_to
             .as_deref()
@@ -2571,6 +2575,7 @@ async fn add_manual_task(
     config: &AppConfig,
     scope: &CallerScope,
     args: &str,
+    llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
     let member_ids: Vec<String> = config.family.members.iter().map(|m| m.id.clone()).collect();
     let Some((member_id, title, due_raw)) = split_task_add_args(args, &member_ids) else {
@@ -2587,7 +2592,128 @@ async fn add_manual_task(
             return Ok(());
         }
     };
-    create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await
+    create_manual_task(
+        bot,
+        chat_id,
+        pool,
+        config,
+        ManualTaskInput {
+            member_id,
+            title,
+            due_raw,
+            fallback_due: None,
+            source_text: args,
+        },
+        llm,
+    )
+    .await
+}
+
+struct ManualTaskInput<'a> {
+    member_id: Option<String>,
+    title: String,
+    due_raw: Option<String>,
+    /// Classifier date used only if context extraction fails.
+    fallback_due: Option<String>,
+    source_text: &'a str,
+}
+
+struct PreparedManualTask {
+    title: String,
+    details: Option<String>,
+    description: String,
+    due_raw: Option<String>,
+    note: Option<&'static str>,
+}
+
+fn prepare_manual_task(
+    title: String,
+    mut explicit_due: Option<String>,
+    source: &str,
+    extraction: Result<chotu_common::llm::ManualTaskContext, chotu_common::llm::LlmError>,
+    tz: chrono_tz::Tz,
+    fallback_due: Option<String>,
+) -> PreparedManualTask {
+    let valid = extraction.ok().filter(|context| {
+        !context.title.trim().is_empty()
+            && (context.ambiguous_due
+                || context.due_raw.as_deref().is_none_or(|raw| {
+                    // Only accept normalized dates, never arbitrary model-generated phrases.
+                    let normalized = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+                        .map(|d| d.format("%Y-%m-%d").to_string() == raw)
+                        .unwrap_or(false)
+                        || chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M")
+                            .map(|d| d.format("%Y-%m-%d %H:%M").to_string() == raw)
+                            .unwrap_or(false);
+                    normalized && parse_due_phrase_tz(raw, tz).is_some()
+                }))
+    });
+    if valid
+        .as_ref()
+        .is_some_and(|context| context.due_marker_is_prose)
+    {
+        explicit_due = None;
+    }
+    let (title, details, inferred_due, note) = match valid {
+        Some(context) => (
+            context.title.trim().to_string(),
+            context.details.filter(|d| !d.trim().is_empty()),
+            if context.ambiguous_due {
+                None
+            } else {
+                context.due_raw
+            },
+            if context.ambiguous_due && explicit_due.is_none() {
+                Some("The date was ambiguous, so no due time was set.")
+            } else {
+                None
+            },
+        ),
+        None => (
+            title,
+            None,
+            fallback_due,
+            Some("Context extraction failed; saved the original task."),
+        ),
+    };
+    let description = match &details {
+        Some(details) => format!("{details}\n\nOriginal text:\n{source}"),
+        None => format!("Original text:\n{source}"),
+    };
+    PreparedManualTask {
+        title,
+        details,
+        description,
+        due_raw: explicit_due.or(inferred_due),
+        note,
+    }
+}
+
+/// Conversational prose may contain non-date markers such as "signed by Alice".
+fn conversational_explicit_due(
+    text: &str,
+    member_ids: &[String],
+    tz: chrono_tz::Tz,
+) -> Option<String> {
+    split_task_add_args(text, member_ids)
+        .and_then(|(_, _, due)| due)
+        .filter(|raw| parse_due_phrase_tz(raw, tz).is_some())
+}
+
+fn format_task_due(
+    date: Option<&str>,
+    at: Option<&str>,
+    has_time: bool,
+    tz: chrono_tz::Tz,
+) -> String {
+    if let Some(dt) = at
+        .filter(|_| has_time)
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    {
+        return format!(" · due {}", dt.with_timezone(&tz).format("%Y-%m-%d %H:%M"));
+    }
+    date.map(|date| format!(" · due {date}"))
+        .unwrap_or_default()
 }
 
 async fn create_manual_task(
@@ -2595,15 +2721,54 @@ async fn create_manual_task(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
-    member_id: Option<String>,
-    title: String,
-    due_raw: Option<String>,
+    input: ManualTaskInput<'_>,
+    llm: &ChotuLlm,
 ) -> Result<(), SignalError> {
+    let ManualTaskInput {
+        member_id,
+        title,
+        due_raw,
+        fallback_due,
+        source_text,
+    } = input;
     let title = title.trim().to_string();
     if title.is_empty() {
         send_signal(&bot, chat_id, "⚠️ Task title cannot be empty.").await?;
         return Ok(());
     }
+
+    let extraction = with_typing_indicator(
+        bot,
+        chat_id,
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            llm.extract_manual_task_context(
+                source_text,
+                &config.now_in_tz().format("%Y-%m-%d").to_string(),
+                &config.resolved_timezone_name(),
+                due_raw.as_deref(),
+                &title,
+                member_id.as_deref(),
+            ),
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        Err(chotu_common::llm::LlmError::Client(
+            "Task context extraction timed out".into(),
+        ))
+    });
+    let prepared = prepare_manual_task(
+        title,
+        due_raw,
+        source_text,
+        extraction,
+        config.resolved_tz(),
+        fallback_due,
+    );
+    let title = prepared.title;
+    let due_raw = prepared.due_raw;
+    let description = prepared.description;
 
     let parsed_due = match due_raw.as_deref() {
         Some(raw) => match parse_due_phrase_tz(raw, config.resolved_tz()) {
@@ -2649,7 +2814,7 @@ async fn create_manual_task(
                             match schedule_at(
                                 &cal_client,
                                 &title,
-                                Some("Created via Signal"),
+                                Some(&description),
                                 start,
                                 TASK_CALENDAR_DURATION_MINUTES,
                             )
@@ -2685,18 +2850,23 @@ async fn create_manual_task(
     let now = chrono::Utc::now().to_rfc3339();
     let due_date = parsed_due.as_ref().map(|p| p.due_date.clone());
     let due_at = parsed_due.as_ref().map(|p| p.due_at.clone());
+    let due_has_time = due_raw
+        .as_deref()
+        .is_some_and(|raw| raw.split_whitespace().count() > 1);
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO tasks (id, created_at, updated_at, title, assigned_to, due_date, due_at, status, source, calendar_event_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'open', 'manual', ?)",
+        "INSERT INTO tasks (id, created_at, updated_at, title, description, assigned_to, due_date, due_at, due_has_time, status, source, calendar_event_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'manual', ?)",
     )
     .bind(&id)
     .bind(&now)
     .bind(&now)
     .bind(&title)
+    .bind(&description)
     .bind(member_id.as_deref())
     .bind(due_date.as_deref())
     .bind(due_at.as_deref())
+    .bind(due_has_time)
     .bind(calendar_event_id.as_deref())
     .execute(pool)
     .await
@@ -2712,22 +2882,23 @@ async fn create_manual_task(
     if let Some(ref mid) = member_id {
         msg.push_str(&format!(" · @{}", mid));
     }
-    if let Some(ref due) = due_date {
-        if let Some(ref at) = due_at {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at) {
-                let local = dt.with_timezone(&chrono::Local);
-                msg.push_str(&format!(" · due {} {}", due, local.format("%H:%M")));
-            } else {
-                msg.push_str(&format!(" · due {}", due));
-            }
-        } else {
-            msg.push_str(&format!(" · due {}", due));
-        }
-    }
+    msg.push_str(&format_task_due(
+        due_date.as_deref(),
+        due_at.as_deref(),
+        due_has_time,
+        config.resolved_tz(),
+    ));
     if calendar_event_id.is_some() {
         msg.push_str(" · 📅 calendar");
     } else if let Some(note) = calendar_note {
         msg.push_str(&format!(" · _{}_", note));
+    }
+
+    if let Some(details) = prepared.details {
+        msg.push_str(&format!("\n{details}"));
+    }
+    if let Some(note) = prepared.note {
+        msg.push_str(&format!("\nℹ️ {note}"));
     }
 
     send_signal(&bot, chat_id, msg).await?;
@@ -2900,6 +3071,7 @@ type DueTaskReminderRow = (
     Option<String>,
     Option<String>,
     Option<String>,
+    bool,
 );
 
 async fn load_routable_due_task_reminders(
@@ -2909,7 +3081,7 @@ async fn load_routable_due_task_reminders(
     now: &str,
 ) -> Result<Vec<DueTaskReminderRow>, sqlx::Error> {
     let mut due_query = sqlx::QueryBuilder::new(
-        "SELECT id, title, due_date, due_at, assigned_to FROM tasks \
+        "SELECT id, title, due_date, due_at, assigned_to, due_has_time FROM tasks \
          WHERE status = 'open' \
            AND due_at IS NOT NULL \
            AND due_at <= ",
@@ -2955,7 +3127,7 @@ async fn poll_due_task_reminders(
     let rows =
         load_routable_due_task_reminders(pool, config, group_fallback_configured, &now_s).await?;
 
-    for (id, title, due_date, due_at, assigned_to) in rows {
+    for (id, title, due_date, due_at, assigned_to, due_has_time) in rows {
         // No destination is not a delivery failure. Leave reminded_at NULL so a
         // later member link or household-group configuration makes it eligible.
         let targets = task_reminder_targets(config, assigned_to.as_deref(), &household_targets);
@@ -2980,19 +3152,13 @@ async fn poll_due_task_reminders(
         }
 
         let short_id: String = id.chars().take(8).collect();
-        let when = due_at
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| {
-                dt.with_timezone(&chrono::Local)
-                    .format("%a %b %e %H:%M")
-                    .to_string()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            })
-            .or(due_date)
-            .unwrap_or_else(|| "now".to_string());
+        let when = format_task_due(
+            due_date.as_deref(),
+            due_at.as_deref(),
+            due_has_time,
+            config.resolved_tz(),
+        );
+        let when = when.strip_prefix(" · due ").unwrap_or("now");
 
         let msg = format!(
             "Reminder\n`{}` {}\nDue {}\n{}",
@@ -3128,7 +3294,7 @@ async fn snooze_task_by_id(
         .push_bind(&due)
         .push(", due_at = ")
         .push_bind(due_at.as_deref())
-        .push(", reminded_at = NULL, updated_at = ")
+        .push(", due_has_time = 0, reminded_at = NULL, updated_at = ")
         .push_bind(&now)
         .push(" WHERE id = ")
         .push_bind(task_id);
@@ -5581,7 +5747,7 @@ async fn dispatch_free_text_intent(
             handle_trends(bot, chat_id, args, pool, config, llm).await?;
         }
         UserIntent::Tasks { filter } => {
-            handle_tasks(bot, chat_id, filter, pool, config, scope).await?;
+            handle_tasks(bot, chat_id, filter, pool, config, scope, llm).await?;
         }
         UserIntent::TaskAdd {
             member_id,
@@ -5589,7 +5755,23 @@ async fn dispatch_free_text_intent(
             due_raw,
         } => match resolve_task_target(scope, member_id, config) {
             Ok(member_id) => {
-                create_manual_task(bot, chat_id, pool, config, member_id, title, due_raw).await?;
+                let explicit_due =
+                    conversational_explicit_due(trimmed, &member_ids, config.resolved_tz());
+                create_manual_task(
+                    bot,
+                    chat_id,
+                    pool,
+                    config,
+                    ManualTaskInput {
+                        member_id,
+                        title,
+                        due_raw: explicit_due,
+                        fallback_due: due_raw,
+                        source_text: trimmed,
+                    },
+                    llm,
+                )
+                .await?;
             }
             Err(message) => {
                 send_signal(bot, chat_id, message).await?;
@@ -6903,6 +7085,7 @@ mod tests {
                 title TEXT NOT NULL,
                 due_date TEXT,
                 due_at TEXT,
+                due_has_time INTEGER NOT NULL DEFAULT 0,
                 assigned_to TEXT,
                 status TEXT NOT NULL,
                 reminded_at TEXT
@@ -7166,5 +7349,318 @@ mod tests {
         assert!(!ok);
         assert_eq!(delivered, 0);
         assert_eq!(reminder_mappings(&pool).await, Vec::<(String, i64)>::new());
+    }
+}
+
+#[cfg(test)]
+mod manual_task_context_tests {
+    use super::*;
+    use chotu_common::llm::{LlmError, ManualTaskContext};
+
+    const SOURCE: &str = "Hi Prajakt, your upcoming appointment at HealthOne Dental North York is on Wednesday, September 30th 2026 at 7:40 pm.\n5292 Yonge St, North York, ON\nFor any changes to your appointment please let us know within 2 business days to avoid a $75 fee for cancellations or reschedules.";
+
+    fn appointment() -> ManualTaskContext {
+        ManualTaskContext {
+            title: "Attend dental appointment at HealthOne Dental North York".into(),
+            details: Some("5292 Yonge St, North York, ON. Changes require 2 business days’ notice; cancellations or reschedules incur a $75 fee.".into()),
+            due_raw: Some("2026-09-30 19:40".into()),
+            ambiguous_due: false,
+            due_marker_is_prose: false,
+        }
+    }
+
+    #[test]
+    fn appointment_preserves_details_and_uses_toronto_time() {
+        let tz = chrono_tz::America::Toronto;
+        let task = prepare_manual_task(SOURCE.into(), None, SOURCE, Ok(appointment()), tz, None);
+        assert_eq!(
+            task.title,
+            "Attend dental appointment at HealthOne Dental North York"
+        );
+        assert!(task.description.contains("5292 Yonge St"));
+        assert!(task.description.contains("2 business days"));
+        assert!(task.description.contains("$75"));
+        assert!(task.description.ends_with(SOURCE));
+        let due = parse_due_phrase_tz(task.due_raw.as_deref().unwrap(), tz).unwrap();
+        assert_eq!(due.due_date, "2026-09-30");
+        assert_eq!(due.due_at, "2026-09-30T23:40:00+00:00");
+        assert_eq!(
+            format_task_due(Some(&due.due_date), Some(&due.due_at), true, tz),
+            " · due 2026-09-30 19:40"
+        );
+        assert!(task.note.is_none());
+    }
+
+    #[test]
+    fn explicit_due_overrides_inferred_and_ambiguous_dates() {
+        for ambiguous_due in [false, true] {
+            let mut context = appointment();
+            context.ambiguous_due = ambiguous_due;
+            let task = prepare_manual_task(
+                SOURCE.into(),
+                Some("tomorrow 9am".into()),
+                SOURCE,
+                Ok(context),
+                chrono_tz::UTC,
+                None,
+            );
+            assert_eq!(task.due_raw.as_deref(), Some("tomorrow 9am"));
+            assert!(task.note.is_none());
+        }
+    }
+
+    #[test]
+    fn ambiguity_does_not_schedule_a_guessed_date() {
+        let mut context = appointment();
+        context.ambiguous_due = true;
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            None,
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            None,
+        );
+        assert!(task.due_raw.is_none());
+        assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
+    fn failure_and_invalid_output_preserve_original_task_and_explicit_due() {
+        let mut invalid_title = appointment();
+        invalid_title.title = " ".into();
+        let mut invalid_date = appointment();
+        invalid_date.due_raw = Some("2026-02-30 19:40".into());
+        let mut unnormalized_date = appointment();
+        unnormalized_date.due_raw = Some("next Friday".into());
+        for output in [
+            Err(LlmError::Client("unavailable".into())),
+            Ok(invalid_title),
+            Ok(invalid_date),
+            Ok(unnormalized_date),
+        ] {
+            let task = prepare_manual_task(
+                SOURCE.into(),
+                Some("tomorrow".into()),
+                SOURCE,
+                output,
+                chrono_tz::UTC,
+                None,
+            );
+            assert_eq!(task.title, SOURCE);
+            assert_eq!(task.due_raw.as_deref(), Some("tomorrow"));
+            assert!(task.description.ends_with(SOURCE));
+            assert!(task.note.unwrap().contains("failed"));
+        }
+    }
+
+    #[test]
+    fn conversational_due_survives_failed_or_invalid_context_extraction() {
+        let source = "remind me to call the dentist tomorrow 3pm";
+        assert!(split_task_add_args(source, &[]).unwrap().2.is_none());
+        let mut invalid = appointment();
+        invalid.title.clear();
+        for output in [Err(LlmError::Client("unavailable".into())), Ok(invalid)] {
+            let task = prepare_manual_task(
+                "call the dentist".into(),
+                None,
+                source,
+                output,
+                chrono_tz::UTC,
+                Some("tomorrow 3pm".into()),
+            );
+            assert_eq!(task.due_raw.as_deref(), Some("tomorrow 3pm"));
+            assert!(task.note.unwrap().contains("failed"));
+        }
+    }
+
+    #[test]
+    fn classifier_fallback_cannot_override_successful_extraction_or_explicit_due() {
+        let mut ambiguous = appointment();
+        ambiguous.ambiguous_due = true;
+        for (output, explicit_due, expected) in [
+            (Ok(appointment()), None, Some("2026-09-30 19:40")),
+            (Ok(ambiguous), None, None),
+            (
+                Err(LlmError::Client("unavailable".into())),
+                Some("friday".into()),
+                Some("friday"),
+            ),
+        ] {
+            let task = prepare_manual_task(
+                SOURCE.into(),
+                explicit_due,
+                SOURCE,
+                output,
+                chrono_tz::UTC,
+                Some("tomorrow 3pm".into()),
+            );
+            assert_eq!(task.due_raw.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn ambiguous_date_ignores_invalid_model_date_and_classifier_fallback() {
+        let mut context = appointment();
+        context.ambiguous_due = true;
+        context.due_raw = Some("next Friday or Saturday".into());
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            None,
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            Some("friday".into()),
+        );
+        assert!(task.due_raw.is_none());
+        assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
+    fn conversational_markers_require_a_parseable_due_suffix() {
+        let tz = chrono_tz::America::Toronto;
+        for source in [
+            "send the form signed by Alice on Friday",
+            "finish before the meeting on Friday",
+            "pay the amount due on Friday",
+        ] {
+            assert!(conversational_explicit_due(source, &[], tz).is_none());
+        }
+        assert_eq!(
+            conversational_explicit_due("send the form by friday 15:00", &[], tz).as_deref(),
+            Some("friday 15:00")
+        );
+        let source = "send the form signed by Alice on Friday";
+        // Use the same selection path as conversational dispatch.
+        let explicit_due = conversational_explicit_due(source, &[], tz);
+        let task = prepare_manual_task(
+            "send the signed form".into(),
+            explicit_due,
+            source,
+            Ok(appointment()),
+            tz,
+            Some("friday".into()),
+        );
+        assert_eq!(task.due_raw.as_deref(), Some("2026-09-30 19:40"));
+    }
+
+    #[test]
+    fn appointment_policy_markers_do_not_override_primary_time() {
+        for source in [
+            "appointment on 2026-10-05 10:00; cancel by 2026-10-03",
+            "appointment on 2026-10-05 10:00; balance due at visit",
+        ] {
+            let explicit_due = split_task_add_args(source, &[]).unwrap().2;
+            assert!(explicit_due.is_some());
+            let mut context = appointment();
+            context.due_raw = Some("2026-10-05 10:00".into());
+            context.details = Some(source.into());
+            context.due_marker_is_prose = true;
+            let task = prepare_manual_task(
+                source.into(),
+                explicit_due,
+                source,
+                Ok(context),
+                chrono_tz::UTC,
+                None,
+            );
+            assert_eq!(task.due_raw.as_deref(), Some("2026-10-05 10:00"));
+            assert!(task.description.contains(source));
+        }
+    }
+
+    #[test]
+    fn prose_due_marker_cannot_override_ambiguous_primary_time() {
+        let mut context = appointment();
+        context.ambiguous_due = true;
+        context.due_marker_is_prose = true;
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            Some("2026-10-03".into()),
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            Some("2026-10-03".into()),
+        );
+        assert!(task.due_raw.is_none());
+        assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
+    fn date_only_due_hides_reminder_clock_but_explicit_nine_am_is_visible() {
+        let at = Some("2026-10-05T09:00:00+00:00");
+        assert_eq!(
+            format_task_due(Some("2026-10-05"), at, false, chrono_tz::UTC),
+            " · due 2026-10-05"
+        );
+        assert_eq!(
+            format_task_due(Some("2026-10-05"), at, true, chrono_tz::UTC),
+            " · due 2026-10-05 09:00"
+        );
+    }
+
+    #[test]
+    fn invalid_extraction_cannot_revoke_explicit_due() {
+        let source = "call dentist due friday";
+        let explicit_due = split_task_add_args(source, &[]).unwrap().2;
+        assert_eq!(explicit_due.as_deref(), Some("friday"));
+        let mut empty_title = appointment();
+        empty_title.title = " ".into();
+        let mut unnormalized_date = appointment();
+        unnormalized_date.due_raw = Some("next Friday".into());
+        for mut context in [empty_title, unnormalized_date] {
+            context.due_marker_is_prose = true;
+            for fallback_due in [None, Some("tomorrow 9am".into())] {
+                let task = prepare_manual_task(
+                    source.into(),
+                    explicit_due.clone(),
+                    source,
+                    Ok(context.clone()),
+                    chrono_tz::UTC,
+                    fallback_due,
+                );
+                assert_eq!(task.due_raw.as_deref(), Some("friday"));
+                assert!(task.note.unwrap().contains("failed"));
+            }
+        }
+    }
+
+    #[test]
+    fn simple_task_has_no_invented_due_or_details() {
+        let context = ManualTaskContext {
+            title: "buy milk".into(),
+            details: None,
+            due_raw: None,
+            ambiguous_due: false,
+            due_marker_is_prose: false,
+        };
+        let task = prepare_manual_task(
+            "buy milk".into(),
+            None,
+            "buy milk",
+            Ok(context),
+            chrono_tz::UTC,
+            None,
+        );
+        assert_eq!(task.title, "buy milk");
+        assert!(task.due_raw.is_none());
+        assert!(task.details.is_none());
+        assert!(task.note.is_none());
+    }
+
+    #[test]
+    fn past_inferred_dates_remain_available_for_existing_rejection() {
+        let mut context = appointment();
+        context.due_raw = Some("2000-01-01 19:40".into());
+        let task = prepare_manual_task(
+            SOURCE.into(),
+            None,
+            SOURCE,
+            Ok(context),
+            chrono_tz::UTC,
+            None,
+        );
+        let due = parse_due_phrase_tz(task.due_raw.as_deref().unwrap(), chrono_tz::UTC).unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(&due.due_at).unwrap() < chrono::Utc::now());
     }
 }
