@@ -2650,6 +2650,8 @@ async fn create_manual_task(
                 &config.now_in_tz().format("%Y-%m-%d").to_string(),
                 &config.resolved_timezone_name(),
                 due_raw.as_deref(),
+                &title,
+                member_id.as_deref(),
             ),
         ),
     )
