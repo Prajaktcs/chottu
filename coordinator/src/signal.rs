@@ -3200,7 +3200,7 @@ async fn snooze_task_by_id(
         .push_bind(&due)
         .push(", due_at = ")
         .push_bind(due_at.as_deref())
-        .push(", reminded_at = NULL, updated_at = ")
+        .push(", due_has_time = 0, reminded_at = NULL, updated_at = ")
         .push_bind(&now)
         .push(" WHERE id = ")
         .push_bind(task_id);

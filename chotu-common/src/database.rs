@@ -373,7 +373,8 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             email_sender        TEXT,
             email_subject       TEXT,
             due_at              TEXT,
-            reminded_at         TEXT
+            reminded_at         TEXT,
+            due_has_time        INTEGER NOT NULL DEFAULT 1
         );",
     )
     .execute(&mut *tx)
@@ -434,7 +435,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         "INSERT INTO tasks (
             id, created_at, updated_at, title, description, assigned_to, due_date,
             duration_minutes, priority, status, calendar_event_id, source,
-            message_id, email_sender, email_subject, due_at, reminded_at
+            message_id, email_sender, email_subject, due_at, reminded_at, due_has_time
          )
          SELECT
             id,
@@ -453,7 +454,8 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
             {email_sender},
             {email_subject},
             {due_at},
-            {reminded_at}
+            {reminded_at},
+            {due_has_time}
          FROM tasks_legacy_schema;",
         created = created_expr,
         updated = updated_expr,
@@ -471,6 +473,7 @@ async fn ensure_modern_tasks_schema(pool: &SqlitePool) -> Result<()> {
         email_subject = col("email_subject", "NULL"),
         due_at = col("due_at", "NULL"),
         reminded_at = col("reminded_at", "NULL"),
+        due_has_time = col("due_has_time", "1"),
     );
 
     // Column names come from pragma_table_info / allowlisted fallbacks only.
@@ -535,6 +538,16 @@ async fn drop_tasks_telegram_message_id(
         return Ok(());
     }
 
+    let has_due_precision: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('tasks') WHERE name='due_has_time')",
+    )
+    .fetch_one(pool)
+    .await?;
+    let due_precision = if has_due_precision {
+        "due_has_time"
+    } else {
+        "1"
+    };
     let mut tx = pool.begin().await?;
     sqlx::query("DROP INDEX IF EXISTS idx_tasks_message_id;")
         .execute(&mut *tx)
@@ -563,25 +576,28 @@ async fn drop_tasks_telegram_message_id(
             email_sender        TEXT,
             email_subject       TEXT,
             due_at              TEXT,
-            reminded_at         TEXT
+            reminded_at         TEXT,
+            due_has_time        INTEGER NOT NULL DEFAULT 1
         );",
     )
     .execute(&mut *tx)
     .await?;
-    sqlx::query(
+    let copy_sql = format!(
         "INSERT INTO tasks (
             id, created_at, updated_at, title, description, assigned_to, due_date,
             duration_minutes, priority, status, calendar_event_id, source,
-            message_id, email_sender, email_subject, due_at, reminded_at
+            message_id, email_sender, email_subject, due_at, reminded_at, due_has_time
          )
          SELECT
             id, created_at, updated_at, title, description, assigned_to, due_date,
             duration_minutes, priority, status, calendar_event_id, source,
-            message_id, email_sender, email_subject, due_at, reminded_at
+            message_id, email_sender, email_subject, due_at, reminded_at, {due_precision}
          FROM tasks_drop_telegram;",
-    )
-    .execute(&mut *tx)
-    .await?;
+    );
+    // due_precision is either the literal column name or the literal default.
+    sqlx::query(sqlx::AssertSqlSafe(copy_sql))
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DROP TABLE tasks_drop_telegram;")
         .execute(&mut *tx)
         .await?;
@@ -886,6 +902,11 @@ mod tests {
         drop_tasks_message_id_if_present(&pool).await.unwrap();
         migrator.run_to(20260824000003, &pool).await.unwrap();
         ensure_modern_tasks_schema(&pool).await.unwrap();
+        // This fixture represents the historical schema, before due precision existed.
+        sqlx::query("ALTER TABLE tasks DROP COLUMN due_has_time")
+            .execute(&pool)
+            .await
+            .unwrap();
         let columns: Vec<(i32, String)> = sqlx::query_as("PRAGMA table_info(tasks)")
             .fetch_all(&pool)
             .await
@@ -964,6 +985,7 @@ mod tests {
             "email_subject",
             "due_at",
             "reminded_at",
+            "due_has_time",
         ]
         .into_iter()
         .map(str::to_string)
