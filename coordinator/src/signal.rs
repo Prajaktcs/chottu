@@ -2131,6 +2131,7 @@ struct TaskListRow {
     status: String,
     due_date: Option<String>,
     due_at: Option<String>,
+    due_has_time: bool,
     assigned_to: Option<String>,
     email_subject: Option<String>,
 }
@@ -2314,7 +2315,7 @@ async fn handle_tasks(
 
     // sqlx 0.9: build dynamic filters with QueryBuilder (SqlSafeStr rejects String).
     let mut qb = sqlx::QueryBuilder::new(
-        "SELECT id, title, status, due_date, due_at, assigned_to, email_subject FROM tasks WHERE ",
+        "SELECT id, title, status, due_date, due_at, due_has_time, assigned_to, email_subject FROM tasks WHERE ",
     );
     qb.push(status_clause);
     if let Some(ref member_id) = member_filter {
@@ -2354,6 +2355,7 @@ async fn handle_tasks(
         let due = format_task_due(
             row.due_date.as_deref(),
             row.due_at.as_deref(),
+            row.due_has_time,
             config.resolved_tz(),
         );
         let assignee = row
@@ -2601,8 +2603,16 @@ fn conversational_explicit_due(
         .filter(|raw| parse_due_phrase_tz(raw, tz).is_some())
 }
 
-fn format_task_due(date: Option<&str>, at: Option<&str>, tz: chrono_tz::Tz) -> String {
-    if let Some(dt) = at.and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()) {
+fn format_task_due(
+    date: Option<&str>,
+    at: Option<&str>,
+    has_time: bool,
+    tz: chrono_tz::Tz,
+) -> String {
+    if let Some(dt) = at
+        .filter(|_| has_time)
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+    {
         return format!(" · due {}", dt.with_timezone(&tz).format("%Y-%m-%d %H:%M"));
     }
     date.map(|date| format!(" · due {date}"))
@@ -2741,10 +2751,13 @@ async fn create_manual_task(
     let now = chrono::Utc::now().to_rfc3339();
     let due_date = parsed_due.as_ref().map(|p| p.due_date.clone());
     let due_at = parsed_due.as_ref().map(|p| p.due_at.clone());
+    let due_has_time = due_raw
+        .as_deref()
+        .is_some_and(|raw| raw.split_whitespace().count() > 1);
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO tasks (id, created_at, updated_at, title, description, assigned_to, due_date, due_at, status, source, calendar_event_id) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', 'manual', ?)",
+        "INSERT INTO tasks (id, created_at, updated_at, title, description, assigned_to, due_date, due_at, due_has_time, status, source, calendar_event_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'manual', ?)",
     )
     .bind(&id)
     .bind(&now)
@@ -2754,6 +2767,7 @@ async fn create_manual_task(
     .bind(member_id.as_deref())
     .bind(due_date.as_deref())
     .bind(due_at.as_deref())
+    .bind(due_has_time)
     .bind(calendar_event_id.as_deref())
     .execute(pool)
     .await
@@ -2769,18 +2783,12 @@ async fn create_manual_task(
     if let Some(ref mid) = member_id {
         msg.push_str(&format!(" · @{}", mid));
     }
-    if let Some(ref due) = due_date {
-        if let Some(ref at) = due_at {
-            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at) {
-                let local = dt.with_timezone(&config.resolved_tz());
-                msg.push_str(&format!(" · due {} {}", due, local.format("%H:%M")));
-            } else {
-                msg.push_str(&format!(" · due {}", due));
-            }
-        } else {
-            msg.push_str(&format!(" · due {}", due));
-        }
-    }
+    msg.push_str(&format_task_due(
+        due_date.as_deref(),
+        due_at.as_deref(),
+        due_has_time,
+        config.resolved_tz(),
+    ));
     if calendar_event_id.is_some() {
         msg.push_str(" · 📅 calendar");
     } else if let Some(note) = calendar_note {
@@ -7234,7 +7242,7 @@ mod manual_task_context_tests {
         assert_eq!(due.due_date, "2026-09-30");
         assert_eq!(due.due_at, "2026-09-30T23:40:00+00:00");
         assert_eq!(
-            format_task_due(Some(&due.due_date), Some(&due.due_at), tz),
+            format_task_due(Some(&due.due_date), Some(&due.due_at), true, tz),
             " · due 2026-09-30 19:40"
         );
         assert!(task.note.is_none());
@@ -7433,6 +7441,19 @@ mod manual_task_context_tests {
         );
         assert!(task.due_raw.is_none());
         assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
+    fn date_only_due_hides_reminder_clock_but_explicit_nine_am_is_visible() {
+        let at = Some("2026-10-05T09:00:00+00:00");
+        assert_eq!(
+            format_task_due(Some("2026-10-05"), at, false, chrono_tz::UTC),
+            " · due 2026-10-05"
+        );
+        assert_eq!(
+            format_task_due(Some("2026-10-05"), at, true, chrono_tz::UTC),
+            " · due 2026-10-05 09:00"
+        );
     }
 
     #[test]
