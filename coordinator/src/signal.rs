@@ -2535,7 +2535,16 @@ fn prepare_manual_task(
     tz: chrono_tz::Tz,
     fallback_due: Option<String>,
 ) -> PreparedManualTask {
-    let valid = extraction.ok().filter(|context| {
+    let extraction = extraction.ok();
+    // The prose classification stands on its own: a policy deadline must not become
+    // the due date even when the rest of the extraction fails validation.
+    if extraction
+        .as_ref()
+        .is_some_and(|context| context.due_marker_is_prose)
+    {
+        explicit_due = None;
+    }
+    let valid = extraction.filter(|context| {
         !context.title.trim().is_empty()
             && (context.ambiguous_due
                 || context.due_raw.as_deref().is_none_or(|raw| {
@@ -2549,12 +2558,6 @@ fn prepare_manual_task(
                     normalized && parse_due_phrase_tz(raw, tz).is_some()
                 }))
     });
-    if valid
-        .as_ref()
-        .is_some_and(|context| context.due_marker_is_prose)
-    {
-        explicit_due = None;
-    }
     let (title, details, inferred_due, note) = match valid {
         Some(context) => (
             context.title.trim().to_string(),
@@ -7425,6 +7428,32 @@ mod manual_task_context_tests {
         );
         assert!(task.due_raw.is_none());
         assert!(task.note.unwrap().contains("ambiguous"));
+    }
+
+    #[test]
+    fn prose_flag_clears_candidate_even_when_extraction_fails_validation() {
+        // The model classified the candidate suffix as prose, but the rest of its
+        // response failed validation; the prose deadline must not leak through.
+        let source = "appointment on 2026-10-05 10:00; cancel by 2026-10-03";
+        let explicit_due = split_task_add_args(source, &[]).unwrap().2;
+        assert_eq!(explicit_due.as_deref(), Some("2026-10-03"));
+        let mut empty_title = appointment();
+        empty_title.title = " ".into();
+        let mut unnormalized_date = appointment();
+        unnormalized_date.due_raw = Some("next Friday".into());
+        for mut context in [empty_title, unnormalized_date] {
+            context.due_marker_is_prose = true;
+            let task = prepare_manual_task(
+                source.into(),
+                explicit_due.clone(),
+                source,
+                Ok(context),
+                chrono_tz::UTC,
+                Some("tomorrow 9am".into()),
+            );
+            assert_eq!(task.due_raw.as_deref(), Some("tomorrow 9am"));
+            assert!(task.note.unwrap().contains("failed"));
+        }
     }
 
     #[test]
