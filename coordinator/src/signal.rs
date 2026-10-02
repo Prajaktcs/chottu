@@ -2633,14 +2633,22 @@ async fn create_manual_task(
     let extraction = with_typing_indicator(
         bot,
         chat_id,
-        llm.extract_manual_task_context(
-            source_text,
-            &config.now_in_tz().format("%Y-%m-%d").to_string(),
-            &config.resolved_timezone_name(),
-            due_raw.as_deref(),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            llm.extract_manual_task_context(
+                source_text,
+                &config.now_in_tz().format("%Y-%m-%d").to_string(),
+                &config.resolved_timezone_name(),
+                due_raw.as_deref(),
+            ),
         ),
     )
-    .await;
+    .await
+    .unwrap_or_else(|_| {
+        Err(chotu_common::llm::LlmError::Client(
+            "Task context extraction timed out".into(),
+        ))
+    });
     let prepared = prepare_manual_task(
         title,
         due_raw,
