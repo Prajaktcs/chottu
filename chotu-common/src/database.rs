@@ -1080,6 +1080,7 @@ mod tests {
             "title",
             "due_date",
             "due_at",
+            "due_has_time",
             "reminded_at",
             "message_id",
             "status",
