@@ -45,6 +45,10 @@ pub async fn build_nutrition_trend_reports(
             .filter(|r| r.family_member_id == member.id)
             .collect();
 
+        let condition_block =
+            crate::condition_trend_block(pool, config, only_member_id, &member.id, today, days)
+                .await?;
+
         if member_rows.is_empty() {
             let mut report = format!(
                 "📈 *Nutrition Trends: {}* (last {} days)\n\n_No health summaries logged in this window._",
@@ -75,14 +79,7 @@ pub async fn build_nutrition_trend_reports(
                     .with_private_member(only_member_id),
             )
             .await;
-            for condition in &ctx.conditions {
-                if let Some((date, score)) = condition.scores.last() {
-                    report.push_str(&format!(
-                        "\n• Reported symptoms — {}: {}/5 ({})",
-                        condition.label, score, date
-                    ));
-                }
-            }
+            report.push_str(&condition_block);
             if let Some(llm) = llm {
                 append_coach_tip(llm, &ctx, &mut report).await;
             }
@@ -179,6 +176,8 @@ pub async fn build_nutrition_trend_reports(
             ));
         }
         msg.push_str("```\n");
+
+        msg.push_str(&condition_block);
 
         if let Some(llm) = llm {
             let ctx = NutritionCoachContext::from_trend_summaries(
@@ -277,6 +276,47 @@ mod tests {
             .unwrap();
         assert!(!household[0].contains("Skin symptoms"));
         assert!(!household[0].contains("Reported symptoms"));
+    }
+
+    #[tokio::test]
+    async fn condition_timeline_covers_requested_window_with_or_without_nutrition() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let mut config = AppConfig::default();
+        config.family.members[0].health_conditions = vec![chotu_common::HealthCondition {
+            id: "skin".into(),
+            label: "Private symptoms".into(),
+            check_in: true,
+            lag_window: [1, 3],
+            notes: None,
+        }];
+        let today = config.now_in_tz().date_naive();
+        // Include scores older than the coach context's seven-day window.
+        for offset in 7..14 {
+            sqlx::query("INSERT INTO condition_checkin (family_member_id, condition_id, date, score) VALUES ('alex', 'skin', ?, 2)")
+                .bind((today - chrono::Duration::days(offset)).to_string()).execute(&pool).await.unwrap();
+        }
+        for with_nutrition in [false, true] {
+            if with_nutrition {
+                sqlx::query(
+                    "INSERT INTO health_family_summary (family_member_id, date) VALUES ('alex', ?)",
+                )
+                .bind(today.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let private = build_nutrition_trend_reports(&pool, &config, 14, None, Some("alex"))
+                .await
+                .unwrap();
+            assert!(private[0].contains("Private symptoms* (last 14 days, 7 check-ins)"));
+            assert!(private[0].contains("2 2 2 2 2 2 2 . . . . . . ."));
+            let household = build_nutrition_trend_reports(&pool, &config, 14, None, None)
+                .await
+                .unwrap();
+            assert!(household
+                .iter()
+                .all(|report| !report.contains("Private symptoms")));
+        }
     }
 
     #[test]

@@ -30,7 +30,7 @@ impl ConditionFoodFlag {
     }
 }
 
-fn private_member<'a>(
+pub(crate) fn private_member<'a>(
     config: &'a AppConfig,
     recipient: Option<&str>,
     member_id: &str,
