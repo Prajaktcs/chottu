@@ -3,7 +3,7 @@
 use chotu_common::{
     escape_md, format_brief_calendar_section, truncate, AppConfig, HealthFamilySummary,
 };
-use chrono::{Duration, Local, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate, Weekday};
 use sqlx::SqlitePool;
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -32,7 +32,8 @@ pub async fn compose_morning_brief(
     config: &AppConfig,
     for_member_id: Option<&str>,
 ) -> String {
-    compose_morning_brief_for_date(pool, config, for_member_id, Local::now().date_naive()).await
+    compose_morning_brief_for_date(pool, config, for_member_id, config.now_in_tz().date_naive())
+        .await
 }
 
 pub(crate) async fn compose_morning_brief_for_date(
@@ -72,7 +73,35 @@ pub(crate) async fn compose_morning_brief_for_date(
     out.push_str("\n🏋️ *Training*\n");
     out.push_str(&format_training_section(pool, config, date, &yesterday, for_member_id).await);
 
+    out.push_str(&format_weekly_conditions(pool, config, for_member_id, date).await);
+
     out
+}
+
+async fn format_weekly_conditions(
+    pool: &SqlitePool,
+    config: &AppConfig,
+    for_member_id: Option<&str>,
+    date: NaiveDate,
+) -> String {
+    if date.weekday() != Weekday::Sun || for_member_id.is_none() {
+        return String::new();
+    }
+    match health_coach::weekly_condition_lines(
+        pool,
+        config,
+        for_member_id,
+        date - Duration::days(1),
+    )
+    .await
+    {
+        Ok(lines) if !lines.is_empty() => format!("\n🩺 *Weekly condition check-in*{lines}"),
+        Ok(_) => String::new(),
+        Err(error) => {
+            eprintln!("Morning brief: condition summary query failed: {error:?}");
+            "\n_Could not load weekly condition summary._\n".into()
+        }
+    }
 }
 
 /// Open tasks visible in a morning brief for the given chat scope.
@@ -411,6 +440,39 @@ impl NaiveDateExt {
 #[cfg(test)]
 mod tests {
     use super::task_in_brief_scope;
+
+    #[tokio::test]
+    async fn weekly_conditions_are_sunday_only_and_private_through_saturday() {
+        use super::*;
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let mut config = AppConfig::default();
+        config.family.members[0].health_conditions = vec![chotu_common::HealthCondition {
+            id: "skin".into(),
+            label: "Alex private symptoms".into(),
+            check_in: true,
+            lag_window: [1, 3],
+            notes: None,
+        }];
+        sqlx::raw_sql("INSERT INTO condition_checkin (family_member_id, condition_id, date, score) VALUES ('alex', 'skin', '2026-10-03', 2), ('alex', 'skin', '2026-10-04', 5), ('jordan', 'skin', '2026-10-03', 4)").execute(&pool).await.unwrap();
+        let sunday = NaiveDate::from_ymd_opt(2026, 10, 4).unwrap();
+        let lines = format_weekly_conditions(&pool, &config, Some("alex"), sunday).await;
+        assert!(lines.contains("Alex private symptoms"));
+        assert!(lines.contains("ending 2026-10-03: 1/7 check-ins, average 2.0/5"));
+        assert!(!lines.contains("5.0/5"));
+        assert!(format_weekly_conditions(&pool, &config, None, sunday)
+            .await
+            .is_empty());
+        assert!(
+            format_weekly_conditions(&pool, &config, Some("jordan"), sunday)
+                .await
+                .is_empty()
+        );
+        assert!(
+            format_weekly_conditions(&pool, &config, Some("alex"), sunday + Duration::days(1))
+                .await
+                .is_empty()
+        );
+    }
 
     #[test]
     fn household_brief_shows_all_assignees() {

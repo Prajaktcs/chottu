@@ -3,6 +3,7 @@ use sqlx::SqlitePool;
 
 mod coach_enrich;
 mod coaching;
+mod condition_trends;
 pub mod conditions;
 mod fitness_plan;
 mod sync;
@@ -16,6 +17,7 @@ pub use coaching::{
     append_coach_tip, generate_fitness_coach_tip, generate_nutrition_coach_tip,
     FitnessCoachContext, NutritionCoachContext,
 };
+pub use condition_trends::{condition_trend_block, weekly_condition_lines};
 pub use fitness_plan::{
     activity_matches_plan_kind, classify_activity_type, count_strength_sessions,
     count_strengthish_sessions, current_week_start_str, generate_and_store_weekly_plan,

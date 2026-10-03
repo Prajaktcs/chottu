@@ -44,7 +44,8 @@ Private `/status` and `/trends` coach tips can reference your own watchlists,
 reported scores from the last seven calendar days, and that day's food-tag matches.
 Skipped scores remain unknown. Household coaching receives no condition details.
 The coach is instructed not to invent triggers, claim food caused symptoms, or
-recommend treatment. Lag-aware associations are still upcoming.
+recommend treatment. The deterministic condition section below is separate from
+these coach tips.
 
 ---
 
@@ -136,6 +137,26 @@ Default `7`. Multi-day nutrition/activity plus a short coach tip per member with
 ```
 
 Plain text also works: `trends last 14 days`.
+
+In a linked personal DM, conditions with at least seven check-ins in the requested
+window also show a score timeline (`.` means skipped), your watchlist tags logged
+in each score's configured lag window, and average recorded sleep on scored days.
+With fewer check-ins, the latest score and count are shown instead. This works
+even without nutrition summaries. Match dates refer to **score days**, not meal
+days; lag windows use local calendar days, including daylight-saving changes.
+
+For tentative comparisons, use a longer window such as `/trends 30`. Each tag
+needs at least ten scored days with a match and ten without a logged match,
+paired by recorded sleep within half an hour. Controls are never reused. Both
+groups require food logs on every day in the lag window; missing scores, sleep,
+or food-log days are excluded. A missing tag means **no matching tag logged**,
+not proof you avoided that food. These are descriptive comparisons, not causal
+findings or treatment suggestions.
+
+Sunday's private morning brief includes a compact condition summary for the seven
+completed days through Saturday, using the existing morning-brief schedule and
+delivery retries. It reports check-in coverage, average scores, lag-window match
+counts, and recorded sleep. Household briefs and reports never show conditions.
 
 ---
 

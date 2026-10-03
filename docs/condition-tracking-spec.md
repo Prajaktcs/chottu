@@ -5,7 +5,7 @@ psoriasis) per family member, tag food logs against a fixed vocabulary, collect
 a daily symptom score during evening reflection, and surface lag-aware trends —
 without Chotu ever inventing medical advice.
 
-**Status:** M1–M5 shipped (schema, food tags, private check-ins, watchlists, meal flags and coach context) · remaining M6 · **Owner agents:** Coordinator (Signal, reflection),
+**Status:** M1–M5 shipped; M6 implemented (private timelines, sleep-matched lag comparisons, Sunday brief summary) · **Owner agents:** Coordinator (Signal, reflection),
 Health Coach (tips, trends)
 
 ---
@@ -232,7 +232,8 @@ tips never receive it. Scores cover seven calendar days ending on the report's
 as-of date; missing days remain absent. Food hits use that civil day's actual
 UTC bounds in the configured timezone, including daylight-saving transitions.
 The prompt also forbids causal claims and treatment recommendations. This stage
-does not compute lagged associations (M6).
+does not compute lagged associations; M6 renders those deterministically in a
+separate report section.
 
 ### 5. `/watch` and `/tags` commands (Signal)
 
@@ -267,6 +268,25 @@ condition block:
 - A short weekly Sunday line to the linked DM replaces per-meal "correlation"
   spam.
 
+**M6 implementation:** Match dates are symptom-score days. Timelines cover the
+requested `/trends` window (2–90 days); below seven check-ins they show the latest
+score and check-in count instead. Conditions are included even when nutrition
+summaries are absent, and never appear in household reports.
+
+Sleep is joined on each score's civil date. A descriptive association requires
+at least ten distinct day pairs with recorded sleep within 0.5 hours, without
+reusing controls. Each pair compares a logged tag hit in the configured lag
+window against no matching tag logged. Both days must have food logs on every
+day of their lag windows. Missing check-ins, sleep, and food-log days are not
+imputed. This conservative gate can withhold estimates even when each raw arm
+has ten days. Reports explicitly acknowledge incomplete logs and avoid causal
+claims; matching sleep does not remove other confounders.
+
+The weekly summary reuses Sunday's private morning brief and its persisted
+delivery retries, covering the seven completed days through Saturday. It reports
+coverage, average score, lag-window match counts, and recorded sleep without an
+association estimate. No new schedule, model call, or migration is required.
+
 ---
 
 ## Milestones
@@ -291,5 +311,4 @@ later). M4/M5 in either order; M6 last, once real data exists.
   group later with the local model.)
 - Backfill: run the keyword tagger over historical `food_log` rows in M2, or
   start clean? (Lean: backfill with `source = 'keyword'` — cheap and honest.)
-- Weekly summary day/time — reuse an existing schedule slot or add
-  `condition_weekly` to `schedules`?
+- Weekly summary day/time — resolved in M6: reuse the Sunday morning brief slot.
