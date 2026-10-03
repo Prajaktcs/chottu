@@ -131,7 +131,7 @@ fn association(trend: &Trend, tag: &str) -> Option<String> {
         .iter()
         .filter(|day| day.food_covered && day.score.is_some() && day.sleep.is_some())
         .collect();
-    let exposed: Vec<_> = eligible
+    let mut exposed: Vec<_> = eligible
         .iter()
         .copied()
         .filter(|day| day.hits.contains(tag))
@@ -141,17 +141,35 @@ fn association(trend: &Trend, tag: &str) -> Option<String> {
         .copied()
         .filter(|day| !day.hits.contains(tag))
         .collect();
+    exposed.sort_by(|a, b| {
+        a.sleep
+            .unwrap()
+            .total_cmp(&b.sleep.unwrap())
+            .then(a.date.cmp(&b.date))
+    });
+    controls.sort_by(|a, b| {
+        a.sleep
+            .unwrap()
+            .total_cmp(&b.sleep.unwrap())
+            .then(a.date.cmp(&b.date))
+    });
+    // In sorted one-dimensional caliper matching, pairing the smallest
+    // compatible values preserves maximum cardinality. A value below the
+    // opposite side's caliper cannot match any remaining day and can be skipped.
     let mut differences = Vec::new();
-    for day in exposed {
-        let best = controls
-            .iter()
-            .enumerate()
-            .map(|(i, control)| (i, (day.sleep.unwrap() - control.sleep.unwrap()).abs()))
-            .filter(|(_, delta)| *delta <= 0.5)
-            .min_by(|a, b| a.1.total_cmp(&b.1));
-        if let Some((index, _)) = best {
-            let control = controls.remove(index);
+    let (mut exposed_index, mut control_index) = (0, 0);
+    while exposed_index < exposed.len() && control_index < controls.len() {
+        let day = exposed[exposed_index];
+        let control = controls[control_index];
+        let delta = day.sleep.unwrap() - control.sleep.unwrap();
+        if delta < -0.5 {
+            exposed_index += 1;
+        } else if delta > 0.5 {
+            control_index += 1;
+        } else {
             differences.push(f64::from(day.score.unwrap() - control.score.unwrap()));
+            exposed_index += 1;
+            control_index += 1;
         }
     }
     if differences.len() < 10 {
@@ -512,5 +530,48 @@ mod tests {
             .await
             .unwrap();
         assert!(invalid.is_empty());
+    }
+
+    #[test]
+    fn sleep_matching_keeps_ten_pairs_when_nearest_first_would_lose_one() {
+        let start = NaiveDate::from_ymd_opt(2026, 9, 1).unwrap();
+        let mut days = Vec::new();
+        // Nearest-first consumes 7.5 for the first exposed day, leaving 7.0
+        // unmatched. A valid maximum pairing is 7.0→7.5 and 7.5→8.0.
+        for (exposed, sleeps) in [
+            (true, vec![7.5, 7.0]),
+            (false, vec![7.5, 8.0]),
+            (true, vec![10.0; 8]),
+            (false, vec![10.0; 8]),
+        ] {
+            for sleep in sleeps {
+                days.push(Day {
+                    date: start + Duration::days(days.len() as i64),
+                    score: Some(if exposed { 3 } else { 1 }),
+                    sleep: Some(sleep),
+                    hits: if exposed {
+                        BTreeSet::from(["dairy".into()])
+                    } else {
+                        BTreeSet::new()
+                    },
+                    food_covered: true,
+                });
+            }
+        }
+        let mut trend = Trend {
+            label: "Skin symptoms".into(),
+            lag: [0, 0],
+            watch: vec!["dairy".into()],
+            days,
+        };
+        let comparison = association(&trend, "dairy").expect("all ten valid pairs must be counted");
+        assert!(comparison.contains("10 days per group"));
+        assert!(comparison.contains("2.0 points higher"));
+        // Matching must not depend on the order in which scored days arrive.
+        trend.days.reverse();
+        assert_eq!(association(&trend, "dairy"), Some(comparison));
+        // A genuine nine-pair sample still fails the threshold.
+        trend.days.remove(0);
+        assert!(association(&trend, "dairy").is_none());
     }
 }
