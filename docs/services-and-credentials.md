@@ -202,4 +202,4 @@ sqlite3 chotu.db ".restore chotu.before-csv-repair.db"
 5. Optionally set `OLLAMA_MODEL=qwen3.5:9b` (and pull that model) for better triage
 6. Add OpenRouter (+ Finnhub) when you want `/research`
 
-See also: root README “Linking Accounts” and command pages under [`commands/`](./commands/).
+See also: [root README “Linking Accounts”](https://github.com/Prajaktcs/chottu/blob/main/README.md) and the [setup commands](./commands/setup.md) and [health commands](./commands/health.md).
