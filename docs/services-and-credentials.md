@@ -15,7 +15,7 @@ Family shape, goals, budgets, and investment philosophy live in `config.yaml` (f
 | signal-cli socket | `SIGNAL_CLI_SOCKET` | Unix-domain JSON-RPC socket; **required for `just run`** |
 | Optional household group | `SIGNAL_GROUP_ID` | Base64 group id (see commands below) |
 | Gemini | `GEMINI_API_KEY` | **Required for `just run`** (Signal coordinator won’t start without it) |
-| Local LLM | Ollama running + `OLLAMA_MODEL` | `just setup` / `just prereqs` default to `qwen3.5:4b`; prefer `qwen3.5:9b` for triage |
+| Local LLM | Ollama running + `OLLAMA_MODEL` + `OLLAMA_DECISION_MODEL` | Ollama 0.35+ for local Jev decisions (`tev1:0.8b`); `just setup` uses `qwen3.5:4b` for processing, with `qwen3.5:9b` recommended when memory permits |
 | Authorized direct messages | `config.yaml` → `family.members[].signal_aci` | Per-contact **ACI** UUID for each allowed DM; distinct from `SIGNAL_ACCOUNT`. Restart after changes |
 | Runtime socket tools | `nc`, `plutil` | Standard macOS commands checked by `just setup`; required to probe and reuse the signal-cli socket |
 
@@ -57,7 +57,8 @@ One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`fini
 | `OLLAMA_HOST` | `http://localhost` | Base host |
 | `OLLAMA_PORT` | `11434` | Port |
 | `OLLAMA_BASE_URL` | derived from host+port | Embeddings client override |
-| `OLLAMA_MODEL` | `qwen3.5:4b` from `just setup` | Email triage, memory answers, reflection, coach tips, `/plan` |
+| `OLLAMA_MODEL` | `qwen3.5:4b` from `just setup` | Email detail extraction / classification fallback, Signal arguments, memory answers, reflection, coach tips, `/plan` |
+| `OLLAMA_DECISION_MODEL` | `tev1:0.8b` | Local Jev-compatible email / Signal intent classification; `off` disables the decision path |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | `/memory` RAG index |
 
 ```bash
@@ -65,6 +66,7 @@ One-time device provisioning is `signal-cli link` (or JSON-RPC `startLink`/`fini
 ollama pull llama3.2:3b
 ollama pull deepseek-r1:8b
 ollama pull qwen3.5:4b
+ollama pull tev1:0.8b
 
 # Memory RAG embeddings (not in just prereqs — pull before /memory):
 ollama pull nomic-embed-text
@@ -73,7 +75,66 @@ ollama pull nomic-embed-text
 ollama pull qwen3.5:9b
 ```
 
-Smaller 3–4B models work but misclassify more often; prefer `qwen3.5:9b` when you can.
+For generative extraction/fallback, prefer `qwen3.5:9b` when memory permits;
+smaller 3–4B chat models misclassify more often.
+
+Email triage and natural-language Signal routing first call local Ollama's
+[`/v1/systemone` endpoint](https://ollama.com/blog/ollama-now-supports-jev-style-decision-models).
+This is the Jev-compatible API, not TypeSafe's hosted service. With
+`OLLAMA_HOST=http://localhost`, email/message classification stays on this machine;
+no classification API key is needed.
+
+- A known email category with confidence **at least 0.80** skips generative
+  classification, except actionable candidates when unactionable feedback exists:
+  those receive a full local classification with the feedback before accepting
+  an action item. Feedback stays out of the compact decision request.
+  Receipts, tasks, trips, bills and reference notes still use `OLLAMA_MODEL`
+  for their existing detail extraction.
+- Confident Signal intents without arguments (status, brief, sync, net worth,
+  budget and help) skip generative intent classification. Training-plan requests
+  also require a confident yes/no decision about regeneration. Command-handler
+  processing is unchanged.
+- Calendar windows, food/member/date/time details, task titles, filters, monthly
+  periods, memory queries and clarification still use the generative classifier.
+  Its schema requests every nullable argument key; unrelated fields must be
+  `null`, while calendar windows and food portions/member/date/time stay explicit.
+- Uncertain, malformed, unavailable or oversized decision requests fall back to
+  local `OLLAMA_MODEL`, never to a hosted classifier. `tev1:0.8b` accepts up to 2,050
+  input tokens per decision; long messages or custom prompts can exceed that.
+- The default fast pass uses typed category criteria and the original
+  disambiguation rules, without the longer generative definitions/examples.
+  Custom email prompt files are passed intact; the generative fallback always
+  receives the full active prompt and user feedback.
+
+Use `OLLAMA_DECISION_MODEL=off` for chat-only classification; restart the coordinator
+after changing the setting. `chotu-evals` uses the same setting and reports accuracy,
+classification wall time, and both model names in its evaluation log.
+
+### Decision model sizing
+
+Keep `tev1:0.8b` as the first pass on the 16 GB Mac. With Ollama 0.35.1,
+`qwen3.5:9b` for fallback, the same 0.80 confidence gate and the 22-case email
+corpus in `evals/dataset.json`, the measured classification runs were:
+
+| First pass | Cascade accuracy | Finished in Jev | Classification wall time |
+| :--- | :--- | :--- | :--- |
+| `tev1:0.8b` | 22/22 | 15/22 | 81.8 s |
+| `tev1:4b` | 22/22 | 17/22 | 231.7 s |
+| `off` (Qwen only) | 22/22 | — | 158.5 s |
+
+In the mixed classification/extraction smoke, 0.8B (893 MB loaded) and Qwen
+(5.5 GB loaded) remained resident together. After the equivalent 4B smoke,
+only 4B (4.7 GB loaded) remained resident. Fewer fallbacks did not make 4B
+faster overall on this machine.
+
+4B handled standalone training-plan requests in about 1.7 s, while 0.8B
+escalated those requests to Qwen. Calendar and food requests still need argument
+extraction; their measured 4B cascades were slower than the 0.8B cascades.
+The small corpus does not establish production accuracy, and confidence scores
+are not an accuracy guarantee.
+
+For the optional larger first pass, run `ollama pull tev1:4b`, then set
+`OLLAMA_DECISION_MODEL=tev1:4b` and restart the coordinator.
 
 ---
 

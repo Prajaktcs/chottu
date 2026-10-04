@@ -1,4 +1,4 @@
-use crate::models::{EmailMetadata, OllamaClassificationResponse};
+use crate::models::{EmailClassification, EmailMetadata, OllamaClassificationResponse};
 use rig_core::client::{CompletionClient, Nothing};
 use rig_core::completion::Prompt;
 use rig_core::message::ToolChoice;
@@ -187,6 +187,7 @@ pub struct FoodLogContext {
 
 /// Structured free-text intent classification from local Ollama.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
+#[schemars(transform = require_intent_fields)]
 pub struct IntentClassification {
     pub intent: IntentKind,
     /// For TRENDS: lookback days (default 7 if omitted).
@@ -229,6 +230,22 @@ pub struct IntentClassification {
     #[serde(default)]
     pub clarify_question: Option<String>,
     pub reason: String,
+}
+
+// Optional values stay nullable, but the model must consider every argument:
+// otherwise it can legally emit only intent/reason and silently drop a named day.
+fn require_intent_fields(schema: &mut schemars::Schema) {
+    let Some(properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return;
+    };
+    let required = properties
+        .keys()
+        .map(|key| serde_json::Value::String(key.clone()))
+        .collect();
+    schema.insert("required".into(), serde_json::Value::Array(required));
 }
 
 /// Dispatch-friendly intent after LLM classification.
@@ -408,7 +425,7 @@ Intents:\
 - MEMORY: recall/search over journals, newsletter digests, personal references, or past tasks; put the question in memory_query (e.g. \"what was that Thai recipe\", \"did I write about the interview\", \"find my note on homelab\").\
 - PLAN: weekly training / workout plan; set plan_regenerate true for regenerate / new plan / redo plan. Examples: \"what's today's workout\", \"show my training plan\", \"regenerate plan\", \"beach body plan\".\
 - SYNC: pull Google Health / nutrition sync now.\
-- FOOD: log a meal; put member_id when named and the meal text in food_description (food only). When the user names when they ate it, resolve to food_date (YYYY-MM-DD) and optional food_time (HH:MM 24h local) using Today's local date from the user message — e.g. \"yesterday\" / \"last night\" / \"Friday\" become concrete dates; meal-of-day windows: breakfast≈08:00, lunch≈12:30 (12:00–13:00), snack(s)≈17:00 (16:00–18:00), dinner/supper≈20:45 (20:00–21:30). Prefer an explicit clock time when the user gave one. Omit food_date/food_time when logging for now/today with no specific meal time.\
+- FOOD: log a meal; put the named family member in member_id and only the food/portion in food_description, without meal/date/time framing. Resolve an explicitly named day to food_date (YYYY-MM-DD) using Today's local date; use null for today or unspecified. A named meal period IS time context even without a clock: breakfast means food_time 08:00, lunch 12:30, snack or snacks 17:00, dinner or supper 20:45. An explicit clock overrides that meal-period time. food_time must be HH:MM 24h local; use null only if neither a clock nor a meal period is mentioned.\
 - NETWORTH: portfolio / net worth questions.\
 - MONTHLY: monthly spending summary; set month as YYYY-MM if given.\
 - BUDGET: category spend budgets / how much left this month (e.g. \"budget\", \"how's food budget\", \"am I over on shopping\").\
@@ -427,218 +444,229 @@ Rules:\
 - Prefer MONTHLY for overall spend summary / category totals for a month.\
 - Prefer STATUS for health/finance status without an agenda ask.\
 - Never invent a food_description; if intent is FOOD but meal text is missing, use UNKNOWN with a clarify_question.\
-- Resolve relative food days/times into food_date/food_time; never leave relative words like \"yesterday\" in food_date — always YYYY-MM-DD. Omit food_date when the meal is for today / unspecified.\
+- Resolve relative food days into food_date; never leave relative words like \"yesterday\" in food_date — always YYYY-MM-DD. Use null for food_date when the meal is for today / unspecified.\
 - Never invent memory_query; if intent is MEMORY but the question is missing, use UNKNOWN with a clarify_question.\
 - Never invent task_title; if intent is TASK_ADD but title is missing, use UNKNOWN with a clarify_question.\
 - member_id must be one of the provided family member ids when set.\
+- Return every schema key. Fields irrelevant to the chosen intent must be JSON null, not unrelated defaults.\
 - Keep reason brief.\
 ";
 
-pub const DEFAULT_EMAIL_CLASSIFIER_SYSTEM_PROMPT: &str = "\
-You are an email classification assistant. Your job is to classify the metadata of incoming emails into one of nine categories.\
-\
-IMPORTANT DISAMBIGUATION RULES (apply these first):\
-- LEDGER_STREAM requires evidence of a completed or pending money/points movement (charged, paid, transferred, redeemed, order placed with amount). Marketing that says \"Get X points\", \"% off\", or \"deals\" is NOT LEDGER_STREAM — use TRASH.\
-- \"Your bill has been paid\" / autopay success notices with no purchase details are ARCHIVE (confirmation), not LEDGER_STREAM or FINANCIAL_BILL.\
-- FINANCIAL_BILL is for amounts still due / upcoming payments, not past-tense \"paid\" confirmations.\
-- NEWSLETTER is for subscribed digests you read (finance, markets, tech, word-of-the-day, quizzes, home tips). Do not put those in ARCHIVE or TRASH.\
-- TRASH is for sales pitches, discount blasts, and cold promo — not for subscribed educational/market digests.\
-- House tips / lifestyle content from publishers (e.g. House Outlook) is NEWSLETTER, never LEDGER_STREAM.\
-- Standalone local parking (SpotHero/ParkWhiz) is LEDGER_STREAM if paid; airport/trip parking is TRAVEL_ITINERARY.\
-- Broker/bank *market* alerts (\"traded above high volume\", price alerts, smart alerts) are NEWSLETTER or ARCHIVE — never LEDGER_STREAM. Share volume is not a dollar amount.\
-- Low-balance / available-balance threshold alerts are ARCHIVE, not LEDGER_STREAM (they are not debits/credits).\
-- Canceled/cancelled order notices are ARCHIVE, not LEDGER_STREAM.\
-- Credit-card \"authorization\" / foreign-transaction notices are ARCHIVE (holds), not LEDGER_STREAM unless a settled purchase receipt.\
-- Generic \"Direct Deposit Greater Than $X\" threshold alerts are ARCHIVE, not LEDGER_STREAM.\
-- Forum/community digests (Reddit, etc.) are NEWSLETTER or TRASH — never LEDGER_STREAM even if the post mentions money.\
-- Loan spam / pre-approval pitches (\"personalized loan\", \"superfast approval\") are TRASH.\
-- ACTION_ITEM is only for real personal/work commitments you must do (approve, reply to a person, submit something with a deadline). Social notifications, job-alert blasts, \"rate your purchase\", survey/test invitations, and charity signup nudges are NOT ACTION_ITEM — use TRASH or ARCHIVE.\
-- TRAVEL_ITINERARY requires a real booking (confirmation code, flight/hotel/parking dates). Travel deal emails, flight credits, cruise marketing, and standalone local parking (SpotHero) are NOT travel.\
-\
-1. LEDGER_STREAM:\
-   - Must be used for transactional emails with actual financial events: purchase receipts, order invoices/confirmations, refunds, payment requests, money transfers, dividend payouts, bank debit/credit alerts, or completed points redemptions.\
-   - Examples of LEDGER_STREAM: Amazon order confirmations, Google Play receipts, Lyft ride receipts, SpotHero/ParkWhiz local parking purchases, Interac e-Transfers, Wealthsimple dividend payouts, HDFC transaction alerts, \"You redeemed 30,000 PC Optimum points\".\
-   - Do NOT use for: \"Get N points\" offers, coupon/promo emails, tips/content newsletters, \"bill has been paid\" confirmations, volume/price alerts, balance-threshold alerts, canceled orders, or loan marketing.\
-\
-2. ARCHIVE:\
-   - Must be used for important non-marketing notifications, personal correspondence, account notices, security alerts, and system notices — including past-tense bill/autopay paid confirmations.\
-   - Examples of ARCHIVE: Security sign-in alerts, password changed alerts, \"Your bill has been paid\", monthly statement-available notices (without PDF attachment workflow), Jira/GitHub build status.\
-\
-3. TRASH:\
-   - Must be used for spam, marketing, ads, promotions, sales pitches, and low-value blasts that are not subscribed digests you keep.\
-   - Examples of TRASH: MealPal lunch reminders, \"50% off everything\", \"Get 30,000 PC Optimum points\", Kayak/airline deal blasts, insurance quote spam, fitness membership promo (\"Still thinking about…?\").\
-\
-4. ACTION_ITEM:\
-   - Must be used only for emails that create a real personal or work commitment you need to complete.\
-   - Examples of ACTION_ITEM: \"Action required: approve design\", \"please review this PR\", \"Task assigned to you\", a person asking you to send a document by Friday.\
-   - Do NOT use for: LinkedIn \"you have a new message\" / connection / recommendation notifications, LinkedIn Job Alerts or \"apply now\" blasts, Amazon/marketplace \"rate your transaction\", UserTesting or survey invites, charity/fundraising nudges (\"It starts next week\"), community digests, or generic \"view this\" CTAs. Those are TRASH (promo/engagement) or ARCHIVE (passive notification).\
-\
-5. TRAVEL_ITINERARY:\
-   - Must be used for trips and trip logistics: flights, hotels, buses/trains, car rentals, airport transfers, and parking only when clearly part of a trip (airport/hotel parking for travel dates).\
-   - Examples of TRAVEL_ITINERARY: Flight booking confirmation, Expedia itinerary, Airbnb reservation, airport parking for YYZ Jun 20–22.\
-   - Do NOT use for standalone local parking passes (SpotHero/ParkWhiz) with no trip context — those are LEDGER_STREAM (if paid) or ARCHIVE (pass-only).\
-   - Do NOT use for travel marketing: flight credits, \"deals from $X\", cruise promotions, highway/toll offers (407 ETR), or \"edit your trip\" nudges without a confirmed itinerary.\
-\
-6. FINANCIAL_BILL:\
-   - Must be used for future bills, invoices to be paid, payment reminders, or upcoming automatic payments still due.\
-   - Examples of FINANCIAL_BILL: Rogers bill due June 15, electric utility payment reminder, upcoming rent invoice.\
-   - Do NOT use for \"Your bill has been paid\" (that is ARCHIVE).\
-\
-7. STATEMENT_DOCUMENT:\
-   - Must be used for monthly statements, pay stubs, tax documents, or payslips that typically contain PDF attachments.\
-   - Examples of STATEMENT_DOCUMENT: Monthly banking statement, pay stub notice, tax receipt/slip, credit card statement with attachment.\
-\
-8. NEWSLETTER:\
-   - Must be used for subscribed digests you want to keep up with: tech/finance/markets blogs, Substack, educational dailies (word of the day, quiz), and lifestyle/home tip publishers.\
-   - Examples of NEWSLETTER: Rust Weekly, Robinhood Snacks, Finimize Daily, Mint/Livemint market briefs, Word Daily, Quiz Daily, House Outlook tip emails, Substack issue digests.\
-   - Do NOT classify these as ARCHIVE or TRASH.\
-\
-9. PERSONAL_REFERENCE:\
-   - Must be used for personal notes, bookmarked articles, recipes, instructions, reference guides, or self-addressed emails with information you want to save.\
-   - Examples of PERSONAL_REFERENCE: Recipe to try, homelab setup commands, link/article to read later.\
-\
-FEW-SHOT EXAMPLES:\
-\
-Sender: \"Amazon.in\" <auto-confirm@amazon.in>\
-Subject: Your Amazon.in order #405-1405094-1960341 of 1 item\
-Classification: LEDGER_STREAM (Reason: Amazon order receipt is a financial transaction)\
-\
-Sender: \"Simplii Financial\" <catch@payments.interac.ca>\
-Subject: Interac e-Transfer: The request for $200.00 transfer to PRAJAKT\
-Classification: LEDGER_STREAM (Reason: Interac e-Transfer request involves money transaction)\
-\
-Sender: \"PC Express\" <noreply@e.pcexpress.ca>\
-Subject: Get 30,000 PC Optimum points\
-Classification: TRASH (Reason: Points marketing offer, not a completed redemption or purchase)\
-\
-Sender: \"Wealthsimple\" <notifications@o.wealthsimple.com>\
-Subject: Your bill has been paid\
-Classification: ARCHIVE (Reason: Autopay/bill-paid confirmation, not a ledger purchase)\
-\
-Sender: \"Robinhood\" <notifications@robinhood.com>\
-Subject: Your account statement is available\
-Classification: ARCHIVE (Reason: Official monthly financial account statement notice)\
-\
-Sender: \"amazon.in\" <account-update@amazon.in>\
-Subject: amazon.in: Sign-in\
-Classification: ARCHIVE (Reason: Security sign-in alert)\
-\
-Sender: \"David Mollitor (Jira)\" <jira@apache.org>\
-Subject: [jira] [Created] (KAFKA-9443) Producer Can Fail with NPE\
-Classification: ARCHIVE (Reason: Developer task tracking notification, not marketing)\
-\
-Sender: \"Udemy Instructor\" <no-reply@e.udemymail.com>\
-Subject: Going LIVE today.\
-Classification: TRASH (Reason: Promotional marketing)\
-\
-Sender: \"Github Tasks\" <noreply@github.com>\
-Subject: alexexample, please review this PR\
-Classification: ACTION_ITEM (Reason: PR review request is an action item for the user)\
-\
-Sender: \"Air Canada\" <flightconfirmation@aircanada.ca>\
-Subject: Your booking confirmation for Montreal (YUL) to Toronto (YYZ)\
-Classification: TRAVEL_ITINERARY (Reason: Flight booking details for upcoming trip)\
-\
-Sender: \"SpotHero Support\" <support@spothero.com>\
-Subject: SpotHero Parking Confirmation - Check Your Parking Pass #129593055\
-Classification: LEDGER_STREAM (Reason: Standalone local parking purchase/pass with no trip context; not a travel itinerary)\
-\
-Sender: \"YYZ Airport Parking\" <noreply@torontopearson.com>\
-Subject: Your airport parking reservation for YYZ — Jun 20–22\
-Classification: TRAVEL_ITINERARY (Reason: Airport parking clearly tied to travel dates)\
-\
-Sender: \"Rogers Wireless\" <rogers-bill@rogers.com>\
-Subject: Your Rogers bill is ready to view - Due Date: June 15, 2026\
-Classification: FINANCIAL_BILL (Reason: Future phone bill notification with a due date)\
-\
-Sender: \"ADP Payslip\" <noreply@adp.com>\
-Subject: Your pay statement is now available\
-Classification: STATEMENT_DOCUMENT (Reason: Pay statement/payslip containing statement attachments)\
-\
-Sender: \"This Week in Rust\" <newsletter@thisweekinrust.org>\
-Subject: This Week in Rust #650\
-Classification: NEWSLETTER (Reason: Tech/programming community newsletter subscription)\
-\
-Sender: Finimize Daily <hello@finimize.com>\
-Subject: A tale of two tech companies\
-Classification: NEWSLETTER (Reason: Subscribed finance/markets daily digest)\
-\
-Sender: \"Word Daily\" <hello@worddaily.com>\
-Subject: Word of the Day: Psephology\
-Classification: NEWSLETTER (Reason: Subscribed educational word-of-the-day digest)\
-\
-Sender: \"Quiz Daily\" <mail@quizdaily.com>\
-Subject: After water, what is the most consumed beverage in the world?\
-Classification: NEWSLETTER (Reason: Subscribed daily quiz digest, not promo spam)\
-\
-Sender: \"House Outlook\" <hello@houseoutlook.com>\
-Subject: You're Cleaning Baseboards the Hard Way\
-Classification: NEWSLETTER (Reason: Home tips publisher content, not a paid service receipt)\
-\
-Sender: IQalerts@questrade.com\
-Subject: Alert: DDOG traded above high volume 6,250,982\
-Classification: NEWSLETTER (Reason: Broker market/volume alert; share volume is not a ledger transaction)\
-\
-Sender: PNC Alerts <pncalerts@pnc.com>\
-Subject: Your Checking Account Available Balance Is Less Than $100.00\
-Classification: ARCHIVE (Reason: Low-balance threshold alert, not a debit or credit)\
-\
-Sender: Coinbase <contact@coinbase.com>\
-Subject: We've canceled your order for 0.52 ETH\
-Classification: ARCHIVE (Reason: Canceled order notice; no completed money movement)\
-\
-Sender: FastApproval <aparna@maldiver.info>\
-Subject: SuperFast Approval for Your Personalized Loan For Rs 1,50,000\
-Classification: TRASH (Reason: Unsolicited loan spam / pre-approval pitch)\
-\
-Sender: Reddit <noreply@redditmail.com>\
-Subject: \"Metal card came in\"\
-Classification: NEWSLETTER (Reason: Forum digest/post notification, not a financial transaction)\
-\
-Sender: PNC Alerts <pncalerts@pnc.com>\
-Subject: Authorization on your credit card outside of Canada\
-Classification: ARCHIVE (Reason: Card authorization/hold notice, not a settled ledger purchase)\
-\
-Sender: LinkedIn <notifications-noreply@linkedin.com>\
-Subject: You have 1 new message\
-Classification: ARCHIVE (Reason: Passive social notification; not a real commitment)\
-\
-Sender: LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>\
-Subject: Data Analyst, Principal at Dayforce: up to CA$172K/year\
-Classification: TRASH (Reason: Automated job-alert marketing blast, not a task you committed to)\
-\
-Sender: LinkedIn <jobs-noreply@linkedin.com>\
-Subject: Prajakt, apply now to 'Staff Software Engineer'\
-Classification: TRASH (Reason: Job recommendation CTA, not an actionable personal commitment)\
-\
-Sender: Amazon Marketplace <marketplace-messages@amazon.ca>\
-Subject: Prajakt Chandrashekhar, will you rate your transaction at Amazon.ca?\
-Classification: TRASH (Reason: Marketplace rating nudge / engagement promo)\
-\
-Sender: UserTesting <noreply@usertesting.com>\
-Subject: New test opportunity for you!\
-Classification: TRASH (Reason: Paid-test / survey recruitment blast)\
-\
-Sender: \"Ashley (Great Cycle Challenge)\" <hello@greatcyclechallenge.ca>\
-Subject: It starts next week...\
-Classification: TRASH (Reason: Charity signup / fundraising nudge)\
-\
-Sender: Expedia.ca <email@expediamail.com>\
-Subject: Flights + C$300 credit\
-Classification: TRASH (Reason: Travel deal / credit marketing, not a booking confirmation)\
-\
-Sender: \"Alex Example\" <alex@example.com>\
-Subject: Reference: SSH setup commands for homelab\
-Classification: PERSONAL_REFERENCE (Reason: Personal note containing reference instructions)\
-\
-Submit a structured classification with a brief reason explaining why that category was chosen.\
-";
+pub const DEFAULT_EMAIL_CLASSIFIER_SYSTEM_PROMPT: &str =
+    include_str!("../../prompts/email_classifier_system_prompt.txt");
+
+// Typed criteria supply category definitions; retain all default disambiguation
+// rules without the longer generative definitions/examples. Custom prompts stay intact.
+static DEFAULT_EMAIL_DECISION_RULES: std::sync::LazyLock<&str> = std::sync::LazyLock::new(|| {
+    DEFAULT_EMAIL_CLASSIFIER_SYSTEM_PROMPT
+        .split_once("\n1. LEDGER_STREAM:")
+        .map_or(DEFAULT_EMAIL_CLASSIFIER_SYSTEM_PROMPT, |(rules, _)| rules)
+});
+
+/// Minimum confidence required to skip the generative classifier.
+const JEV_CONFIDENCE_FLOOR: f64 = 0.80;
+
+/// Local Ollama's Jev-compatible `/v1/systemone` endpoint.
+#[derive(Debug, Clone)]
+struct JevClient {
+    http: reqwest::Client,
+    endpoint: String,
+    model: String,
+}
+
+#[derive(Serialize)]
+struct JevRequest<'a, Q> {
+    model: &'a str,
+    state: &'a str,
+    questions: Q,
+}
+
+#[derive(Serialize)]
+struct JevChoiceQuestion<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    instructions: &'a str,
+    criteria: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct JevEmailQuestions<'a> {
+    classification: JevChoiceQuestion<'a>,
+}
+
+#[derive(Deserialize)]
+struct JevResponse {
+    answers: JevAnswers,
+}
+
+#[derive(Default, Deserialize)]
+struct JevAnswers {
+    #[serde(default)]
+    classification: Option<JevChoice<EmailClassification>>,
+    #[serde(default)]
+    intent: Option<JevChoice<IntentKind>>,
+    #[serde(default)]
+    plan_regenerate: Option<JevNoul>,
+}
+
+impl JevAnswers {
+    fn into_slotless_intent(self, model: &str) -> Option<IntentClassification> {
+        let answer = self.intent?;
+        if !answer.is_confident() {
+            return None;
+        }
+        let plan_regenerate = match answer.choice {
+            IntentKind::Status
+            | IntentKind::Brief
+            | IntentKind::Sync
+            | IntentKind::Networth
+            | IntentKind::Budget
+            | IntentKind::Help => None,
+            IntentKind::Plan => Some(self.plan_regenerate?.confident_bool()?),
+            // These intents need arguments or a tailored clarifying question.
+            // Do not replace an explicit date, amount, member or filter with defaults.
+            _ => return None,
+        };
+        Some(IntentClassification {
+            intent: answer.choice,
+            days: None,
+            calendar_window: None,
+            tasks_args: None,
+            task_title: None,
+            due_raw: None,
+            member_id: None,
+            food_description: None,
+            food_date: None,
+            food_time: None,
+            month: None,
+            memory_query: None,
+            plan_regenerate,
+            clarify_question: None,
+            reason: format!("Local Jev {model} (confidence {:.2})", answer.confidence),
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct JevChoice<T> {
+    choice: T,
+    confidence: f64,
+}
+
+impl<T> JevChoice<T> {
+    fn is_confident(&self) -> bool {
+        (JEV_CONFIDENCE_FLOOR..=1.0).contains(&self.confidence)
+    }
+}
+
+impl JevChoice<EmailClassification> {
+    fn can_finish_email_classification(&self, has_unactionable_feedback: bool) -> bool {
+        self.is_confident()
+            && (self.choice != EmailClassification::ActionItem || !has_unactionable_feedback)
+    }
+}
+
+#[derive(Deserialize)]
+struct JevNoul {
+    noul: f64,
+}
+
+impl JevNoul {
+    fn confident_bool(&self) -> Option<bool> {
+        if !(0.0..=1.0).contains(&self.noul) {
+            None
+        } else if self.noul >= JEV_CONFIDENCE_FLOOR {
+            Some(true)
+        } else if 1.0 - self.noul >= JEV_CONFIDENCE_FLOOR {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+impl JevClient {
+    async fn decide<Q: Serialize>(
+        &self,
+        state: &str,
+        questions: Q,
+    ) -> Result<JevAnswers, LlmError> {
+        let response = self
+            .http
+            .post(&self.endpoint)
+            .json(&JevRequest {
+                model: &self.model,
+                state,
+                questions,
+            })
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+            .map_err(|e| LlmError::Client(format!("Local Jev decision failed: {e}")))?;
+        response
+            .json::<JevResponse>()
+            .await
+            .map(|response| response.answers)
+            .map_err(|e| LlmError::Client(format!("Invalid Jev decision response: {e}")))
+    }
+}
+
+// Construct typed criteria once. Default disambiguation rules and custom prompts
+// remain authoritative; actionable candidates separately receive feedback review.
+static EMAIL_DECISION_CRITERIA: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(
+    || {
+        serde_json::json!({
+            "LEDGER_STREAM": "Actual money or points movements: purchase/order receipts, refunds, transfers, dividends, bank transaction alerts and completed points redemptions. Not offers, balances or market alerts.",
+            "ARCHIVE": "Non-marketing account/system notices: security sign-in and password alerts, personal correspondence and already-paid bill confirmations.",
+            "TRASH": "Spam, marketing, discounts, sales offers, cold pitches, job alerts, surveys and low-value engagement nudges.",
+            "ACTION_ITEM": "A real personal or work commitment: assigned tasks, approvals, direct review/reply requests or deadlines the user must meet.",
+            "TRAVEL_ITINERARY": "Confirmed flight, hotel, car rental, trip or airport-parking bookings and their travel logistics.",
+            "FINANCIAL_BILL": "Unpaid bills, invoices, payment reminders and upcoming automatic payments still due.",
+            "STATEMENT_DOCUMENT": "Bank/card statements, pay stubs, payslips and tax slips/documents, generally with PDF/document attachments.",
+            "NEWSLETTER": "Subscribed educational, finance, tech, market and lifestyle content: publisher digests, Substack/blog articles, daily words/quizzes, home tips and forum digests.",
+            "PERSONAL_REFERENCE": "Personal/self-addressed notes, saved recipes, bookmarked articles, how-to guides, technical commands and reference instructions.",
+        })
+    },
+);
+
+static INTENT_DECISION_QUESTIONS: std::sync::LazyLock<serde_json::Value> = std::sync::LazyLock::new(
+    || {
+        serde_json::json!({
+            "intent": {
+                "type": "choice",
+                "instructions": "Choose exactly one assistant intent using the criteria. Prefer FOOD for food eaten even without 'log'; TASK_ADD for creating tasks or reminders; TASKS for managing existing tasks; MEMORY for stored-note recall; CALENDAR for agenda-only asks. BRIEF is only an explicit full digest request. Unrelated or unclear messages are UNKNOWN.",
+                "criteria": {
+                    "BRIEF": "Full morning/day-ahead digest: 'morning brief', 'brief me'.",
+                    "CALENDAR": "Agenda/schedule/conflicts only: 'what's today', 'tomorrow's schedule', 'this week'.",
+                    "STATUS": "Today's finance and health status: 'how's today', 'how am I doing'.",
+                    "TRENDS": "Multi-day nutrition trends.",
+                    "TASKS": "List or manage existing tasks.",
+                    "TASK_ADD": "Create a new task or reminder.",
+                    "MEMORY": "Recall or search journals, digests, reference notes or past tasks.",
+                    "PLAN": "Weekly training or workout plan.",
+                    "SYNC": "Pull Google Health and nutrition sync now.",
+                    "FOOD": "Log a meal that was eaten.",
+                    "NETWORTH": "Portfolio or net worth.",
+                    "MONTHLY": "Monthly spending summary.",
+                    "BUDGET": "Category budget progress or overspend.",
+                    "HELP": "Available capabilities or commands.",
+                    "UNKNOWN": "Unrelated chat or an unclear request.",
+                },
+            },
+            "plan_regenerate": {
+                "type": "noul",
+                "instructions": "Does the user explicitly want a fresh or regenerated weekly training plan, rather than showing the current plan?",
+            },
+        })
+    },
+);
 
 #[derive(Debug, Clone)]
 pub struct ChotuLlm {
     client: ollama::Client,
     model: String,
     prompt_path: Option<String>,
+    decision: Option<JevClient>,
 }
 
 impl ChotuLlm {
@@ -655,6 +683,7 @@ impl ChotuLlm {
             client,
             model: model.to_string(),
             prompt_path: None,
+            decision: None,
         }
     }
 
@@ -664,12 +693,34 @@ impl ChotuLlm {
             client: ollama::Client::new(Nothing).unwrap(),
             model: model.to_string(),
             prompt_path: None,
+            decision: None,
         }
     }
 
     /// Set an optional path to a text file containing a custom system prompt.
     pub fn with_prompt_path(mut self, path: Option<String>) -> Self {
         self.prompt_path = path;
+        self
+    }
+
+    /// Use a local Jev-style decision model for classification. Uncertain
+    /// decisions and intents needing argument extraction use the chat model.
+    /// `None`, an empty string, or "off" disables the decision path.
+    pub fn with_decision_model(mut self, host: &str, port: u16, model: Option<&str>) -> Self {
+        self.decision = model
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("off"))
+            .map(|model| JevClient {
+                http: reqwest::Client::builder()
+                    .no_proxy()
+                    .redirect(reqwest::redirect::Policy::none())
+                    .connect_timeout(std::time::Duration::from_secs(2))
+                    .timeout(std::time::Duration::from_secs(60))
+                    .build()
+                    .expect("initialize local decision HTTP client"),
+                endpoint: format!("{host}:{port}/v1/systemone"),
+                model: model.to_string(),
+            });
         self
     }
 
@@ -789,6 +840,7 @@ impl ChotuLlm {
         };
 
         let mut user_prompt = Self::format_email_user_prompt(email);
+        let email_prompt_len = user_prompt.len();
 
         if !unactionable_examples.is_empty() {
             user_prompt.push_str("\nCRITICAL - USER FEEDBACK (UNACTIONABLE/NOT USEFUL EMAILS):\n");
@@ -797,6 +849,44 @@ impl ChotuLlm {
                 user_prompt.push_str(&format!("{}. {}\n", idx + 1, example));
             }
             user_prompt.push_str("\nIf the current email matches any of these, classify it as TRASH or ARCHIVE instead of ACTION_ITEM.\n");
+        }
+        if let Some(jev) = &self.decision {
+            let instructions = if system_prompt == DEFAULT_EMAIL_CLASSIFIER_SYSTEM_PROMPT {
+                *DEFAULT_EMAIL_DECISION_RULES
+            } else {
+                system_prompt
+            };
+            let decision = jev
+                .decide(
+                    &user_prompt[..email_prompt_len],
+                    JevEmailQuestions {
+                        classification: JevChoiceQuestion {
+                            kind: "choice",
+                            instructions,
+                            criteria: &EMAIL_DECISION_CRITERIA,
+                        },
+                    },
+                )
+                .await;
+            match decision {
+                Ok(JevAnswers {
+                    classification: Some(answer),
+                    ..
+                }) if answer.can_finish_email_classification(!unactionable_examples.is_empty()) => {
+                    return Ok(OllamaClassificationResponse {
+                        classification: answer.choice,
+                        reason: format!(
+                            "Local Jev {} (confidence {:.2})",
+                            jev.model, answer.confidence
+                        ),
+                    });
+                }
+                Ok(_) => println!(
+                    "Jev email decision uncertain or needs feedback review; classifying with {}.",
+                    self.model
+                ),
+                Err(e) => eprintln!("{e}; classifying email with {}.", self.model),
+            }
         }
 
         self.extract_structured(system_prompt, &user_prompt).await
@@ -892,6 +982,20 @@ in YYYY-MM-DD form from the email metadata and body.";
             members,
             text.trim()
         );
+        if let Some(jev) = &self.decision {
+            match jev.decide(&user_prompt, &*INTENT_DECISION_QUESTIONS).await {
+                Ok(answers) => {
+                    if let Some(classification) = answers.into_slotless_intent(&jev.model) {
+                        return Ok(classification);
+                    }
+                    println!(
+                        "Jev intent uncertain or needs arguments; processing with {}.",
+                        self.model
+                    );
+                }
+                Err(e) => eprintln!("{e}; classifying intent with {}.", self.model),
+            }
+        }
         // Intent routing needs data, not tool execution. Accept schema-constrained
         // JSON directly so a model that skips the extractor's submit tool still works.
         let agent = self
@@ -1609,6 +1713,168 @@ mod tests {
     use crate::models::EmailClassification;
 
     #[test]
+    fn jev_confidence_gate_rejects_uncertain_and_invalid_values() {
+        for confidence in [
+            JEV_CONFIDENCE_FLOOR - 0.001,
+            -0.01,
+            1.01,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            let answer = JevChoice {
+                choice: EmailClassification::Trash,
+                confidence,
+            };
+            assert!(!answer.is_confident(), "accepted confidence {confidence}");
+        }
+        for confidence in [JEV_CONFIDENCE_FLOOR, 1.0] {
+            let answer = JevChoice {
+                choice: EmailClassification::Archive,
+                confidence,
+            };
+            assert!(answer.is_confident(), "rejected confidence {confidence}");
+        }
+    }
+
+    #[test]
+    fn jev_action_items_require_unactionable_feedback_review() {
+        let action = JevChoice {
+            choice: EmailClassification::ActionItem,
+            confidence: 1.0,
+        };
+        assert!(!action.can_finish_email_classification(true));
+        assert!(action.can_finish_email_classification(false));
+        let archive = JevChoice {
+            choice: EmailClassification::Archive,
+            confidence: 1.0,
+        };
+        assert!(archive.can_finish_email_classification(true));
+    }
+
+    fn intent_decision(intent: IntentKind, confidence: f64, regenerate: Option<f64>) -> JevAnswers {
+        JevAnswers {
+            intent: Some(JevChoice {
+                choice: intent,
+                confidence,
+            }),
+            plan_regenerate: regenerate.map(|noul| JevNoul { noul }),
+            ..JevAnswers::default()
+        }
+    }
+
+    #[test]
+    fn jev_never_short_circuits_intents_needing_arguments() {
+        for intent in [
+            IntentKind::Calendar,
+            IntentKind::Trends,
+            IntentKind::Tasks,
+            IntentKind::TaskAdd,
+            IntentKind::Food,
+            IntentKind::Monthly,
+            IntentKind::Memory,
+            IntentKind::Unknown,
+        ] {
+            assert!(
+                intent_decision(intent, 1.0, None)
+                    .into_slotless_intent("local-decision")
+                    .is_none(),
+                "skipped argument extraction for {intent:?}"
+            );
+        }
+        assert!(
+            intent_decision(IntentKind::Brief, JEV_CONFIDENCE_FLOOR - 0.001, None)
+                .into_slotless_intent("local-decision")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn jev_plan_requires_a_confident_regeneration_decision() {
+        for regenerate in [None, Some(0.5), Some(-0.1), Some(1.1)] {
+            assert!(
+                intent_decision(IntentKind::Plan, 1.0, regenerate)
+                    .into_slotless_intent("local-decision")
+                    .is_none(),
+                "accepted ambiguous regeneration {regenerate:?}"
+            );
+        }
+        for (probability, regenerate) in [
+            (1.0 - JEV_CONFIDENCE_FLOOR, false),
+            (0.2, false),
+            (JEV_CONFIDENCE_FLOOR, true),
+        ] {
+            let classification = intent_decision(IntentKind::Plan, 1.0, Some(probability))
+                .into_slotless_intent("local-decision")
+                .unwrap();
+            assert_eq!(
+                classification.into_user_intent(),
+                UserIntent::Plan { regenerate }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn jev_unusable_decisions_escalate_instead_of_dispatching() {
+        for (status, decision_body) in [
+            (
+                200,
+                r#"{"answers":{"intent":{"choice":"BRIEF","confidence":0.1}}}"#,
+            ),
+            (
+                200,
+                r#"{"answers":{"intent":{"choice":"UNSUPPORTED","confidence":1.0}}}"#,
+            ),
+            (200, r#"{"answers":{"intent":{"choice":"BRIEF"}}}"#),
+            (200, r#"{"answers":{}}"#),
+            (503, r#"{"error":"decision model unavailable"}"#),
+        ] {
+            let (decision_url, decision_server) =
+                mock_photo_endpoint(status, decision_body.into()).await;
+            let chat_body = serde_json::json!({
+                "model": "test", "created_at": "2026-10-04T12:00:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": r#"{"intent":"CALENDAR","calendar_window":"tomorrow","reason":"agenda only"}"#,
+                },
+                "done": true,
+            })
+            .to_string();
+            let (chat_url, chat_server) = mock_photo_endpoint(200, chat_body).await;
+            let llm = ChotuLlm {
+                client: ollama::Client::builder()
+                    .api_key(Nothing)
+                    .base_url(&chat_url)
+                    .build()
+                    .unwrap(),
+                model: "test".into(),
+                prompt_path: None,
+                decision: Some(JevClient {
+                    http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                    endpoint: format!("{decision_url}/v1/systemone"),
+                    model: "local-decision".into(),
+                }),
+            };
+            let classification = llm
+                .classify_intent_on_date(
+                    "tomorrow's schedule",
+                    &[],
+                    chrono::NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                classification.into_user_intent(),
+                UserIntent::Calendar {
+                    window: "tomorrow".into()
+                },
+                "dispatched unusable Jev decision: {decision_body}"
+            );
+            decision_server.await.unwrap();
+            chat_server.await.unwrap();
+        }
+    }
+
+    #[test]
     fn openrouter_debug_does_not_disclose_api_key() {
         let client = OpenRouterClient::new("sensitive-router-key").unwrap();
         for rendered in [format!("{client:?}"), format!("{client:#?}")] {
@@ -1687,6 +1953,7 @@ mod tests {
                 .unwrap(),
             model: "test".into(),
             prompt_path: None,
+            decision: None,
         };
         let result = llm
             .classify_intent("Praj snacks 1/4 Lara bar", &["praj".into()])
@@ -1701,13 +1968,7 @@ mod tests {
                 time: Some("17:00".into()),
             }
         );
-        let (headers, request) = server.await.unwrap();
-        assert!(headers.starts_with("POST /api/chat "));
-        assert!(request["format"]["properties"]["intent"].is_object());
-        assert_eq!(request["think"], false);
-        assert!(request["tools"]
-            .as_array()
-            .is_none_or(|tools| tools.is_empty()));
+        server.await.unwrap();
     }
 
     #[tokio::test]
@@ -1723,6 +1984,26 @@ mod tests {
         let food = result.food_description.as_deref().unwrap();
         assert!(food.contains("1/4"), "portion lost: {food}");
         assert!(food.to_lowercase().contains("lara"), "food lost: {food}");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires local Ollama with qwen3.5:9b"]
+    async fn intent_live_calendar_tomorrow() {
+        let llm = ChotuLlm::new("http://localhost", 11434, "qwen3.5:9b");
+        let classification = llm
+            .classify_intent_on_date(
+                "what's on tomorrow",
+                &[],
+                chrono::NaiveDate::from_ymd_opt(2026, 10, 4).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            classification.into_user_intent(),
+            UserIntent::Calendar {
+                window: "tomorrow".into(),
+            }
+        );
     }
 
     const FOOD_PHOTO_JSON: &str = r#"{

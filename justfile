@@ -36,6 +36,7 @@ setup:
         echo "OLLAMA_HOST=http://localhost" >> .env
         echo "OLLAMA_PORT=11434" >> .env
         echo "OLLAMA_MODEL=qwen3.5:4b" >> .env
+        echo "OLLAMA_DECISION_MODEL=tev1:0.8b" >> .env
         echo "" >> .env
         echo "# App Configuration" >> .env
         echo "CHOTU_CONFIG_PATH=config.yaml" >> .env
@@ -78,6 +79,7 @@ prereqs:
     ollama pull llama3.2:3b
     ollama pull deepseek-r1:8b
     ollama pull qwen3.5:4b
+    ollama pull tev1:0.8b
 
 # Run signal-cli when needed, then start the supervisor coordinator
 run: setup

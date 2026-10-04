@@ -45,16 +45,21 @@ async fn main() -> Result<()> {
         .parse::<u16>()
         .unwrap_or(11434);
     let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5:9b".to_string());
+    let decision_model =
+        std::env::var("OLLAMA_DECISION_MODEL").unwrap_or_else(|_| "tev1:0.8b".to_string());
+    let model_label = format!("decision={decision_model};chat={model}");
     println!(
-        "Initializing Ollama LLM client for evaluation: {}:{} / model: {}",
-        host, port, model
+        "Initializing local Ollama for evaluation: {}:{} / {}",
+        host, port, model_label
     );
-    let llm = ChotuLlm::new(&host, port, &model);
+    let llm =
+        ChotuLlm::new(&host, port, &model).with_decision_model(&host, port, Some(&decision_model));
 
     let mut successes = 0;
     let total = test_cases.len();
 
     println!("\n--- Running Evaluation Run ---");
+    let run_start = std::time::Instant::now();
     for tc in &test_cases {
         let metadata = EmailMetadata {
             sender: tc.sender.clone(),
@@ -100,6 +105,10 @@ async fn main() -> Result<()> {
         successes,
         total
     );
+    println!(
+        "Classification wall time: {:.3}s",
+        run_start.elapsed().as_secs_f64()
+    );
 
     // Save validation log to database
     let eval_id = uuid::Uuid::new_v4().to_string();
@@ -109,7 +118,7 @@ async fn main() -> Result<()> {
     .bind(&eval_id)
     .bind(chrono::Utc::now())
     .bind("1.0.0")
-    .bind(&model)
+    .bind(&model_label)
     .bind(triage_accuracy)
     .bind(1.0)
     .execute(&pool)

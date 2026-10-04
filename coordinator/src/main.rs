@@ -38,12 +38,15 @@ async fn main() -> Result<()> {
         .parse::<u16>()
         .unwrap_or(11434);
     let model = std::env::var("OLLAMA_MODEL").unwrap_or_else(|_| "qwen3.5:9b".to_string());
+    let decision_model =
+        std::env::var("OLLAMA_DECISION_MODEL").unwrap_or_else(|_| "tev1:0.8b".to_string());
 
     println!(
-        "Initializing Ollama classification client ({}:{} / model: {})",
-        host, port, model
+        "Initializing local Ollama ({}:{} / decision: {} / processing: {})",
+        host, port, decision_model, model
     );
     let llm = ChotuLlm::new(&host, port, &model)
+        .with_decision_model(&host, port, Some(&decision_model))
         .with_prompt_path(config.email_classifier_prompt_path.clone());
 
     // 3. Spawn the agents concurrently as Tokio tasks
