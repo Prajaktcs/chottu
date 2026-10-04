@@ -288,6 +288,165 @@ async fn repair_preserves_non_csv_rows_and_repeated_source_occurrences() {
 }
 
 #[tokio::test]
+async fn repair_skips_legacy_csv_without_account_and_preserves_its_rows() {
+    let dir = TempDir::new().unwrap();
+    let pool = database().await;
+    source(
+        dir.path(),
+        "bank.csv",
+        "Date,Amount,Merchant,account\n2026-05-01,-10,Shop,test-account\n",
+    );
+    source(
+        dir.path(),
+        "amex-export-2026-05.csv",
+        "Date,Amount,Merchant\n2026-05-02,-20,Legacy Shop\n",
+    );
+    sqlx::query("INSERT INTO financial_ledger VALUES ('e96f3f9736e9910f38296039d1e2284c8e074de8426961ca9233826aab9bf890', '2026-05-01T00:00:00+00:00', -10, 'CAD', 'Dropped CSV', 'Shop', 'Uncategorized', 'BATCH_DROP', NULL)")
+        .execute(&pool).await.unwrap();
+    // Old Amex imports flipped the amount's sign and hashed the inferred institution.
+    sqlx::query("INSERT INTO financial_ledger VALUES ('493f53a10004085c6fac237606a10a69a97208b00c68df12ea917befc0756a06', '2026-05-02T00:00:00+00:00', 20, 'CAD', 'Amex', 'Legacy Shop', 'Uncategorized', 'BATCH_DROP', NULL)")
+        .execute(&pool).await.unwrap();
+
+    let result = rebuild_archived_csvs(&pool, dir.path(), "CAD")
+        .await
+        .unwrap();
+    assert_eq!(
+        (result.files, result.inserted, result.legacy_removed),
+        (1, 1, 1)
+    );
+    assert_eq!(result.skipped_files, 1);
+    let rows: Vec<(String, f64, String)> = sqlx::query_as(
+        "SELECT merchant, amount, source_type FROM financial_ledger ORDER BY merchant",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows,
+        vec![
+            ("Legacy Shop".into(), 20.0, "BATCH_DROP".into()),
+            ("Shop".into(), -10.0, "CSV_IMPORT".into()),
+        ]
+    );
+    let again = rebuild_archived_csvs(&pool, dir.path(), "CAD")
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            again.skipped_files,
+            again.inserted,
+            again.matched,
+            again.legacy_removed
+        ),
+        (1, 0, 1, 0)
+    );
+}
+
+#[tokio::test]
+async fn repair_skips_whole_sources_with_invalid_amounts_or_card_statuses() {
+    for invalid in [
+        "date,amount,merchant,account\n2026-05-02,-20,Partial,test-account\n2026-05-03,0,Invalid,test-account\n",
+        "transaction_date,transaction_type,merchant,amount,currency\n2026-05-02,Purchase,Invalid,-20,CAD\n",
+        "transaction_date,transaction_type,status,merchant,amount,currency\n2026-05-02,Purchase,Unknown,Invalid,-20,CAD\n",
+    ] {
+        let dir = TempDir::new().unwrap();
+        let pool = database().await;
+        source(dir.path(), "bank.csv", "Date,Amount,Merchant,account\n2026-05-01,-10,Shop,test-account\n");
+        source(dir.path(), "credit-card-activities.csv", invalid);
+        let stats = rebuild_archived_csvs(&pool, dir.path(), "CAD").await.unwrap();
+        assert_eq!((stats.files, stats.skipped_files, stats.inserted), (1, 1, 1));
+        let merchants: Vec<String> = sqlx::query_scalar("SELECT merchant FROM financial_ledger")
+            .fetch_all(&pool).await.unwrap();
+        assert_eq!(merchants, vec!["Shop"]);
+    }
+}
+
+#[tokio::test]
+async fn unusable_archives_fail_before_database_changes() {
+    let dir = TempDir::new().unwrap();
+    let pool = database().await;
+    sqlx::query("INSERT INTO financial_ledger VALUES ('legacy', '2026-05-01T00:00:00+00:00', -10, 'CAD', 'Dropped CSV', 'Shop', 'Uncategorized', 'BATCH_DROP', NULL)")
+        .execute(&pool).await.unwrap();
+    for (archive, reason) in [
+        (dir.path().join("missing"), "Cannot read CSV archive"),
+        (dir.path().to_owned(), "No CSV sources"),
+    ] {
+        let error = rebuild_archived_csvs(&pool, &archive, "CAD")
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains(reason));
+    }
+    source(
+        dir.path(),
+        "amex-export-2026-05.csv",
+        "Date,Amount,Merchant\n2026-05-01,-10,Shop\n",
+    );
+    let error = rebuild_archived_csvs(&pool, dir.path(), "CAD")
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("No usable CSV sources"));
+    let rows: Vec<String> = sqlx::query_scalar("SELECT id FROM financial_ledger")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec!["legacy"]);
+    let metadata: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'csv_import_%'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(metadata, 0);
+}
+
+#[tokio::test]
+async fn repair_cli_reports_skipped_file_and_cause() {
+    let dir = TempDir::new().unwrap();
+    let database = dir.path().join("ledger.db");
+    let pool = SqlitePoolOptions::new()
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(&database)
+                .create_if_missing(true),
+        )
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE TABLE financial_ledger (id TEXT PRIMARY KEY, timestamp TEXT NOT NULL, amount REAL NOT NULL, currency TEXT NOT NULL, institution TEXT NOT NULL, merchant TEXT NOT NULL, category TEXT NOT NULL, source_type TEXT NOT NULL, message_id TEXT UNIQUE)")
+        .execute(&pool).await.unwrap();
+    pool.close().await;
+    source(
+        dir.path(),
+        "bank.csv",
+        "Date,Amount,Merchant,account\n2026-05-01,-10,Shop,test-account\n",
+    );
+    let skipped = source(
+        dir.path(),
+        "amex-export-2026-05.csv",
+        "Date,Amount,Merchant\n2026-05-02,-20,Legacy Shop\n",
+    );
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_repair-csv-ledger"))
+        .arg("--apply")
+        .arg("--database")
+        .arg(&database)
+        .arg("--archive")
+        .arg(dir.path())
+        .arg("--backup")
+        .arg(dir.path().join("backup.db"))
+        .args(["--currency", "CAD"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let summary = String::from_utf8(output.stdout).unwrap();
+    assert!(summary.contains("Files: 1; files skipped: 1;"));
+    let diagnostic = String::from_utf8(output.stderr).unwrap();
+    assert!(diagnostic.contains(skipped.to_str().unwrap()));
+    assert!(diagnostic.contains("Missing account identity"));
+}
+
+#[tokio::test]
 async fn storage_failure_rolls_back_legacy_removal_and_new_rows() {
     let dir = TempDir::new().unwrap();
     let pool = database().await;
