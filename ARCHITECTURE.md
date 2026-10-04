@@ -40,7 +40,8 @@ Signal / IMAP / drop folder / Google APIs
 
 | Tier | Used for |
 | :--- | :--- |
-| **Local Ollama** (`OLLAMA_MODEL`, prefer `qwen3.5:9b`) | Email triage, free-text intent, memory answers, evening reflection, coach tips, weekly `/plan`, food date/time phrasing |
+| **Local Jev decisions** (`OLLAMA_DECISION_MODEL`, default `tev1:0.8b`) | First-pass email triage and Signal free-text intent routing through Ollama `/v1/systemone`; confidence below 0.80, unusable responses and argument-bearing intents escalate locally |
+| **Local Ollama** (`OLLAMA_MODEL`, prefer `qwen3.5:9b`) | Email detail extraction / triage fallback, free-text argument extraction, memory answers, evening reflection, coach tips, weekly `/plan`, food date/time phrasing |
 | **Local embeddings** (`nomic-embed-text`) | `/memory` RAG index over journals, newsletter digests, personal references, tasks |
 | **Gemini** (`GEMINI_API_KEY` — **required to start the Signal loop**) | Primary food-photo vision, PDF ingest, unstructured nutrition estimates |
 | **OpenRouter** (`OPENROUTER_API_KEY` — optional for photos) | Qwen vision fallback for food photos when Gemini fails; `/research` propose → score panel (default Sol + Qwen3.8-Max + Kimi K3) → Kimi judge |
