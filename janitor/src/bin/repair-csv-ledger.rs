@@ -65,8 +65,8 @@ async fn main() -> Result<()> {
         .context("Cannot create database backup; repair not started")?;
     println!("Backup: {}", backup.display());
     let stats = janitor::csv_import::rebuild_archived_csvs(&pool, &archive, &currency).await?;
-    println!("Files: {}; source transactions: {}; blank rows: {}; non-posted rows skipped: {}; legacy CSV rows removed: {}; corrected transactions inserted: {}; overlapping source rows matched: {}; metadata upgrades: {}",
-        stats.files, stats.source_rows, stats.blank_rows, stats.non_posted_rows,
+    println!("Files: {}; files skipped: {}; source transactions: {}; blank rows: {}; non-posted rows skipped: {}; legacy CSV rows removed: {}; corrected transactions inserted: {}; overlapping source rows matched: {}; metadata upgrades: {}",
+        stats.files, stats.skipped_files, stats.source_rows, stats.blank_rows, stats.non_posted_rows,
         stats.legacy_removed, stats.inserted, stats.matched, stats.updated);
     pool.close().await;
     Ok(())

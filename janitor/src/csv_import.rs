@@ -12,6 +12,7 @@ const SCHEMA: &str =
 #[derive(Debug, Default)]
 pub struct ImportStats {
     pub files: usize,
+    pub skipped_files: usize,
     pub source_rows: usize,
     pub blank_rows: usize,
     pub non_posted_rows: usize,
@@ -57,6 +58,7 @@ pub async fn import_csv_file(
 
 /// Rebuild only legacy CSV rows proven by archived source hashes. The caller must back up first.
 /// Existing CSV_IMPORT rows are reconciled, making reruns idempotent; receipts/emails are untouched.
+/// Unparseable or invalid sources are reported and skipped, retaining their legacy rows.
 pub async fn rebuild_archived_csvs(
     pool: &SqlitePool,
     archive: &Path,
@@ -64,10 +66,14 @@ pub async fn rebuild_archived_csvs(
 ) -> Result<ImportStats> {
     let archive = archive.to_owned();
     let currency = default_currency.to_owned();
-    let sources = tokio::task::spawn_blocking(move || parse_archive(&archive, &currency)).await??;
+    let (sources, skipped_files) =
+        tokio::task::spawn_blocking(move || parse_archive(&archive, &currency)).await??;
     let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
     ensure_schema(&mut tx).await?;
-    let mut stats = ImportStats::default();
+    let mut stats = ImportStats {
+        skipped_files,
+        ..ImportStats::default()
+    };
     let legacy_ids: HashSet<_> = sources
         .iter()
         .flat_map(|source| &source.legacy_ids)
@@ -154,7 +160,7 @@ async fn remove_legacy_rows(tx: &mut Transaction<'_, Sqlite>, ids: &[String]) ->
     Ok(removed)
 }
 
-fn parse_archive(archive: &Path, currency: &str) -> Result<Vec<ParsedCsv>> {
+fn parse_archive(archive: &Path, currency: &str) -> Result<(Vec<ParsedCsv>, usize)> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(archive)
         .with_context(|| format!("Cannot read CSV archive {}", archive.display()))?
         .map(|entry| entry.map(|entry| entry.path()))
@@ -173,15 +179,30 @@ fn parse_archive(archive: &Path, currency: &str) -> Result<Vec<ParsedCsv>> {
     if files.is_empty() {
         bail!("No CSV sources in {}", archive.display());
     }
-    files
-        .into_iter()
-        .map(|path| {
+    let mut sources = Vec::new();
+    let mut skipped_files = 0;
+    for path in files {
+        let result = (|| -> Result<ParsedCsv> {
             let source = parser::parse_csv_file(&path, currency)
                 .with_context(|| format!("Parsing {}", path.display()))?;
             validate(&source).with_context(|| format!("Validating {}", path.display()))?;
             Ok(source)
-        })
-        .collect()
+        })();
+        match result {
+            Ok(source) => sources.push(source),
+            Err(error) => {
+                eprintln!("Skipping archived CSV: {error:#}");
+                skipped_files += 1;
+            }
+        }
+    }
+    if sources.is_empty() {
+        bail!(
+            "No usable CSV sources in {} ({skipped_files} files skipped)",
+            archive.display()
+        );
+    }
+    Ok((sources, skipped_files))
 }
 
 fn validate(source: &ParsedCsv) -> Result<()> {
