@@ -1751,6 +1751,94 @@ mod tests {
         assert!(archive.can_finish_email_classification(true));
     }
 
+    fn email_cascade(decision_url: &str, chat_url: &str) -> ChotuLlm {
+        ChotuLlm {
+            client: ollama::Client::builder()
+                .api_key(Nothing)
+                .base_url(chat_url)
+                .build()
+                .unwrap(),
+            model: "test".into(),
+            prompt_path: None,
+            decision: Some(JevClient {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                endpoint: format!("{decision_url}/v1/systemone"),
+                model: "local-decision".into(),
+            }),
+        }
+    }
+
+    fn cascade_email() -> EmailMetadata {
+        EmailMetadata {
+            sender: "sender@example.com".into(),
+            subject: "Please rate your purchase".into(),
+            body_preview: Some("Tell us how we did".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn jev_email_confident_decisions_finish_without_chat() {
+        for (choice, expected, feedback) in [
+            (
+                "ARCHIVE",
+                EmailClassification::Archive,
+                vec!["rating requests".into()],
+            ),
+            ("ACTION_ITEM", EmailClassification::ActionItem, vec![]),
+        ] {
+            let body = serde_json::json!({
+                "answers": {"classification": {"choice": choice, "confidence": 0.99}}
+            })
+            .to_string();
+            let (url, server) = mock_photo_endpoint(200, body).await;
+            // Chat cannot succeed here: a confident decision must return directly.
+            let llm = email_cascade(&url, "http://127.0.0.1:0");
+            let email = cascade_email();
+            let result = llm.classify_email(&email, &feedback).await.unwrap();
+            assert_eq!(result.classification, expected);
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn jev_email_uncertain_errors_and_actionable_feedback_use_chat() {
+        for (status, decision_body, feedback) in [
+            (
+                200,
+                r#"{"answers":{"classification":{"choice":"ACTION_ITEM","confidence":0.1}}}"#,
+                vec![],
+            ),
+            (503, r#"{"error":"decision model unavailable"}"#, vec![]),
+            (
+                200,
+                r#"{"answers":{"classification":{"choice":"ACTION_ITEM","confidence":0.99}}}"#,
+                vec!["rating requests".into()],
+            ),
+        ] {
+            let (decision_url, decision_server) =
+                mock_photo_endpoint(status, decision_body.into()).await;
+            let chat_body = serde_json::json!({
+                "model": "test", "created_at": "2026-10-04T12:00:00Z",
+                "message": {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [{"function": {
+                        "name": "submit",
+                        "arguments": {"classification": "TRASH", "reason": "rating request"}
+                    }}]
+                },
+                "done": true
+            })
+            .to_string();
+            let (chat_url, chat_server) = mock_photo_endpoint(200, chat_body).await;
+            let llm = email_cascade(&decision_url, &chat_url);
+            let email = cascade_email();
+            let result = llm.classify_email(&email, &feedback).await.unwrap();
+            assert_eq!(result.classification, EmailClassification::Trash);
+            decision_server.await.unwrap();
+            chat_server.await.unwrap();
+        }
+    }
+
     fn intent_decision(intent: IntentKind, confidence: f64, regenerate: Option<f64>) -> JevAnswers {
         JevAnswers {
             intent: Some(JevChoice {
@@ -1959,6 +2047,7 @@ mod tests {
             .classify_intent("Praj snacks 1/4 Lara bar", &["praj".into()])
             .await
             .unwrap();
+        let mut arguments = serde_json::to_value(&result).unwrap();
         assert_eq!(
             result.into_user_intent(),
             UserIntent::Food {
@@ -1968,7 +2057,25 @@ mod tests {
                 time: Some("17:00".into()),
             }
         );
-        server.await.unwrap();
+        let (_, request) = server.await.unwrap();
+        let schema = &request["format"];
+        let validator = jsonschema::validator_for(schema).unwrap();
+        validator.validate(&arguments).unwrap();
+
+        for name in schema["properties"].as_object().unwrap().keys() {
+            let value = arguments.as_object_mut().unwrap().remove(name).unwrap();
+            assert!(
+                !validator.is_valid(&arguments),
+                "accepted missing intent argument {name}"
+            );
+            arguments[name] = serde_json::Value::Null;
+            if name == "intent" || name == "reason" {
+                assert!(!validator.is_valid(&arguments), "accepted null {name}");
+            } else {
+                validator.validate(&arguments).unwrap();
+            }
+            arguments[name] = value;
+        }
     }
 
     #[tokio::test]

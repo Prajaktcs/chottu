@@ -110,6 +110,12 @@ Use `OLLAMA_DECISION_MODEL=off` for chat-only classification; restart the coordi
 after changing the setting. `chotu-evals` uses the same setting and reports accuracy,
 classification wall time, and both model names in its evaluation log.
 
+Deterministic regressions cover confident email decisions, low-confidence/error
+fallbacks and actionable-feedback review. They also validate the emitted intent
+schema: omitted keys are rejected, optional arguments accept `null`, and intent
+and reason remain non-nullable. Run
+`cargo test -p chotu-common --locked --lib llm::tests::` for this coverage.
+
 ### Decision model sizing
 
 Keep `tev1:0.8b` as the first pass on the 16 GB Mac. With Ollama 0.35.1,
