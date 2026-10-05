@@ -1,0 +1,27 @@
+site_name: Chotu Documentation
+site_description: Operator guide and product notes for Chotu
+site_url: https://prajaktcs.github.io/chottu/
+repo_url: https://github.com/Prajaktcs/chottu
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+
+nav:
+  - Home: README.md
+  - Operations:
+      - Services & credentials: services-and-credentials.md
+      - Setup commands: commands/setup.md
+      - Health commands: commands/health.md
+      - Day loop: commands/day-loop.md
+      - Memory: commands/memory.md
+      - Finance: commands/finance.md
+      - Signal vs Telegram: signal-vs-telegram.md
+  - Product notes:
+      - Condition tracking: condition-tracking-spec.md
+      - Relationship graph: relationship-graph-spec.md

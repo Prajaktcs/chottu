@@ -133,7 +133,7 @@ household (family doctor, school, etc.).
 
 ## References
 
-- Architecture: [`ARCHITECTURE.md`](../ARCHITECTURE.md)
+- [Architecture](https://github.com/Prajaktcs/chottu/blob/main/ARCHITECTURE.md)
 - Day loop: [`docs/commands/day-loop.md`](./commands/day-loop.md)
 - Memory: [`docs/commands/memory.md`](./commands/memory.md)
-- Later domains: [`TODO.md`](../TODO.md)
+- [Later domains](https://github.com/Prajaktcs/chottu/blob/main/TODO.md)
