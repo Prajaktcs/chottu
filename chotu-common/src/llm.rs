@@ -782,7 +782,7 @@ impl ChotuLlm {
         self.extract_structured(system_prompt, user_prompt).await
     }
 
-    /// Structured extraction via Rig's tool-calling extractor.
+    /// Structured extraction via Rig's tool-calling extractor, without model thinking.
     /// Retries help smaller Ollama models that occasionally skip the `submit` tool.
     async fn extract_structured<T>(
         &self,
@@ -796,6 +796,7 @@ impl ChotuLlm {
             .client
             .extractor::<T>(&self.model)
             .preamble(system_prompt)
+            .additional_params(serde_json::json!({ "think": false }))
             .retries(2)
             .build();
 

@@ -12,6 +12,9 @@ use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
+/// Give interactive work GPU time between messages during mailbox catch-up.
+const EMAIL_PROCESSING_COOLDOWN: Duration = Duration::from_secs(5);
+
 const SIGNAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SIGNAL_SEND_TIMEOUT: Duration = Duration::from_secs(15);
 const SIGNAL_DELIVERY_LEASE_SECS: i64 = 30;
@@ -272,7 +275,11 @@ where
 
     println!("Found {} unseen emails to process.", uids.len());
 
-    for uid in uids {
+    for (index, uid) in uids.into_iter().enumerate() {
+        if index > 0 {
+            sleep(EMAIL_PROCESSING_COOLDOWN).await;
+        }
+
         let query = format!("{}", uid);
         let mut fetch_stream = session
             .uid_fetch(&query, "(RFC822.HEADER RFC822.TEXT INTERNALDATE)")
