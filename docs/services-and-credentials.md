@@ -106,6 +106,19 @@ no classification API key is needed.
   Custom email prompt files are passed intact; the generative fallback always
   receives the full active prompt and user feedback.
 
+Local structured extraction, including email classification fallback and email
+detail extraction, sends `think: false` to Ollama. Model selection, prompts,
+tool schemas, confidence thresholds and extraction retries are unchanged.
+Free-form prompt generation keeps its existing settings; disabling thinking
+does not unload the model or reduce its weight memory.
+
+With non-thinking extraction, `qwen3.5:9b` plus `tev1:0.8b` passed the same
+22-case triage corpus (22/22, 81.0 s). A separate five-case live extraction smoke
+passed amount, merchant and date checks for a receipt, non-transaction alert,
+task, bill and round trip; the observed chat responses contained no thinking
+trace. These are functional checks, not a before/after resource benchmark or a
+guarantee of production accuracy.
+
 Use `OLLAMA_DECISION_MODEL=off` for chat-only classification; restart the coordinator
 after changing the setting. `chotu-evals` uses the same setting and reports accuracy,
 classification wall time, and both model names in its evaluation log.
@@ -189,6 +202,13 @@ Enable Google Health API; add each family Google account as a consent-screen tes
 Set `email_sync_enabled: false` in `config.yaml` and restart Chotu to stop the
 Streamer before Gmail OAuth or IMAP connection. Existing installs default to
 `true` when the setting is omitted.
+
+Email catch-up stays sequential, with a five-second asynchronous cooldown before
+each message after the first in an unread batch. The first message has no added
+delay and the last has no trailing cooldown. Disappeared/skipped messages still
+count toward pacing, and there is no batch cutoff that could strand unread mail.
+This gives other work gaps between background email requests; it slows backlog
+processing but does not cap peak GPU use or unload resident models.
 
 ### Calendar (per adult)
 
