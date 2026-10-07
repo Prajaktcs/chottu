@@ -71,10 +71,10 @@ pub use ledger::{
     LedgerAmountReject, LEDGER_ABS_AMOUNT_HARD_MAX, LEDGER_USD_EQUIV_MAX,
 };
 pub use llm::{
-    ActionItemExtraction, ChotuLlm, FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind, GeminiClient,
-    IntentClassification, IntentKind, LedgerExtraction, LlmError, MissingSyncNutrition,
-    NutritionEstimation, OpenRouterClient, PersonalReferenceExtraction, TravelItineraryExtraction,
-    UpcomingBillExtraction, UserIntent,
+    ActionItemExtraction, ChotuLlm, FoodCorrectionAnalysis, FoodLogContext, FoodPhotoAnalysis,
+    FoodPhotoKind, GeminiClient, IntentClassification, IntentKind, LedgerExtraction, LlmError,
+    MissingSyncNutrition, NutritionEstimation, OpenRouterClient, PersonalReferenceExtraction,
+    TravelItineraryExtraction, UpcomingBillExtraction, UserIntent,
 };
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, memory_chunk_in_scope,

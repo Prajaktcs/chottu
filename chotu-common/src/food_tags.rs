@@ -187,38 +187,143 @@ pub fn sanitize_food_tags(tags: impl IntoIterator<Item = impl AsRef<str>>) -> Ve
         .collect()
 }
 
-pub fn keyword_tags_for(description: &str) -> Vec<String> {
-    let hay = padded_tokens(description);
-    let mut wanted: HashSet<&str> = HashSet::new();
-    let mut aliases: Vec<_> = KEYWORD_ALIASES.iter().collect();
-    aliases.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    for (needle, tag) in aliases {
-        let n = padded_tokens(needle);
-        if hay.contains(&n) {
-            wanted.insert(*tag);
+fn exclusion_scope(clause: &[&str], start: usize, words: usize) -> (bool, bool) {
+    let mut before = start;
+    while before > 0
+        && matches!(
+            clause[before - 1],
+            "any" | "added" | "scrambled" | "boiled" | "fried" | "poached"
+        )
+    {
+        before -= 1;
+    }
+    let negated = before > 0 && matches!(clause[before - 1], "no" | "without" | "not")
+        || clause.get(start + words) == Some(&"free");
+    let whole_meal = clause.len() == words + 1
+        || clause
+            .windows(3)
+            .any(|words| words == ["in", "this", "meal"])
+        || clause
+            .windows(3)
+            .any(|words| words == ["in", "the", "meal"])
+        || clause.contains(&"anywhere");
+    (negated, whole_meal)
+}
+
+/// Ingredient evidence is clause-local: an egg-free omelette is not egg evidence,
+/// but a separate side omelette still is. Only explicit exclusions veto model tags.
+fn food_tag_evidence(
+    description: &str,
+) -> (
+    [bool; FOOD_TAG_VOCABULARY.len()],
+    [bool; FOOD_TAG_VOCABULARY.len()],
+) {
+    let normalized = padded_tokens(description);
+    let tokens: Vec<_> = normalized.split_whitespace().collect();
+    let mut present = [false; FOOD_TAG_VOCABULARY.len()];
+    let mut excluded = [false; FOOD_TAG_VOCABULARY.len()];
+    let mut whole_meal_excluded = [false; FOOD_TAG_VOCABULARY.len()];
+    for clause in tokens.split(|token| matches!(*token, "|" | "with" | "and" | "but" | "plus")) {
+        let mut clause_present = [false; FOOD_TAG_VOCABULARY.len()];
+        let mut clause_excluded = [false; FOOD_TAG_VOCABULARY.len()];
+        for &(alias, tag) in KEYWORD_ALIASES {
+            let index = FOOD_TAG_VOCABULARY
+                .iter()
+                .position(|known| *known == tag)
+                .unwrap();
+            let words = alias.split_whitespace().count();
+            for (start, window) in clause.windows(words).enumerate() {
+                if !window.iter().copied().eq(alias.split_whitespace()) {
+                    continue;
+                }
+                // Plant milks are not affirmative evidence of dairy.
+                if alias == "milk"
+                    && start > 0
+                    && matches!(
+                        clause[start - 1],
+                        "coconut" | "soy" | "oat" | "almond" | "rice" | "cashew" | "pea" | "hemp"
+                    )
+                {
+                    continue;
+                }
+                let (negated, whole_meal) = exclusion_scope(clause, start, words);
+                if negated {
+                    clause_excluded[index] = true;
+                    // Global facts override guesses; named components stay scoped.
+                    whole_meal_excluded[index] |= whole_meal;
+                } else {
+                    clause_present[index] = true;
+                }
+            }
+        }
+        // Users can exclude a tag category directly, even when its name is
+        // not an ingredient alias (e.g. "no dairy" or "no added sugar").
+        for (index, tag) in FOOD_TAG_VOCABULARY.iter().enumerate() {
+            let words = tag.split('_').count();
+            for (start, window) in clause.windows(words).enumerate() {
+                if !window.iter().copied().eq(tag.split('_')) {
+                    continue;
+                }
+                let (negated, whole_meal) = exclusion_scope(clause, start, words);
+                if negated {
+                    clause_excluded[index] = true;
+                    whole_meal_excluded[index] |= whole_meal;
+                }
+            }
+        }
+        for index in 0..FOOD_TAG_VOCABULARY.len() {
+            excluded[index] |= clause_excluded[index];
+            present[index] |= clause_present[index] && !clause_excluded[index];
+            if clause_present[index] && !clause_excluded[index] {
+                whole_meal_excluded[index] = false;
+            }
         }
     }
+    for index in 0..FOOD_TAG_VOCABULARY.len() {
+        present[index] &= !whole_meal_excluded[index];
+    }
+    (present, excluded)
+}
+
+pub fn keyword_tags_for(description: &str) -> Vec<String> {
+    let (present, _) = food_tag_evidence(description);
     FOOD_TAG_VOCABULARY
         .iter()
-        .filter(|t| wanted.contains(*t))
-        .map(|t| (*t).to_string())
+        .zip(present)
+        .filter(|(_, present)| *present)
+        .map(|(tag, _)| (*tag).to_string())
         .collect()
 }
 
-/// Prefer sanitized LLM tags; fall back to the keyword map when the model returned none.
+/// Prefer sanitized LLM tags, enforcing explicit exclusions before either source.
 pub fn assign_food_tags(
     llm_tags: impl IntoIterator<Item = impl AsRef<str>>,
     description: &str,
 ) -> AssignedFoodTags {
     let from_llm = sanitize_food_tags(llm_tags);
+    let (present, excluded) = food_tag_evidence(description);
     if !from_llm.is_empty() {
         return AssignedFoodTags {
-            tags: from_llm,
+            tags: from_llm
+                .into_iter()
+                .filter(|tag| {
+                    let index = FOOD_TAG_VOCABULARY
+                        .iter()
+                        .position(|known| *known == tag)
+                        .unwrap();
+                    !excluded[index] || present[index]
+                })
+                .collect(),
             source: "llm",
         };
     }
     AssignedFoodTags {
-        tags: keyword_tags_for(description),
+        tags: FOOD_TAG_VOCABULARY
+            .iter()
+            .zip(present)
+            .filter(|(_, present)| *present)
+            .map(|(tag, _)| (*tag).to_string())
+            .collect(),
         source: "keyword",
     }
 }
@@ -228,6 +333,8 @@ fn padded_tokens(s: &str) -> String {
     for c in s.chars() {
         if c.is_ascii_alphanumeric() || c == '+' {
             out.push(c.to_ascii_lowercase());
+        } else if matches!(c, ',' | ';' | ':' | '.' | '\n' | '\r') {
+            out.push_str(" | ");
         } else {
             out.push(' ');
         }
@@ -375,5 +482,109 @@ mod tests {
         let assigned = assign_food_tags(["nope"], "beer");
         assert_eq!(assigned.source, "keyword");
         assert_eq!(assigned.tags, vec!["alcohol".to_string()]);
+    }
+
+    #[test]
+    fn explicit_egg_exclusions_override_keyword_and_model_tags() {
+        for description in [
+            "paneer with cream, no eggs",
+            "paneer without eggs",
+            "egg-free paneer",
+            "bhurji is paneer not eggs",
+            "egg-free omelette",
+            "omelette without eggs",
+            "paneer bhurji, not scrambled eggs",
+            "scrambled eggs with cream. Correction: there are no eggs in this meal",
+            "scrambled eggs. Correction: no eggs anywhere in this meal",
+        ] {
+            assert!(
+                !keyword_tags_for(description)
+                    .iter()
+                    .any(|tag| tag == "eggs"),
+                "{description}"
+            );
+            let assigned = assign_food_tags(["eggs", "dairy"], description);
+            assert_eq!(assigned.tags, vec!["dairy"], "{description}");
+            assert_eq!(assigned.source, "llm");
+        }
+    }
+
+    #[test]
+    fn scoped_egg_exclusion_preserves_a_separate_omelette() {
+        for description in [
+            "bhurji is paneer not eggs, with an omelette on the side",
+            "egg-free bhurji and an omelette",
+            "paneer without eggs; two eggs on the side",
+            "egg-free omelette plus a frittata",
+            "bhurji is paneer not scrambled eggs, with an omelette on the side",
+        ] {
+            assert!(
+                keyword_tags_for(description)
+                    .iter()
+                    .any(|tag| tag == "eggs"),
+                "{description}"
+            );
+            assert_eq!(
+                assign_food_tags(["eggs"], description).tags,
+                vec!["eggs"],
+                "{description}"
+            );
+        }
+    }
+
+    #[test]
+    fn exclusions_do_not_turn_substrings_or_unrelated_negation_into_evidence() {
+        assert_eq!(keyword_tags_for("eggplant, no eggs"), vec!["nightshades"]);
+        assert_eq!(keyword_tags_for("eggs without cream"), vec!["eggs"]);
+        assert_eq!(keyword_tags_for("not only eggs"), vec!["eggs"]);
+        assert_eq!(
+            assign_food_tags(["eggs"], "no eggs").tags,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            assign_food_tags(["unknown"], "cream, no eggs").tags,
+            vec!["dairy"]
+        );
+        assert_eq!(
+            assign_food_tags(["eggs"], "egg bhurji\nno eggs").tags,
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            keyword_tags_for("omelette\nwithout eggs"),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn explicit_category_exclusions_survive_plant_milk_and_model_guesses() {
+        let description = "creamy curry; no dairy; lentils and coconut milk";
+        assert!(assign_food_tags(["dairy"], description).tags.is_empty());
+        assert!(!keyword_tags_for(description)
+            .iter()
+            .any(|tag| tag == "dairy"));
+        assert_eq!(keyword_tags_for("soy milk"), vec!["soy"]);
+        assert!(keyword_tags_for("oat milk").is_empty());
+        assert!(assign_food_tags(["gluten"], "bread; no gluten")
+            .tags
+            .is_empty());
+        assert!(assign_food_tags(["added_sugar"], "cake; no added sugar")
+            .tags
+            .is_empty());
+        assert_eq!(
+            assign_food_tags(["dairy"], "curry without dairy; a side of cream").tags,
+            vec!["dairy"]
+        );
+    }
+
+    #[test]
+    fn newer_facts_supersede_earlier_unqualified_exclusions() {
+        assert_eq!(
+            assign_food_tags(["eggs"], "paneer\nno eggs\nI added two eggs").tags,
+            vec!["eggs"]
+        );
+        assert_eq!(
+            assign_food_tags(["eggs"], "egg bhurji\nI added two eggs\nno eggs").tags,
+            Vec::<String>::new()
+        );
     }
 }

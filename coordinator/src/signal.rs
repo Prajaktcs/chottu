@@ -25,6 +25,9 @@ use chotu_common::{
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
 
+#[path = "food_steering.rs"]
+mod food_steering;
+
 type Bot = SignalClient;
 type ChatId = SignalRecipient;
 
@@ -60,6 +63,7 @@ const HELP_TEXT: &str = "\
 These commands are supported:
 /help — display this text.
 /food [member_id] <description> — log food.
+/correctfood [meal_id] <correction> — update a meal; replying to its confirmation selects it.
 /status — show today's status report.
 /plan [new] — weekly training plan.
 /brief — morning brief: calendar, tasks, bills, nutrition.
@@ -848,6 +852,29 @@ async fn handle_inbound(
         send_signal(&bot, &chat_id, reason).await?;
         return Ok(());
     }
+    let allow_unquoted_correction = !matches!(
+        states.read().await.get(&chat_id),
+        Some(ConversationState::WaitingForReflection { .. })
+    );
+    match food_steering::handle(
+        &bot,
+        &inbound,
+        &pool,
+        &llm,
+        &gemini_client,
+        &shared_config,
+        allow_unquoted_correction,
+    )
+    .await
+    {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Food steering failed: {error:?}");
+            send_signal(&bot, &chat_id, "Couldn't finish meal handling. Check /status before retrying to avoid a duplicate; any saved correction can be synced with /sync.").await?;
+            return Err(error);
+        }
+    }
 
     match classify_inbound(&inbound) {
         InboundRoute::Image | InboundRoute::Message => {
@@ -911,7 +938,17 @@ async fn handle_command(
             send_signal(&bot, &chat_id, HELP_TEXT).await?;
         }
         Command::Food(args) => {
-            handle_food_log(&bot, &chat_id, args, &pool, &llm, &gemini_client, &config).await?;
+            handle_food_log(
+                &bot,
+                &chat_id,
+                &sender_aci,
+                args,
+                &pool,
+                &llm,
+                &gemini_client,
+                &config,
+            )
+            .await?;
         }
         Command::Status => {
             handle_status(&bot, &chat_id, &pool, &config, &llm).await?;
@@ -1149,6 +1186,7 @@ async fn handle_whoami(
 async fn handle_food_log(
     bot: &Bot,
     chat_id: &ChatId,
+    sender_aci: &str,
     args: String,
     pool: &SqlitePool,
     llm: &ChotuLlm,
@@ -1222,6 +1260,7 @@ async fn handle_food_log(
         pool,
         gemini_client,
         config,
+        sender_aci,
         &family_member_id,
         &description,
         food_date.as_deref(),
@@ -1240,6 +1279,7 @@ async fn log_food_for_member(
     pool: &SqlitePool,
     gemini_client: &GeminiClient,
     config: &AppConfig,
+    sender_aci: &str,
     family_member_id: &str,
     food_description: &str,
     food_date: Option<&str>,
@@ -1282,6 +1322,8 @@ async fn log_food_for_member(
                 chat_id,
                 pool,
                 config,
+                sender_aci,
+                timing_utterance,
                 family_member_id,
                 food_description,
                 &est,
@@ -1570,6 +1612,8 @@ async fn persist_food_estimation(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    sender_aci: &str,
+    user_facts: &str,
     family_member_id: &str,
     food_description: &str,
     est: &chotu_common::NutritionEstimation,
@@ -1583,7 +1627,7 @@ async fn persist_food_estimation(
         .format("%Y-%m-%d")
         .to_string();
 
-    let assigned = assign_food_tags(&est.tags, food_description);
+    let assigned = assign_food_tags(&est.tags, &format!("{food_description}\n{user_facts}"));
     if let Err(e) = persist_food_log_and_tags(
         pool,
         &log_id,
@@ -1600,6 +1644,7 @@ async fn persist_food_estimation(
         send_signal(&bot, chat_id, "Database error saving food log.").await?;
         return Ok(());
     }
+    food_steering::record_context(pool, chat_id, sender_aci, &log_id, user_facts).await?;
 
     let mut google_sync_note = String::new();
     if health_coach::member_health_credentials_configured(family_member_id, config) {
@@ -1721,6 +1766,10 @@ async fn persist_food_estimation(
         day_line,
         google_sync_note
     );
+    msg_text.push_str(&format!(
+        "\nMeal id: {} · Reply to this message to correct it.",
+        &log_id[..8]
+    ));
 
     let recipient = private_health_member_id(config, chat_id);
     let flags = match health_coach::conditions::pending_food_flags(
@@ -1743,7 +1792,8 @@ async fn persist_food_estimation(
         msg_text.push_str(&flag.confirmation_line());
     }
 
-    send_signal(&bot, chat_id, msg_text).await?;
+    let confirmation = send_signal(&bot, chat_id, msg_text).await?;
+    food_steering::record_confirmation(pool, chat_id, &log_id, confirmation).await?;
 
     if !flags.is_empty() {
         if let Err(error) = health_coach::conditions::mark_food_flags_sent(
@@ -1805,15 +1855,27 @@ async fn handle_clear_food(
     {
         Ok(ids) => {
             if let Err(e) =
-                health_coach::delete_google_nutrition_logs(&target_member_id, config, &ids).await
+                health_coach::delete_google_nutrition_logs(pool, &target_member_id, config, &ids)
+                    .await
             {
                 eprintln!(
                     "Failed to delete Google Health nutrition logs on clear: {:?}",
                     e
                 );
+                send_signal(bot, chat_id, "Could not remove the synced meals from Google Health. Local meals are unchanged; retry /clearfood.").await?;
+                return Ok(());
             }
         }
-        Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
+        Err(e) => {
+            eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e);
+            send_signal(
+                bot,
+                chat_id,
+                "Could not check synced meals. Local meals are unchanged.",
+            )
+            .await?;
+            return Ok(());
+        }
     }
 
     if let Err(e) = (async {
@@ -1990,15 +2052,26 @@ async fn handle_adjust_food(
     {
         Ok(ids) => {
             if let Err(e) =
-                health_coach::delete_google_nutrition_logs(&member_id, config, &ids).await
+                health_coach::delete_google_nutrition_logs(pool, &member_id, config, &ids).await
             {
                 eprintln!(
                     "Failed to delete Google Health nutrition logs before adjust: {:?}",
                     e
                 );
+                send_signal(bot, chat_id, "Could not remove the synced meals from Google Health. Local meals are unchanged; retry /adjustfood.").await?;
+                return Ok(());
             }
         }
-        Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
+        Err(e) => {
+            eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e);
+            send_signal(
+                bot,
+                chat_id,
+                "Could not check synced meals. Local meals are unchanged.",
+            )
+            .await?;
+            return Ok(());
+        }
     }
 
     // Keep micros from the external (Google) base; only macros are user-overridden.
@@ -2152,6 +2225,7 @@ async fn handle_undo_food(
 
     if let Some(google_id) = log_entry.google_data_point_id.as_ref() {
         if let Err(e) = health_coach::delete_google_nutrition_logs(
+            pool,
             &target_member_id,
             config,
             &[google_id.clone()],
@@ -2162,6 +2236,8 @@ async fn handle_undo_food(
                 "Failed to delete Google Health nutrition log on undo: {:?}",
                 e
             );
+            send_signal(bot, chat_id, "Could not remove that meal from Google Health. The local entry is unchanged; retry /undofood.").await?;
+            return Ok(());
         }
     }
 
@@ -5351,6 +5427,7 @@ async fn handle_message(
                 &llm,
                 &gemini_client,
                 &config,
+                None,
             )
             .await?;
             send_signal(&bot, &chat_id, "Evening reflection is still open — type your journal reply, or send a command to cancel.").await?;
@@ -5458,6 +5535,7 @@ async fn handle_message(
             &llm,
             &gemini_client,
             &config,
+            None,
         )
         .await?;
     } else {
@@ -5470,6 +5548,7 @@ async fn handle_message(
             &gemini_client,
             config,
             &scope,
+            &inbound.sender_aci,
         )
         .await?;
     }
@@ -5485,6 +5564,7 @@ async fn handle_food_photo(
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
+    update_target: Option<food_steering::FoodUpdateTarget>,
 ) -> Result<(), SignalError> {
     let Some(attachment) = inbound
         .attachments
@@ -5507,8 +5587,21 @@ async fn handle_food_photo(
     };
     let caption = strip_leading_food_command(caption_src);
 
-    let (member_id, caption_rest) =
+    let (parsed_member, caption_rest) =
         resolve_food_member_and_description(caption, config, chat_id.lookup_aci());
+    let member_id = update_target
+        .as_ref()
+        .map(|target| target.log.family_member_id.clone())
+        .unwrap_or(parsed_member);
+    let vision_caption = match &update_target {
+        Some(target) => format!(
+            "This photo updates ONE existing meal; preserve its consumed portion and supplied ingredients. \
+             Previous meal estimate: {}. Known user facts (later corrections take precedence): {}. \
+             New caption: {}. Use the photo to fill missing details, not replace explicit facts.",
+            target.log.raw_text_description, target.user_facts, caption_rest
+        ),
+        None => caption_rest.clone(),
+    };
     if reject_foreign_food_mutation(bot, chat_id, config, &member_id).await? {
         return Ok(());
     }
@@ -5539,7 +5632,7 @@ async fn handle_food_photo(
             .approximate_nutrition_from_image_with_fallback(
                 &image_bytes,
                 &attachment.content_type,
-                caption,
+                &vision_caption,
             )
             .await
     };
@@ -5611,15 +5704,8 @@ async fn handle_food_photo(
             } else {
                 caption_rest.clone()
             }
-        } else if caption_rest.is_empty()
-            || analysis
-                .description
-                .to_lowercase()
-                .contains(&caption_rest.to_lowercase())
-        {
-            analysis.description.clone()
         } else {
-            format!("{} ({})", analysis.description, caption_rest)
+            analysis.description.clone()
         };
         (desc, analysis.nutrition, vision_source.to_string())
     };
@@ -5634,6 +5720,27 @@ async fn handle_food_photo(
         format!("Using {} for *{}*…", source_note, member_id),
     )
     .await?;
+    if let Some(target) = update_target {
+        let facts = if caption_rest.is_empty() {
+            target.user_facts.clone()
+        } else {
+            format!("{}\nPhoto caption: {}", target.user_facts, caption_rest)
+        };
+        let tag_context = format!("{description}\n{facts}");
+        return food_steering::save_update(
+            bot,
+            chat_id,
+            &inbound.sender_aci,
+            pool,
+            config,
+            target,
+            &description,
+            &nutrition,
+            &facts,
+            &tag_context,
+        )
+        .await;
+    }
 
     let timing = if caption_rest.trim().is_empty() {
         resolve_food_log_timing_tz(None, None, config.resolved_tz())
@@ -5665,6 +5772,8 @@ async fn handle_food_photo(
         chat_id,
         pool,
         config,
+        &inbound.sender_aci,
+        &caption_rest,
         &member_id,
         &description,
         &nutrition,
@@ -5684,6 +5793,7 @@ async fn dispatch_free_text_intent(
     gemini_client: &GeminiClient,
     config: &AppConfig,
     scope: &CallerScope,
+    sender_aci: &str,
 ) -> Result<(), SignalError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -5805,6 +5915,7 @@ async fn dispatch_free_text_intent(
                 pool,
                 gemini_client,
                 config,
+                sender_aci,
                 &family_member_id,
                 &description,
                 date.as_deref(),

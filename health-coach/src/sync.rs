@@ -160,7 +160,7 @@ fn any_health_refresh_token_present() -> bool {
     std::env::vars().any(|(k, v)| k.starts_with("HEALTH_REFRESH_TOKEN_") && !v.is_empty())
 }
 
-fn food_log_to_nutrition_write(log: &FoodLog) -> NutritionLogWrite {
+pub(crate) fn food_log_to_nutrition_write(log: &FoodLog) -> NutritionLogWrite {
     let start = log.timestamp;
     let end = start + chrono::Duration::minutes(1);
     NutritionLogWrite {
@@ -199,30 +199,29 @@ pub async fn push_food_log_to_google(
     client: &GoogleHealthClient,
     log: &FoodLog,
 ) -> Result<String> {
-    let write = food_log_to_nutrition_write(log);
-    let name = client.create_nutrition_log(&write).await?;
-    sqlx::query("UPDATE food_log SET google_data_point_id = ? WHERE id = ?")
-        .bind(&name)
+    crate::food_corrections::ensure_food_log_upload_state(pool, log).await?;
+    crate::food_corrections::sync_food_log_with_client(pool, client, &log.id).await?;
+    sqlx::query_scalar("SELECT google_data_point_id FROM food_log WHERE id = ?")
         .bind(&log.id)
-        .execute(pool)
-        .await
-        .context("Failed to store google_data_point_id on food_log")?;
-    Ok(name)
+        .fetch_optional(pool)
+        .await?
+        .flatten()
+        .context("Food entry was deleted during Google sync")
 }
 
-/// Best-effort push of all unsynced food_log rows for a member/day.
-pub async fn push_pending_food_logs(
+async fn pending_food_logs_for_sync(
     pool: &SqlitePool,
-    client: &GoogleHealthClient,
     member_id: &str,
     date: &str,
     timezone: chrono_tz::Tz,
-) -> Result<usize> {
+) -> Result<Vec<FoodLog>> {
     let (start, end) = chotu_common::civil_day_bounds_utc(date, timezone)?;
-    let pending: Vec<FoodLog> = sqlx::query_as(
+    sqlx::query_as(
         "SELECT * FROM food_log \
-         WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
-           AND (google_data_point_id IS NULL OR google_data_point_id = '') \
+         WHERE family_member_id = ? \
+           AND ((julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
+                 AND (google_data_point_id IS NULL OR google_data_point_id = '')) \
+                OR EXISTS (SELECT 1 FROM food_log_corrections c WHERE c.food_log_id = food_log.id AND c.sync_state != 'synced')) \
          ORDER BY timestamp ASC",
     )
     .bind(member_id)
@@ -230,7 +229,18 @@ pub async fn push_pending_food_logs(
     .bind(end)
     .fetch_all(pool)
     .await
-    .context("Failed to fetch pending food_log rows")?;
+    .context("Failed to fetch pending food_log rows")
+}
+
+/// Best-effort push of unsynced meals on this day and outstanding corrections on any day.
+pub async fn push_pending_food_logs(
+    pool: &SqlitePool,
+    client: &GoogleHealthClient,
+    member_id: &str,
+    date: &str,
+    timezone: chrono_tz::Tz,
+) -> Result<usize> {
+    let pending = pending_food_logs_for_sync(pool, member_id, date, timezone).await?;
 
     let mut pushed = 0;
     for log in pending {
@@ -252,6 +262,7 @@ pub async fn push_pending_food_logs(
 /// Delete Google Health nutrition-log data points by stored resource names,
 /// using the given member's OAuth token.
 pub async fn delete_google_nutrition_logs(
+    pool: &SqlitePool,
     member_id: &str,
     config: &AppConfig,
     names: &[String],
@@ -260,6 +271,7 @@ pub async fn delete_google_nutrition_logs(
         return Ok(());
     }
     let client = google_health_client_for_member(member_id, config)?;
+    crate::food_corrections::resolve_pending_nutrition_creates(pool, &client, names).await?;
     client.batch_delete_nutrition_logs(names).await
 }
 
@@ -286,6 +298,37 @@ pub async fn google_data_point_ids_for_day(
     Ok(rows.into_iter().filter_map(|(id,)| id).collect())
 }
 
+async fn correction_versions<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    member_id: &str,
+) -> Result<Vec<(String, i64, String)>> {
+    Ok(sqlx::query_as(
+        "SELECT c.food_log_id, c.revision, c.sync_state FROM food_log_corrections c \
+         JOIN food_log f ON f.id = c.food_log_id WHERE f.family_member_id = ? ORDER BY c.food_log_id",
+    ).bind(member_id).fetch_all(executor).await?)
+}
+
+async fn guard_summary_refresh(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    member_id: &str,
+    date: &str,
+    expected: &[(String, i64, String)],
+) -> Result<()> {
+    // Serialize the final revision check with correction/undo writes, not HTTP calls.
+    sqlx::query(
+        "UPDATE health_family_summary SET date = date WHERE date = ? AND family_member_id = ?",
+    )
+    .bind(date)
+    .bind(member_id)
+    .execute(&mut **tx)
+    .await?;
+    let current = correction_versions(&mut **tx, member_id).await?;
+    if current != expected || current.iter().any(|(_, _, state)| state != "synced") {
+        bail!("Food corrections changed while Google sync was running; corrected local totals were preserved. Retry /sync");
+    }
+    Ok(())
+}
+
 /// Syncs Google Health metrics for `member_id` on `date` (YYYY-MM-DD) into SQLite.
 ///
 /// Nutrition is Google Health's daily rollup (which already includes local meals
@@ -308,6 +351,15 @@ pub async fn sync_member_for_date(
             e
         );
     }
+    // A pending immutable-log replacement has an old or ambiguous upstream value.
+    // Do not add the corrected local meal to that value or erase it with a stale rollup.
+    crate::food_corrections::ensure_corrections_synced_for_member(
+        pool,
+        member_id,
+        config.resolved_tz(),
+    )
+    .await?;
+    let versions = correction_versions(pool, member_id).await?;
 
     let summary: GoogleHealthFoodSummary = client.fetch_nutrition_summary(date).await?;
 
@@ -375,6 +427,8 @@ pub async fn sync_member_for_date(
     let caffeine = summary.caffeine + manual.caffeine_mg;
     let trans_fat = summary.trans_fat + manual.trans_fat_g;
 
+    let mut tx = pool.begin().await?;
+    guard_summary_refresh(&mut tx, member_id, date, &versions).await?;
     sqlx::query(
         r#"
         INSERT INTO health_family_summary (
@@ -470,9 +524,10 @@ pub async fn sync_member_for_date(
     .bind(steps)
     .bind(active_calories)
     .bind(sleep_hours)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to update health_family_summary in database")?;
+    tx.commit().await?;
 
     replace_exercise_log_for_day(pool, member_id, date, &exercises)
         .await
@@ -737,7 +792,7 @@ impl DayNutritionTotals {
         }
     }
 
-    fn add(&self, other: &Self) -> Self {
+    pub(crate) fn add(&self, other: &Self) -> Self {
         Self {
             calories: self.calories + other.calories,
             protein: self.protein + other.protein,
@@ -797,13 +852,13 @@ pub async fn sum_unsynced_food_log_for_day(
 }
 
 #[derive(Clone, Copy)]
-enum FoodLogSyncFilter {
+pub(crate) enum FoodLogSyncFilter {
     All,
     UnsyncedOnly,
 }
 
-async fn sum_food_log_for_day_filtered(
-    pool: &SqlitePool,
+pub(crate) async fn sum_food_log_for_day_filtered<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     member_id: &str,
     date: &str,
     timezone: chrono_tz::Tz,
@@ -854,14 +909,14 @@ async fn sum_food_log_for_day_filtered(
         .bind(member_id)
         .bind(start)
         .bind(end)
-        .fetch_one(pool)
+        .fetch_one(executor)
         .await
         .context("Failed to sum food_log for day")?;
     Ok(totals)
 }
 
-async fn fetch_summary_nutrition(
-    pool: &SqlitePool,
+pub(crate) async fn fetch_summary_nutrition<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     member_id: &str,
     date: &str,
 ) -> Result<DayNutritionTotals> {
@@ -900,7 +955,7 @@ async fn fetch_summary_nutrition(
     )
     .bind(date)
     .bind(member_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await
     .context("Failed to fetch health_family_summary nutrition")?;
 
@@ -923,6 +978,15 @@ pub async fn external_nutrition_base(
 /// Write nutrition columns on `health_family_summary` (activity/sleep untouched).
 pub async fn write_summary_nutrition(
     pool: &SqlitePool,
+    member_id: &str,
+    date: &str,
+    totals: &DayNutritionTotals,
+) -> Result<()> {
+    write_summary_nutrition_on(pool, member_id, date, totals).await
+}
+
+pub(crate) async fn write_summary_nutrition_on<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
     member_id: &str,
     date: &str,
     totals: &DayNutritionTotals,
@@ -1015,7 +1079,7 @@ pub async fn write_summary_nutrition(
     .bind(totals.vitamin_k_mcg)
     .bind(totals.caffeine_mg)
     .bind(totals.trans_fat_g)
-    .execute(pool)
+    .execute(executor)
     .await
     .context("Failed to write health_family_summary nutrition")?;
     Ok(())
@@ -1103,6 +1167,118 @@ pub fn credentials_configured() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stale_rollup_guard_detects_pending_completed_and_deleted_revisions() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let before = correction_versions(&pool, "alex").await.unwrap();
+        sqlx::query("INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories) VALUES ('meal', '2026-10-07T16:00:00Z', 'alex', 'corrected meal', 240)")
+            .execute(&pool).await.unwrap();
+        write_summary_nutrition(
+            &pool,
+            "alex",
+            "2026-10-07",
+            &DayNutritionTotals::macros(240, 0.0, 0.0, 0.0),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO food_log_corrections (food_log_id, revision, sync_state, replacement_name) VALUES ('meal', 1, 'create_pending', 'users/me/dataTypes/nutrition-log/dataPoints/meal-r1')")
+            .execute(&pool).await.unwrap();
+        let pending = correction_versions(&pool, "alex").await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            guard_summary_refresh(&mut tx, "alex", "2026-10-07", &pending)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+        sqlx::query(
+            "UPDATE food_log_corrections SET sync_state = 'synced' WHERE food_log_id = 'meal'",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let completed = correction_versions(&pool, "alex").await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            guard_summary_refresh(&mut tx, "alex", "2026-10-07", &before)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-10-07")
+                .await
+                .unwrap()
+                .calories,
+            240
+        );
+        let mut tx = pool.begin().await.unwrap();
+        guard_summary_refresh(&mut tx, "alex", "2026-10-07", &completed)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        sqlx::query("DELETE FROM food_log WHERE id = 'meal'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            guard_summary_refresh(&mut tx, "alex", "2026-10-07", &completed)
+                .await
+                .is_err()
+        );
+        tx.rollback().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sync_retries_historical_corrections_without_pushing_other_historical_meals() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        for (id, member, timestamp, google_id, correction_state) in [
+            (
+                "historical-correction",
+                "alex",
+                "2026-09-29T16:00:00Z",
+                Some("old-id"),
+                Some("delete_pending"),
+            ),
+            (
+                "historical-unsynced",
+                "alex",
+                "2026-09-29T17:00:00Z",
+                None,
+                None,
+            ),
+            (
+                "historical-synced",
+                "alex",
+                "2026-09-29T18:00:00Z",
+                Some("synced-id"),
+                Some("synced"),
+            ),
+            ("today-unsynced", "alex", "2026-10-07T16:00:00Z", None, None),
+            (
+                "other-member",
+                "sam",
+                "2026-09-29T16:00:00Z",
+                Some("other-id"),
+                Some("delete_pending"),
+            ),
+        ] {
+            sqlx::query("INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories, google_data_point_id) VALUES (?, ?, ?, 'meal', 400, ?)")
+                .bind(id).bind(timestamp).bind(member).bind(google_id).execute(&pool).await.unwrap();
+            if let Some(state) = correction_state {
+                sqlx::query("INSERT INTO food_log_corrections (food_log_id, revision, sync_state, remote_name, replacement_name) VALUES (?, 1, ?, ?, 'users/me/dataTypes/nutrition-log/dataPoints/replacement')")
+                    .bind(id).bind(state).bind(google_id).execute(&pool).await.unwrap();
+            }
+        }
+        let pending =
+            pending_food_logs_for_sync(&pool, "alex", "2026-10-07", chrono_tz::America::Toronto)
+                .await
+                .unwrap();
+        let ids: Vec<_> = pending.iter().map(|meal| meal.id.as_str()).collect();
+        assert_eq!(ids, vec!["historical-correction", "today-unsynced"]);
+    }
 
     #[tokio::test]
     async fn meal_totals_google_ids_and_tag_deletion_share_the_configured_day() {

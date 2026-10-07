@@ -6,6 +6,7 @@ mod coaching;
 mod condition_trends;
 pub mod conditions;
 mod fitness_plan;
+mod food_corrections;
 mod sync;
 mod trends;
 
@@ -26,6 +27,7 @@ pub use fitness_plan::{
     week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind, StoredWeeklyPlan,
     WeeklyFitnessPlan,
 };
+pub use food_corrections::{food_log_revision, revise_food_log, sync_corrected_food_log};
 pub use sync::{
     credentials_configured, delete_google_nutrition_logs, exercise_entries_for_day,
     exercise_entries_for_range, exercises_for_day, exercises_for_range, external_nutrition_base,

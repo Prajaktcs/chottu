@@ -77,11 +77,41 @@ Send a barcode, package, or plated meal (optional caption: `half the bowl` or `p
 
 Same logging path as `/food` (including Health push).
 
+**Steering ingredients:** put facts in the same photo's caption, for example:
+
+```text
+/food praj Paneer bhurji with cream, not scrambled eggs.
+No eggs anywhere in this meal. I ate half the bowl.
+Include the bread and vegetables shown.
+```
+
+Explicit ingredient identities, exclusions, quantities and consumed portions take precedence over visual guesses. Exclusions also constrain food tags; saying the bhurji is not eggs does not remove eggs from a separate omelette.
+
+A separate photo following your recent meal logs asks whether to update a meal or log a new one. Nothing from that photo is saved until you answer `update`, `new`, or `cancel`. With multiple candidates, use `update <meal id>` from the list. Choices belong to the sender and conversation, expire after 15 minutes, and reject superseded questions or meals changed since the question. A new photo replaces your previous unanswered photo choice.
+
+Replying to a meal confirmation with a photo explicitly updates that meal. A `/food ...` photo caption explicitly starts a new meal, even when sent as a reply. Send one image at a time.
+
+### Correcting a logged meal
+
+Reply to its confirmation with a correction such as `It's paneer, not eggs; keep the cream and half-bowl portion.` Confirmations show an eight-character meal ID.
+
+```text
+/correctfood <meal id> The bhurji is paneer, not eggs. No eggs in this meal.
+```
+
+An unquoted correction can select a meal only when there is exactly one candidate you logged in this conversation within the last 20 minutes; otherwise Chotu asks which meal. This window uses interaction time, not the meal's consumption date. While evening reflection is open, use a reply or `/correctfood` so ordinary reflection text is not interpreted as a correction. Historical meals without new confirmation mappings can be targeted by ID in your linked DM; group corrections require recorded sender provenance.
+
+Corrections replace nutrition and tags on the existing entry, preserving its member and consumption time, unaffected ingredients and portions, external nutrition, and activity. The original day's totals are rebuilt; no additional meal is created. Ambiguous model results ask for clarification without changing the entry. Analysis remains sequential: a correction sent during an estimate is processed after that estimate finishes, not acknowledged as an immediate interruption.
+
+Google Health's anonymous nutrition logs cannot be edited, so a synced correction deletes the old remote log and creates its replacement. Local success is reported separately from remote success. Interrupted replacements keep durable, revision-specific retry state; `/sync` retries outstanding corrections, including meals on earlier dates. While a replacement is unresolved, sync refuses to overwrite corrected local nutrition with a stale remote rollup.
+
+Initial uploads use the same durable, named retry path (revision zero), so a scheduled upload already in flight cannot overwrite a newer correction's remote reference. Updated confirmations retain the existing private condition-watchlist behavior for newly applicable tags.
+
 ---
 
 ## `/undofood [member_id]`
 
-Removes the last food entry logged through chat (and its Google Health log if synced). Rebuilds today’s summary from remaining `food_log` rows.
+Removes today's latest chat food entry by consumption timestamp (and its Google Health log if synced). Rebuilds today's summary from remaining `food_log` rows while preserving external nutrition. If remote deletion cannot be confirmed, the local entry is retained so its remote reference is not lost.
 
 ---
 
@@ -93,11 +123,15 @@ Removes the last food entry logged through chat (and its Google Health log if sy
 
 Overrides today’s totals. Clears meals logged through chat from Google Health first so the next sync doesn’t double-count.
 
+If remote deletion cannot be confirmed, the adjustment is not applied locally.
+
 ---
 
 ## `/clearfood [member_id]`
 
 Wipes today’s food logs + summary for that member.
+
+If remote deletion cannot be confirmed, local meals are retained.
 
 ---
 
