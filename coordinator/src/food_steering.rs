@@ -498,7 +498,11 @@ pub(super) async fn handle(
         return Ok(true);
     }
     let facts = format!("{}\nCorrection: {}", target.user_facts, correction);
-    let tag_context = format!("{}\nCorrection: {}", analysis.description, correction);
+    let tag_context = chotu_common::reconcile_food_tag_context(
+        &analysis.description,
+        &target.user_facts,
+        correction,
+    );
     save_update(
         bot,
         chat,
@@ -903,5 +907,77 @@ mod tests {
         assert!(!correction_cue("paneer bhurji with cream"));
         assert!(!correction_cue("I had eggs for breakfast"));
         assert!(acknowledgment("Thanks"));
+    }
+
+    #[tokio::test]
+    async fn undo_retries_pending_meal_without_deleting_a_newer_meal() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (dir, pool) = pool().await;
+        let config = AppConfig::default();
+        let member = chotu_common::default_member_id(&config, "household");
+        let date = config.now_in_tz().format("%Y-%m-%d").to_string();
+        let (start, _) = chotu_common::civil_day_bounds_utc(&date, config.resolved_tz()).unwrap();
+        for (id, description, calories, timestamp) in [
+            (
+                "pending-meal",
+                "paneer bhurji",
+                400,
+                start + Duration::hours(1),
+            ),
+            ("newer-meal", "new dinner", 300, start + Duration::hours(2)),
+        ] {
+            sqlx::query("INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, estimated_calories) VALUES (?, ?, ?, ?, ?)")
+                .bind(id).bind(timestamp).bind(member).bind(description).bind(calories)
+                .execute(&pool).await.unwrap();
+        }
+        sqlx::query("INSERT INTO food_log_deletion_intents (food_log_id, family_member_id, civil_date, original_timestamp, revision) VALUES ('pending-meal', ?, ?, ?, 0)")
+            .bind(member).bind(&date).bind(start + Duration::hours(1))
+            .execute(&pool).await.unwrap();
+
+        let listener = tokio::net::UnixListener::bind(dir.path().join("signal.sock")).unwrap();
+        let messages = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let captured = messages.clone();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            while let Some(line) = lines.next_line().await.unwrap() {
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(request["method"], "send");
+                captured
+                    .lock()
+                    .await
+                    .push(request["params"]["message"].as_str().unwrap().to_owned());
+                writer.write_all(format!("{}\n", serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":{"timestamp":100}})).as_bytes()).await.unwrap();
+            }
+        });
+        let bot = chotu_common::SignalClient::connect(dir.path().join("signal.sock"))
+            .await
+            .unwrap();
+        let chat = SignalRecipient::Group {
+            group_id: "household".into(),
+        };
+        super::super::handle_undo_food(&bot, &chat, String::new(), &pool, &config)
+            .await
+            .unwrap();
+        let remaining: Vec<(String, i32)> =
+            sqlx::query_as("SELECT id, estimated_calories FROM food_log ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, [("newer-meal".into(), 300)]);
+        let completed: i64 = sqlx::query_scalar(
+            "SELECT completed FROM food_log_deletion_intents WHERE food_log_id = 'pending-meal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(completed, 1);
+        let messages = messages.lock().await;
+        assert!(messages
+            .iter()
+            .any(|message| message.contains("paneer bhurji")
+                && message.contains("Today now:* 300 kcal")));
+        server.abort();
     }
 }

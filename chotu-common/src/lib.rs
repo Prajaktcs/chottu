@@ -60,7 +60,8 @@ pub use food_parse::{
 pub use food_tags::{
     assign_food_tags, backfill_food_log_keyword_tags, delete_food_log_tags,
     delete_food_log_tags_for_member_day, food_tag_classifier_instruction, insert_food_log_tags,
-    keyword_tags_for, sanitize_food_tags, AssignedFoodTags, FOOD_TAG_VOCABULARY,
+    keyword_tags_for, reconcile_food_tag_context, sanitize_food_tags, AssignedFoodTags,
+    FOOD_TAG_VOCABULARY,
 };
 pub use google_health::{
     parse_exercise_data_points, ExerciseSession, GoogleHealthClient, GoogleHealthFoodSummary,

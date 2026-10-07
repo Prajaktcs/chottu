@@ -27,11 +27,14 @@ pub use fitness_plan::{
     week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind, StoredWeeklyPlan,
     WeeklyFitnessPlan,
 };
-pub use food_corrections::{food_log_revision, revise_food_log, sync_corrected_food_log};
+pub use food_corrections::{
+    adjust_food_totals, delete_food_logs_for_day, food_log_revision, revise_food_log,
+    sync_corrected_food_log,
+};
 pub use sync::{
-    credentials_configured, delete_google_nutrition_logs, exercise_entries_for_day,
-    exercise_entries_for_range, exercises_for_day, exercises_for_range, external_nutrition_base,
-    google_data_point_ids_for_day, google_health_client_for_member, google_health_client_from_env,
+    credentials_configured, exercise_entries_for_day, exercise_entries_for_range,
+    exercises_for_day, exercises_for_range, external_nutrition_base,
+    google_health_client_for_member, google_health_client_from_env,
     member_health_credentials_configured, push_food_log_to_google, push_pending_food_logs,
     rebuild_summary_from_food_log, replace_exercise_log_for_day, sum_food_log_for_day,
     sum_unsynced_food_log_for_day, sync_configured_members_today, sync_member_for_date,
