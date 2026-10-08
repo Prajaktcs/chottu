@@ -5456,6 +5456,15 @@ async fn handle_food_photo(
         ).await?;
         return Ok(());
     }
+    if update_target.is_some() && analysis.description.trim().is_empty() {
+        send_signal(
+            bot,
+            chat_id,
+            "The photo analysis didn't describe the updated meal. Nothing changed. Retry the photo or reply with the ingredients and amount eaten; keep any unaffected sides in the description.",
+        )
+        .await?;
+        return Ok(());
+    }
 
     let (description, nutrition, source_note) = if let Some(ref barcode) = analysis.barcode {
         match lookup_barcode(barcode).await {

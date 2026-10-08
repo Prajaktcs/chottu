@@ -213,11 +213,91 @@ fn exclusion_scope(clause: &[&str], start: usize, words: usize) -> (bool, bool) 
     (negated, whole_meal)
 }
 
+fn whole_meal_qualifier_start(clause: &[&str]) -> Option<usize> {
+    clause.iter().enumerate().find_map(|(index, word)| {
+        (*word == "anywhere"
+            || (*word == "in"
+                && matches!(clause.get(index + 1), Some(&"this" | &"the"))
+                && clause.get(index + 2) == Some(&"meal")))
+        .then_some(index)
+    })
+}
+
+fn is_bare_ingredient(clause: &[&str]) -> bool {
+    let mut words = &clause[..whole_meal_qualifier_start(clause).unwrap_or(clause.len())];
+    loop {
+        if KEYWORD_ALIASES
+            .iter()
+            .any(|(alias, _)| words.iter().copied().eq(alias.split_whitespace()))
+            || FOOD_TAG_VOCABULARY
+                .iter()
+                .any(|tag| words.iter().copied().eq(tag.split('_')))
+        {
+            return true;
+        }
+        if matches!(
+            words.first(),
+            Some(&"any" | &"added" | &"scrambled" | &"boiled" | &"fried" | &"poached")
+        ) {
+            words = &words[1..];
+        } else {
+            return false;
+        }
+    }
+}
+
+struct IngredientClause<'a> {
+    words: &'a [&'a str],
+    inherited_negative: bool,
+    whole_meal: bool,
+    explicit_whole_meal: bool,
+}
+
+impl IngredientClause<'_> {
+    fn exclusion_scope(&self, start: usize, words: usize) -> (bool, bool) {
+        let (negative, whole_meal) = exclusion_scope(self.words, start, words);
+        (
+            negative || self.inherited_negative,
+            whole_meal || self.whole_meal,
+        )
+    }
+
+    fn evidence_text(&self, words: &[&str]) -> String {
+        let prefix = if !self.inherited_negative {
+            ""
+        } else if self.whole_meal {
+            "without "
+        } else {
+            "ingredient without "
+        };
+        let suffix = if self.explicit_whole_meal && whole_meal_qualifier_start(words).is_none() {
+            " anywhere"
+        } else {
+            ""
+        };
+        let mut text = String::with_capacity(
+            prefix.len()
+                + words.iter().map(|word| word.len()).sum::<usize>()
+                + words.len().saturating_sub(1)
+                + suffix.len(),
+        );
+        text.push_str(prefix);
+        for (index, word) in words.iter().enumerate() {
+            if index != 0 {
+                text.push(' ');
+            }
+            text.push_str(word);
+        }
+        text.push_str(suffix);
+        text
+    }
+}
+
 /// Split components, carrying a negative determiner through bare ingredient
 /// lists but not through a new affirmative dish ("and an omelette", "with cream").
-fn ingredient_clauses<'a>(tokens: &'a [&'a str]) -> Vec<std::borrow::Cow<'a, [&'a str]>> {
-    let mut clauses = Vec::new();
-    let mut inherited_negative = false;
+fn ingredient_clauses<'a>(tokens: &'a [&'a str]) -> Vec<IngredientClause<'a>> {
+    let mut clauses: Vec<IngredientClause<'a>> = Vec::new();
+    let mut inherited_scope: Option<(usize, bool, bool)> = None;
     let mut offset = 0;
     for clause in
         tokens.split(|token| matches!(*token, "|" | "with" | "and" | "or" | "but" | "plus"))
@@ -226,30 +306,40 @@ fn ingredient_clauses<'a>(tokens: &'a [&'a str]) -> Vec<std::borrow::Cow<'a, [&'
         offset += clause.len() + 1;
         if clause.is_empty() {
             if !matches!(separator, "and" | "or") {
-                inherited_negative = false;
+                inherited_scope = None;
             }
             continue;
         }
-        let bare_ingredient = KEYWORD_ALIASES
-            .iter()
-            .any(|(alias, _)| clause.iter().copied().eq(alias.split_whitespace()))
-            || FOOD_TAG_VOCABULARY
-                .iter()
-                .any(|tag| clause.iter().copied().eq(tag.split('_')));
-        let inherit = inherited_negative && matches!(separator, "and" | "or") && bare_ingredient;
-        let owned = if inherit {
-            let mut words = Vec::with_capacity(clause.len() + 2);
-            words.extend(["ingredient", "without"]);
-            words.extend_from_slice(clause);
-            std::borrow::Cow::Owned(words)
+        let carry = inherited_scope
+            .filter(|_| matches!(separator, "and" | "or") && is_bare_ingredient(clause));
+        let explicit_whole_meal = whole_meal_qualifier_start(clause).is_some();
+        let (whole_meal, explicit_whole_meal) = if let Some((start, whole, explicit)) = carry {
+            let explicit = explicit || explicit_whole_meal;
+            let whole = whole || explicit;
+            if explicit {
+                for previous in &mut clauses[start..] {
+                    previous.whole_meal = true;
+                    previous.explicit_whole_meal = true;
+                }
+            }
+            inherited_scope = Some((start, whole, explicit));
+            (whole, explicit)
         } else {
-            std::borrow::Cow::Borrowed(clause)
-        };
-        inherited_negative = inherit
-            || clause
+            let negative = clause
                 .iter()
-                .any(|word| matches!(*word, "no" | "without" | "not"));
-        clauses.push(owned);
+                .rposition(|word| matches!(*word, "no" | "without" | "not"))
+                .filter(|index| is_bare_ingredient(&clause[index + 1..]));
+            let whole = explicit_whole_meal
+                || negative.is_some_and(|index| index == 0 && clause[index] != "not");
+            inherited_scope = negative.map(|_| (clauses.len(), whole, explicit_whole_meal));
+            (whole, explicit_whole_meal)
+        };
+        clauses.push(IngredientClause {
+            words: clause,
+            inherited_negative: carry.is_some(),
+            whole_meal,
+            explicit_whole_meal,
+        });
     }
     clauses
 }
@@ -268,13 +358,11 @@ fn food_tag_evidence(
     let mut excluded = [false; FOOD_TAG_VOCABULARY.len()];
     let mut whole_meal_excluded = [false; FOOD_TAG_VOCABULARY.len()];
     let mut explicit_whole_meal_excluded = [false; FOOD_TAG_VOCABULARY.len()];
-    for clause in ingredient_clauses(&tokens) {
+    for parsed in ingredient_clauses(&tokens) {
+        let clause = parsed.words;
         let mut clause_present = [false; FOOD_TAG_VOCABULARY.len()];
         let mut clause_excluded = [false; FOOD_TAG_VOCABULARY.len()];
-        let explicit_whole_meal = clause.contains(&"anywhere")
-            || clause
-                .windows(3)
-                .any(|words| words == ["in", "this", "meal"] || words == ["in", "the", "meal"]);
+        let explicit_whole_meal = parsed.explicit_whole_meal;
         for &(alias, tag) in KEYWORD_ALIASES {
             let index = FOOD_TAG_VOCABULARY
                 .iter()
@@ -295,7 +383,7 @@ fn food_tag_evidence(
                 {
                     continue;
                 }
-                let (negated, whole_meal) = exclusion_scope(&clause, start, words);
+                let (negated, whole_meal) = parsed.exclusion_scope(start, words);
                 if negated {
                     clause_excluded[index] = true;
                     // Global facts override guesses; named components stay scoped.
@@ -314,7 +402,7 @@ fn food_tag_evidence(
                 if !window.iter().copied().eq(tag.split('_')) {
                     continue;
                 }
-                let (negated, whole_meal) = exclusion_scope(&clause, start, words);
+                let (negated, whole_meal) = parsed.exclusion_scope(start, words);
                 if negated {
                     clause_excluded[index] = true;
                     whole_meal_excluded[index] |= whole_meal;
@@ -335,7 +423,7 @@ fn food_tag_evidence(
         if clause
             .iter()
             .enumerate()
-            .any(|(start, word)| *word == "paneer" && !exclusion_scope(&clause, start, 1).0)
+            .any(|(start, word)| *word == "paneer" && !parsed.exclusion_scope(start, 1).0)
             && !clause
                 .windows(2)
                 .any(|words| matches!(words[0], "no" | "without" | "not") && words[1] == "dairy")
@@ -370,8 +458,9 @@ pub fn reconcile_food_tag_context(
     let normalized = padded_tokens(previous_facts);
     let tokens: Vec<_> = normalized.split_whitespace().collect();
     let mut retained: Vec<(String, usize)> = Vec::new();
-    for clause in ingredient_clauses(&tokens) {
-        let text = clause.join(" ");
+    for parsed in ingredient_clauses(&tokens) {
+        let clause = parsed.words;
+        let text = parsed.evidence_text(clause);
         let (positive, negative) = food_tag_evidence(&text);
         // Historical positives only retire matching exclusions; their ingredient
         // evidence is never copied into the returned context.
@@ -413,11 +502,11 @@ pub fn reconcile_food_tag_context(
                 for (start, window) in clause.windows(words).enumerate() {
                     if window.iter().copied().eq(alias.split_whitespace())
                         && (tag != FOOD_TAG_VOCABULARY[index]
-                            || (!exclusion_scope(&clause, start, words).0
+                            || (!parsed.exclusion_scope(start, words).0
                                 && !clause.contains(&"free")))
                     {
                         keep[start..start + words].fill(false);
-                        if !exclusion_scope(&clause, start, words).0 {
+                        if !parsed.exclusion_scope(start, words).0 {
                             placeholders[start] = true;
                         }
                     }
@@ -434,7 +523,7 @@ pub fn reconcile_food_tag_context(
                     }
                 }
             }
-            let text = clause
+            let words = clause
                 .iter()
                 .enumerate()
                 .filter_map(|(position, word)| {
@@ -446,8 +535,8 @@ pub fn reconcile_food_tag_context(
                         None
                     }
                 })
-                .collect::<Vec<_>>()
-                .join(" ");
+                .collect::<Vec<_>>();
+            let text = parsed.evidence_text(&words);
             retained.push((text, index));
         }
     }
@@ -831,6 +920,54 @@ mod tests {
         ] {
             assert_eq!(assign_food_tags(["eggs"], description).tags, vec!["eggs"]);
             assert_eq!(keyword_tags_for(description), vec!["eggs"]);
+        }
+        for description in [
+            "omelette on the side and paneer without milk or eggs",
+            "paneer without milk or eggs and an omelette on the side",
+        ] {
+            assert_eq!(
+                assign_food_tags(["dairy", "eggs"], description).tags,
+                ["dairy", "eggs"]
+            );
+            assert_eq!(keyword_tags_for(description), ["dairy", "eggs"]);
+        }
+    }
+
+    #[test]
+    fn coordinated_whole_meal_exclusions_veto_earlier_guesses_and_survive_portion_changes() {
+        for conjunction in ["and", "or"] {
+            for ingredients in [["dairy", "eggs"], ["eggs", "dairy"]] {
+                for qualifier in ["", " anywhere in this meal", " in the meal"] {
+                    let facts = format!(
+                        "no {} {conjunction} {}{qualifier}",
+                        ingredients[0], ingredients[1]
+                    );
+                    let description = format!("scrambled eggs with milk\n{facts}");
+                    assert!(
+                        assign_food_tags(["dairy", "eggs"], &description)
+                            .tags
+                            .is_empty(),
+                        "{description}"
+                    );
+                    assert!(keyword_tags_for(&description).is_empty(), "{description}");
+                    let context =
+                        reconcile_food_tag_context("scrambled eggs with milk", &facts, "ate half");
+                    assert!(
+                        assign_food_tags(["dairy", "eggs"], &context)
+                            .tags
+                            .is_empty(),
+                        "{context}"
+                    );
+                    assert!(keyword_tags_for(&context).is_empty(), "{context}");
+                }
+            }
+        }
+        for (description, tags) in [
+            ("scrambled eggs with added sugar\nno any eggs or added sugar anywhere in this meal", ["eggs", "added_sugar"]),
+            ("bhurji without eggs or dairy anywhere in this meal; an omelette and cream on the side", ["dairy", "eggs"]),
+        ] {
+            assert!(assign_food_tags(tags, description).tags.is_empty(), "{description}");
+            assert!(keyword_tags_for(description).is_empty(), "{description}");
         }
     }
 

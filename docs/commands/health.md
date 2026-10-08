@@ -87,13 +87,15 @@ Include the bread and vegetables shown.
 
 Explicit ingredient identities, exclusions, quantities and consumed portions take precedence over visual guesses. Exclusions also constrain food tags; saying the bhurji is not eggs does not remove eggs from a separate omelette.
 
-Coordinated exclusions such as `without eggs or milk` apply to both named ingredients; a separately included side remains included. Paneer itself still counts as dairy when only added milk is excluded.
+Coordinated exclusions such as `without eggs or milk` apply to both named ingredients; a separately included side remains included. Standalone `no dairy or eggs` excludes both across the meal, and a trailing `anywhere in this meal` qualifier applies to the entire ingredient list. These exclusions survive portion-only corrections. Paneer itself still counts as dairy when only added milk is excluded.
 
 A separate photo following your recent meal logs asks whether to update a meal or log a new one. Nothing from that photo is saved until you answer `update`, `new`, or `cancel`. With multiple candidates, use `update <meal id>` from the list. Choices belong to the sender and conversation, expire after 15 minutes, and reject superseded questions or meals changed since the question. A new photo replaces your previous unanswered photo choice.
 
 Replying to a meal confirmation with a photo explicitly updates that meal. A `/food ...` photo caption explicitly starts a new meal, even when sent as a reply. Send one image at a time.
 
 A barcode cannot replace an existing whole meal: Chotu asks for the product, amount eaten, and component to replace, leaving the meal unchanged. Reply with those facts in text and explicitly retain any sides, or use `/food` to log a separate meal.
+
+If a photo update returns no meal description, Chotu asks you to retry with a clearer photo or the ingredients and amount eaten. The existing description, nutrition, user facts, revision, and daily totals remain unchanged; a partial caption never replaces the whole meal.
 
 ### Correcting a logged meal
 
