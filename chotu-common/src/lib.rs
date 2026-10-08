@@ -32,7 +32,8 @@ pub use calendar::{
 };
 pub use civil_day::civil_day_bounds_utc;
 pub use database::{
-    complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
+    complete_all_open_tasks, init_db, list_completable_open_tasks, write_food_signal_context,
+    CompletedTaskRow, FoodSignalContext,
 };
 pub use due_parse::{
     is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,

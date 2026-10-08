@@ -45,18 +45,18 @@ fn failure(error: impl std::fmt::Display) -> SignalError {
     SignalError::Protocol(format!("Food steering: {error}"))
 }
 
-pub(super) async fn record_context(
-    pool: &SqlitePool,
-    chat: &ChatId,
-    sender: &str,
-    log_id: &str,
-    user_facts: &str,
-) -> Result<(), SignalError> {
+pub(super) fn context<'a>(
+    chat: &'a ChatId,
+    sender: &'a str,
+    user_facts: &'a str,
+) -> chotu_common::FoodSignalContext<'a> {
     let (kind, recipient_id) = recipient(chat);
-    sqlx::query("INSERT INTO food_signal_context (food_log_id, recipient_kind, recipient_id, sender_aci, user_facts, logged_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(food_log_id) DO UPDATE SET user_facts = excluded.user_facts, logged_at = excluded.logged_at")
-        .bind(log_id).bind(kind).bind(recipient_id).bind(sender).bind(user_facts).bind(Utc::now())
-        .execute(pool).await.map_err(failure)?;
-    Ok(())
+    chotu_common::FoodSignalContext {
+        recipient_kind: kind,
+        recipient_id,
+        sender_aci: sender,
+        user_facts,
+    }
 }
 
 pub(super) async fn record_confirmation(
@@ -397,7 +397,7 @@ pub(super) async fn handle(
     let command_args = action
         .eq_ignore_ascii_case("/correctfood")
         .then_some(argument);
-    if quoted.is_none() && !allow_unquoted_correction && command_args.is_none() {
+    if inbound.quote_timestamp.is_none() && !allow_unquoted_correction && command_args.is_none() {
         return Ok(false);
     }
     if command_args.is_none()
@@ -437,6 +437,9 @@ pub(super) async fn handle(
         ids.into_iter().next().unwrap()
     } else if let Some(id) = quoted {
         id
+    } else if inbound.quote_timestamp.is_some() {
+        send_signal(bot, chat, "I couldn't identify that quoted meal. Nothing changed. Reply to a current meal confirmation, or use `/correctfood <meal id> <correction>` with an explicit target.").await?;
+        return Ok(true);
     } else {
         let candidates = recent_candidates(pool, inbound).await?;
         if candidates.len() != 1 {
@@ -534,6 +537,7 @@ pub(super) async fn save_update(
     if reject_foreign_food_mutation(bot, chat, config, &target.log.family_member_id).await? {
         return Ok(());
     }
+    let context = context(chat, sender, facts);
     if let Err(error) = health_coach::revise_food_log(
         pool,
         config,
@@ -542,13 +546,13 @@ pub(super) async fn save_update(
         description,
         nutrition,
         tag_context,
+        Some(&context),
     )
     .await
     {
         send_signal(bot, chat, format!("Could not update that meal: {error}. No correction was saved; reply to its latest confirmation to retry.")).await?;
         return Ok(());
     }
-    record_context(pool, chat, sender, &target.log.id, facts).await?;
     let sync_note =
         if health_coach::member_health_credentials_configured(&target.log.family_member_id, config)
         {
@@ -613,6 +617,18 @@ pub(super) async fn save_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn record_context(
+        pool: &SqlitePool,
+        chat: &ChatId,
+        sender: &str,
+        log_id: &str,
+        facts: &str,
+    ) -> Result<(), SignalError> {
+        chotu_common::write_food_signal_context(pool, log_id, &context(chat, sender, facts))
+            .await
+            .map_err(failure)
+    }
 
     async fn pool() -> (tempfile::TempDir, SqlitePool) {
         let dir = tempfile::tempdir().unwrap();
@@ -979,5 +995,161 @@ mod tests {
             .any(|message| message.contains("paneer bhurji")
                 && message.contains("Today now:* 300 kcal")));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn unmapped_quoted_correction_never_selects_the_only_recent_meal() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        for allow_unquoted in [true, false] {
+            let (dir, pool) = pool().await;
+            seed(&pool, "aaaaaaaa-lunch", "alex").await;
+            let mut message = group_message("aci-alex", "Actually, I ate half");
+            message.quote_timestamp = Some(999);
+            record_context(
+                &pool,
+                &message.recipient,
+                "aci-alex",
+                "aaaaaaaa-lunch",
+                "half bowl",
+            )
+            .await
+            .unwrap();
+            let listener = tokio::net::UnixListener::bind(dir.path().join("signal.sock")).unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut lines = BufReader::new(reader).lines();
+                let request: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["method"], "send");
+                let response = request["params"]["message"].as_str().unwrap();
+                assert!(response.contains("/correctfood"), "Unmapped quote must ask for an explicit target, not estimate a recent meal: {response}");
+                writer.write_all(format!("{}\n", serde_json::json!({"jsonrpc":"2.0", "id":request["id"], "result":{"timestamp":100}})).as_bytes()).await.unwrap();
+            });
+            let bot = chotu_common::SignalClient::connect(dir.path().join("signal.sock"))
+                .await
+                .unwrap();
+            let llm = ChotuLlm::new("http://127.0.0.1:1", 1, "unused");
+            let gemini = GeminiClient::new("unused".into());
+            assert!(handle(
+                &bot,
+                &message,
+                &pool,
+                &llm,
+                &gemini,
+                &AppConfig::default(),
+                allow_unquoted
+            )
+            .await
+            .unwrap());
+            server.await.unwrap();
+            let meals: Vec<(String, String, i32)> =
+                sqlx::query_as("SELECT id, raw_text_description, estimated_calories FROM food_log")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                meals,
+                [(
+                    "aaaaaaaa-lunch".into(),
+                    "paneer bhurji with cream, half bowl".into(),
+                    400
+                )]
+            );
+            assert_eq!(
+                health_coach::food_log_revision(&pool, "aaaaaaaa-lunch")
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_signal_facts_failure_rolls_back_meal_tags_and_summary() {
+        let (_dir, pool) = pool().await;
+        let config = AppConfig::default();
+        let date = config.now_in_tz().format("%Y-%m-%d").to_string();
+        let estimate: NutritionEstimation = serde_json::from_value(serde_json::json!({
+            "total_calories":100, "protein_grams":10, "carbs_grams":5, "fats_grams":5,
+            "dominant_macro":"protein", "reasoning":"fixture",
+            "omega_3_dha_mg":0,"cholesterol_mg":0,"saturated_fat_g":0,"unsaturated_fat_g":0,
+            "triglycerides_mg":0,"iron_mg":0,"vitamin_b_mg":0,"vitamin_c_mg":0,
+            "sugar_g":0,"fiber_g":0,"sodium_mg":0,"potassium_mg":0,"calcium_mg":0,
+            "magnesium_mg":0,"zinc_mg":0,"vitamin_a_mcg":0,"vitamin_d_mcg":0,
+            "vitamin_e_mg":0,"vitamin_k_mcg":0,"caffeine_mg":0,"trans_fat_g":0,
+            "tags":["eggs","dairy"]
+        }))
+        .unwrap();
+        let context = chotu_common::FoodSignalContext {
+            recipient_kind: "group",
+            recipient_id: "household",
+            sender_aci: "aci-praj",
+            user_facts: "Paneer curry, no eggs. Half bowl",
+        };
+        let assigned = chotu_common::assign_food_tags(&estimate.tags, context.user_facts);
+        sqlx::query("CREATE TRIGGER fail_initial_facts BEFORE INSERT ON food_signal_context BEGIN SELECT RAISE(ABORT, 'facts unavailable'); END")
+            .execute(&pool).await.unwrap();
+        assert!(super::super::persist_food_log_and_tags(
+            &pool,
+            "new-meal",
+            Utc::now(),
+            "praj",
+            "Paneer curry",
+            &estimate,
+            &date,
+            &assigned,
+            &context
+        )
+        .await
+        .is_err());
+        let meal: Option<String> =
+            sqlx::query_scalar("SELECT id FROM food_log WHERE id = 'new-meal'")
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+        assert!(meal.is_none());
+        let tags: Vec<String> =
+            sqlx::query_scalar("SELECT tag FROM food_log_tags WHERE food_log_id = 'new-meal'")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert!(tags.is_empty());
+        let summary: Option<i64> = sqlx::query_scalar(
+            "SELECT CAST(total_calories_ingested AS INTEGER) FROM health_family_summary WHERE family_member_id = 'praj' AND date = ?",
+        ).bind(&date).fetch_optional(&pool).await.unwrap();
+        assert!(summary.is_none());
+        sqlx::query("DROP TRIGGER fail_initial_facts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        super::super::persist_food_log_and_tags(
+            &pool,
+            "new-meal",
+            Utc::now(),
+            "praj",
+            "Paneer curry",
+            &estimate,
+            &date,
+            &assigned,
+            &context,
+        )
+        .await
+        .unwrap();
+        let committed: (String, i32, String) = sqlx::query_as(
+            "SELECT f.raw_text_description, f.estimated_calories, c.user_facts \
+             FROM food_log f JOIN food_signal_context c ON c.food_log_id = f.id WHERE f.id = 'new-meal'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            committed,
+            ("Paneer curry".into(), 100, context.user_facts.into())
+        );
+        let tags: Vec<String> = sqlx::query_scalar(
+            "SELECT tag FROM food_log_tags WHERE food_log_id = 'new-meal' ORDER BY tag",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tags, ["dairy"]);
     }
 }

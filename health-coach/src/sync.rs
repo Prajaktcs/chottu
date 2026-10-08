@@ -370,10 +370,61 @@ pub async fn sync_member_for_date(
         .await
         .unwrap_or_default();
 
-    // Local meals that have not been pushed to Google Health yet.
-    let manual = sum_unsynced_food_log_for_day(pool, member_id, date, config.resolved_tz())
-        .await
-        .unwrap_or_default();
+    persist_sync_snapshot(
+        pool,
+        member_id,
+        date,
+        config.resolved_tz(),
+        &versions,
+        SyncSnapshot {
+            summary,
+            gemini_est,
+            steps,
+            active_calories,
+            sleep_hours,
+            exercises,
+        },
+    )
+    .await
+}
+
+struct SyncSnapshot {
+    summary: GoogleHealthFoodSummary,
+    gemini_est: MissingSyncNutrition,
+    steps: i32,
+    active_calories: i32,
+    sleep_hours: Option<f64>,
+    exercises: Vec<ExerciseSession>,
+}
+
+async fn persist_sync_snapshot(
+    pool: &SqlitePool,
+    member_id: &str,
+    date: &str,
+    timezone: chrono_tz::Tz,
+    versions: &[(String, i64, String)],
+    snapshot: SyncSnapshot,
+) -> Result<HealthSyncReport> {
+    let SyncSnapshot {
+        summary,
+        gemini_est,
+        steps,
+        active_calories,
+        sleep_hours,
+        exercises,
+    } = snapshot;
+    let mut tx = pool.begin().await?;
+    guard_summary_refresh(&mut tx, member_id, date, versions).await?;
+    // Include adjustment audits committed during remote reads. The guard's write
+    // lock keeps this local snapshot and the summary replacement atomic.
+    let manual = sum_food_log_for_day_filtered(
+        &mut *tx,
+        member_id,
+        date,
+        timezone,
+        FoodLogSyncFilter::UnsyncedOnly,
+    )
+    .await?;
 
     let calories = (summary.calories as i32).saturating_add(manual.calories as i32);
     let protein = summary.protein + manual.protein;
@@ -401,8 +452,6 @@ pub async fn sync_member_for_date(
     let caffeine = summary.caffeine + manual.caffeine_mg;
     let trans_fat = summary.trans_fat + manual.trans_fat_g;
 
-    let mut tx = pool.begin().await?;
-    guard_summary_refresh(&mut tx, member_id, date, &versions).await?;
     sqlx::query(
         r#"
         INSERT INTO health_family_summary (
@@ -1147,6 +1196,171 @@ pub fn credentials_configured() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn sync_preserves_adjustfood_audit_committed_after_snapshot_with_zero_selected_meals() {
+        for has_unselected_meal in [false, true] {
+            let pool = chotu_common::init_db(":memory:").await.unwrap();
+            let config = AppConfig {
+                timezone: Some("UTC".into()),
+                ..Default::default()
+            };
+            let date = "2026-10-07";
+            if has_unselected_meal {
+                sqlx::query(
+                    "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
+                     estimated_calories, estimated_protein, estimated_carbs, estimated_fats, \
+                     estimated_iron_mg, estimated_fiber_g) \
+                     VALUES ('unselected', '2026-10-07T16:00:00Z', 'alex', 'unselected meal', \
+                     120, 10, 15, 4, 2, 3)",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            let remote = GoogleHealthFoodSummary {
+                calories: 800.0,
+                protein: 40.0,
+                carbs: 90.0,
+                fat: 30.0,
+                cholesterol: 10.0,
+                saturated_fat: 11.0,
+                unsaturated_fat: 12.0,
+                iron: 13.0,
+                vitamin_b: 14.0,
+                vitamin_c: 15.0,
+                sugar: 16.0,
+                fiber: 17.0,
+                sodium: 18.0,
+                potassium: 19.0,
+                calcium: 20.0,
+                magnesium: 21.0,
+                zinc: 22.0,
+                vitamin_a: 23.0,
+                vitamin_d: 24.0,
+                vitamin_e: 25.0,
+                vitamin_k: 26.0,
+                caffeine: 27.0,
+                trans_fat: 28.0,
+            };
+            let snapshot = || SyncSnapshot {
+                summary: remote.clone(),
+                gemini_est: MissingSyncNutrition {
+                    omega_3_dha_mg: 29.0,
+                    triglycerides_mg: 30.0,
+                },
+                steps: 1234,
+                active_calories: 80,
+                sleep_hours: Some(7.5),
+                exercises: Vec::new(),
+            };
+            let versions = correction_versions(&pool, "alex").await.unwrap();
+            persist_sync_snapshot(
+                &pool,
+                "alex",
+                date,
+                config.resolved_tz(),
+                &versions,
+                snapshot(),
+            )
+            .await
+            .unwrap();
+            let before = fetch_summary_nutrition(&pool, "alex", date).await.unwrap();
+
+            // Hold the sync between its captured remote/local snapshot and the
+            // final writer, while /adjustfood commits without selecting any meal.
+            let (snapshot_ready, snapshot_wait) = tokio::sync::oneshot::channel();
+            let (allow_write, write_wait) = tokio::sync::oneshot::channel();
+            let sync_pool = pool.clone();
+            let sync_versions = versions.clone();
+            let pending_snapshot = snapshot();
+            let timezone = config.resolved_tz();
+            let sync = tokio::spawn(async move {
+                let stale_manual =
+                    sum_unsynced_food_log_for_day(&sync_pool, "alex", date, timezone)
+                        .await
+                        .unwrap();
+                snapshot_ready.send(stale_manual).unwrap();
+                write_wait.await.unwrap();
+                persist_sync_snapshot(
+                    &sync_pool,
+                    "alex",
+                    date,
+                    timezone,
+                    &sync_versions,
+                    pending_snapshot,
+                )
+                .await
+                .unwrap()
+            });
+            let stale_manual = snapshot_wait.await.unwrap();
+            assert_eq!(stale_manual.entry_count, i64::from(has_unselected_meal));
+            crate::food_corrections::adjust_food_totals(
+                &pool, &config, "alex", date, 650, 32.0, 70.0, 25.0,
+            )
+            .await
+            .unwrap();
+            // This audit does not change correction/deletion versions; the
+            // existing version guard alone cannot detect the stale local sum.
+            assert_eq!(correction_versions(&pool, "alex").await.unwrap(), versions);
+            let audit_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM food_log WHERE family_member_id = 'alex' \
+                 AND raw_text_description LIKE 'Manual adjustment:%' \
+                 AND google_data_point_id IS NULL",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(audit_count, 1);
+            allow_write.send(()).unwrap();
+            let report = sync.await.unwrap();
+            let after = fetch_summary_nutrition(&pool, "alex", date).await.unwrap();
+            assert_eq!(
+                (after.calories, after.protein, after.carbs, after.fats),
+                (650, 32.0, 70.0, 25.0),
+            );
+            assert_eq!(
+                (report.calories, report.protein, report.carbs, report.fats),
+                (650, 32.0, 70.0, 25.0),
+            );
+            assert_eq!(report.manual_food_entries, stale_manual.entry_count + 1,);
+            let micros = |totals: &DayNutritionTotals| {
+                [
+                    totals.omega_3_dha_mg,
+                    totals.cholesterol_mg,
+                    totals.saturated_fat_g,
+                    totals.unsaturated_fat_g,
+                    totals.triglycerides_mg,
+                    totals.iron_mg,
+                    totals.vitamin_b_mg,
+                    totals.vitamin_c_mg,
+                    totals.sugar_g,
+                    totals.fiber_g,
+                    totals.sodium_mg,
+                    totals.potassium_mg,
+                    totals.calcium_mg,
+                    totals.magnesium_mg,
+                    totals.zinc_mg,
+                    totals.vitamin_a_mcg,
+                    totals.vitamin_d_mcg,
+                    totals.vitamin_e_mg,
+                    totals.vitamin_k_mcg,
+                    totals.caffeine_mg,
+                    totals.trans_fat_g,
+                ]
+            };
+            assert_eq!(micros(&after), micros(&before));
+            let activity: (i32, i32, Option<f64>) = sqlx::query_as(
+                "SELECT step_count, active_calories_burned, sleep_hours \
+                 FROM health_family_summary WHERE date = ? AND family_member_id = 'alex'",
+            )
+            .bind(date)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(activity, (1234, 80, Some(7.5)));
+        }
+    }
 
     #[tokio::test]
     async fn manual_sync_resumes_prior_day_deletions_without_touching_other_meals() {

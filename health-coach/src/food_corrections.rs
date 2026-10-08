@@ -532,7 +532,7 @@ pub(crate) async fn ensure_food_log_upload_state(
     Ok(())
 }
 
-/// Atomically replace nutrition and tags on the same meal, retaining its member and instant.
+/// Atomically replace nutrition, tags and supplied facts, retaining the meal's member and instant.
 /// The summary uses the original civil day, preserving its external nutrition and activity.
 pub async fn revise_food_log(
     pool: &SqlitePool,
@@ -542,6 +542,7 @@ pub async fn revise_food_log(
     description: &str,
     estimation: &NutritionEstimation,
     tag_context: &str,
+    signal_context: Option<&chotu_common::FoodSignalContext<'_>>,
 ) -> Result<i64> {
     let revision = expected_revision
         .checked_add(1)
@@ -682,6 +683,17 @@ pub async fn revise_food_log(
     .execute(&mut *tx).await?;
     chotu_common::delete_food_log_tags(&mut tx, &current.id).await?;
     chotu_common::insert_food_log_tags(&mut tx, &current.id, &assigned).await?;
+    if let Some(context) = signal_context {
+        chotu_common::write_food_signal_context(&mut *tx, &current.id, context).await?;
+    } else if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM food_signal_context WHERE food_log_id = ?)",
+    )
+    .bind(&current.id)
+    .fetch_one(&mut *tx)
+    .await?
+    {
+        bail!("Signal meal revision requires updated user facts");
+    }
     let after = sum_food_log_for_day_filtered(
         &mut *tx,
         &current.family_member_id,
@@ -1044,6 +1056,12 @@ mod tests {
         async fn delete(&self, name: &str) -> Result<()> {
             use std::sync::atomic::Ordering::SeqCst;
             self.deletes.fetch_add(1, SeqCst);
+            // Match the production reader: an Operation is not a DataPoint,
+            // and its absence from this fixture's meals never confirms deletion.
+            let mut parts = name.rsplit('/');
+            if parts.next().is_some() && parts.next() == Some("operations") {
+                bail!("Legacy Operation has no confirmed DataPoint name");
+            }
             if self.fail_delete.load(SeqCst) {
                 bail!("Remote deletion failed");
             }
@@ -1093,7 +1111,8 @@ mod tests {
             0,
             "stale",
             &estimation(),
-            "stale"
+            "stale",
+            None,
         )
         .await
         .is_err());
@@ -1160,6 +1179,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -1312,6 +1332,137 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_operation_correction_and_deletion_retain_identity_after_restart() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let path = std::env::temp_dir().join(format!(
+            "chotu-legacy-operation-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let pool = chotu_common::init_db(path.to_str().unwrap()).await.unwrap();
+        let config = config();
+        let operation = "users/me/dataTypes/nutrition-log/operations/legacy-create";
+        let original = original(&pool, Some(operation)).await;
+        baseline_summary(&pool).await;
+        // Reproduce the migration's legacy row: an anonymous create's Operation
+        // name was copied verbatim, with no completed DataPoint or payload.
+        sqlx::query(
+            "INSERT INTO food_log_remote_resources \
+             (food_log_id, remote_name, revision, create_pending) VALUES ('meal', ?, 0, 0)",
+        )
+        .bind(operation)
+        .execute(&pool)
+        .await
+        .unwrap();
+        ensure_food_log_upload_state(&pool, &original)
+            .await
+            .unwrap();
+        revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "lentils",
+            &estimation(),
+            "lentils",
+            None,
+        )
+        .await
+        .unwrap();
+        let remote = ControlledRemote::default();
+        assert!(sync_food_log_with_remote(&pool, &remote, "meal")
+            .await
+            .is_err());
+        let state = correction_state(&pool, "meal").await.unwrap();
+        assert_eq!(state.revision, 1);
+        assert_eq!(state.sync_state, "delete_pending");
+        assert_eq!(state.remote_name.as_deref(), Some(operation));
+        let resource: (String, i64, String, bool) = sqlx::query_as(
+            "SELECT remote_name, revision, snapshot_json, create_pending \
+             FROM food_log_remote_resources WHERE food_log_id = 'meal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let baseline: FoodLog = serde_json::from_str(&resource.2).unwrap();
+        assert_eq!(baseline.google_data_point_id.as_deref(), Some(operation));
+        assert_eq!(baseline.estimated_calories, 500);
+        assert_eq!(
+            state.remote_snapshot_json.as_deref(),
+            Some(resource.2.as_str())
+        );
+        let ids = vec!["meal".to_owned()];
+        mark_deletion_intents(&pool, &config, "alex", "2026-09-29", &ids)
+            .await
+            .unwrap();
+        assert!(
+            delete_marked_food_logs(&pool, &config, "alex", "2026-09-29", &ids, Some(&remote))
+                .await
+                .is_err()
+        );
+        pool.close().await;
+        let pool = chotu_common::init_db(path.to_str().unwrap()).await.unwrap();
+        mark_deletion_intents(&pool, &config, "alex", "2026-09-29", &ids)
+            .await
+            .unwrap();
+        assert!(
+            delete_marked_food_logs(&pool, &config, "alex", "2026-09-29", &ids, Some(&remote))
+                .await
+                .is_err()
+        );
+        let retained: (String, i64, String, bool) = sqlx::query_as(
+            "SELECT remote_name, revision, snapshot_json, create_pending \
+             FROM food_log_remote_resources WHERE food_log_id = 'meal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, resource);
+        let intent: (i64, Option<String>, Option<String>, String, bool) = sqlx::query_as(
+            "SELECT revision, google_name, correction_remote_name, correction_sync_state, completed \
+             FROM food_log_deletion_intents WHERE food_log_id = 'meal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            intent,
+            (
+                1,
+                Some(operation.to_owned()),
+                Some(operation.to_owned()),
+                "delete_pending".into(),
+                false
+            )
+        );
+        let retained: FoodLog = sqlx::query_as("SELECT * FROM food_log WHERE id = 'meal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retained.timestamp, original.timestamp);
+        assert_eq!(retained.google_data_point_id.as_deref(), Some(operation));
+        assert_eq!(retained.estimated_calories, 240);
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-09-29")
+                .await
+                .unwrap()
+                .calories,
+            340
+        );
+        let activity: (i32, i32, f64) = sqlx::query_as(
+            "SELECT step_count, active_calories_burned, sleep_hours FROM health_family_summary \
+             WHERE family_member_id = 'alex' AND date = '2026-09-29'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(activity, (1234, 80, 7.0));
+        assert_eq!(remote.creates.load(SeqCst), 0);
+        assert!(remote.meals.lock().await.is_empty());
+        pool.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
     async fn stale_completion_retains_every_resource_until_confirmed_cleanup() {
         let pool = chotu_common::init_db(":memory:").await.unwrap();
         let config = config();
@@ -1329,6 +1480,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -1656,6 +1808,141 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn meal_revision_and_signal_facts_commit_or_roll_back_together() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let config = config();
+        let original = original(&pool, None).await;
+        baseline_summary(&pool).await;
+        let old_context = chotu_common::FoodSignalContext {
+            recipient_kind: "group",
+            recipient_id: "household",
+            sender_aci: "aci-alex",
+            user_facts: "milk curry, full bowl",
+        };
+        chotu_common::write_food_signal_context(&pool, "meal", &old_context)
+            .await
+            .unwrap();
+        let next_context = chotu_common::FoodSignalContext {
+            user_facts: "No dairy. Lentil curry, half bowl",
+            ..old_context
+        };
+        let mut estimate = estimation();
+        estimate.tags = vec!["dairy".into()];
+        assert!(revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "lentil curry",
+            &estimate,
+            "lentil curry; no dairy",
+            None
+        )
+        .await
+        .is_err());
+        sqlx::query("CREATE TRIGGER fail_meal_facts BEFORE UPDATE ON food_signal_context BEGIN SELECT RAISE(ABORT, 'facts unavailable'); END")
+            .execute(&pool).await.unwrap();
+        assert!(revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "lentil curry",
+            &estimate,
+            "lentil curry; no dairy",
+            Some(&next_context)
+        )
+        .await
+        .is_err());
+        let retained: (String, i32) = sqlx::query_as(
+            "SELECT raw_text_description, estimated_calories FROM food_log WHERE id = 'meal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, ("milk curry".into(), 500));
+        let facts: String = sqlx::query_scalar(
+            "SELECT user_facts FROM food_signal_context WHERE food_log_id = 'meal'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(facts, "milk curry, full bowl");
+        let tags: Vec<String> = sqlx::query_scalar(
+            "SELECT tag FROM food_log_tags WHERE food_log_id = 'meal' ORDER BY tag",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(tags, ["dairy"]);
+        assert_eq!(food_log_revision(&pool, "meal").await.unwrap(), 0);
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-09-29")
+                .await
+                .unwrap()
+                .calories,
+            600
+        );
+        sqlx::query("DROP TRIGGER fail_meal_facts")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let foreign_context = chotu_common::FoodSignalContext {
+            sender_aci: "aci-jordan",
+            ..next_context
+        };
+        assert!(revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "lentil curry",
+            &estimate,
+            "lentil curry; no dairy",
+            Some(&foreign_context),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            revise_food_log(
+                &pool,
+                &config,
+                &original,
+                0,
+                "lentil curry",
+                &estimate,
+                "lentil curry; no dairy",
+                Some(&next_context)
+            )
+            .await
+            .unwrap(),
+            1
+        );
+        let committed: (String, i32, String) = sqlx::query_as(
+            "SELECT f.raw_text_description, f.estimated_calories, c.user_facts \
+             FROM food_log f JOIN food_signal_context c ON c.food_log_id = f.id WHERE f.id = 'meal'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            committed,
+            ("lentil curry".into(), 240, next_context.user_facts.into())
+        );
+        let tags: Vec<String> = sqlx::query_scalar(
+            "SELECT tag FROM food_log_tags WHERE food_log_id = 'meal' ORDER BY tag",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert!(tags.is_empty());
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-09-29")
+                .await
+                .unwrap()
+                .calories,
+            340
+        );
+    }
+
+    #[tokio::test]
     async fn initial_upload_can_be_corrected_while_its_named_create_is_in_flight() {
         let pool = chotu_common::init_db(":memory:").await.unwrap();
         let config = config();
@@ -1684,6 +1971,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -1752,6 +2040,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -1820,7 +2109,8 @@ mod tests {
                 0,
                 "lentil curry",
                 &estimate,
-                "lentil curry"
+                "lentil curry",
+                None,
             )
             .await
             .unwrap(),
@@ -1922,6 +2212,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -1930,11 +2221,18 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert!(
-            revise_food_log(&pool, &config, &original, 0, "stale", &estimation(), "milk")
-                .await
-                .is_err()
-        );
+        assert!(revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "stale",
+            &estimation(),
+            "milk",
+            None
+        )
+        .await
+        .is_err());
         assert_eq!(food_log_revision(&pool, "meal").await.unwrap(), 1);
         let after: String =
             sqlx::query_scalar("SELECT raw_text_description FROM food_log WHERE id = 'meal'")
@@ -1963,7 +2261,8 @@ mod tests {
             1,
             "deleted",
             &estimation(),
-            "milk"
+            "milk",
+            None,
         )
         .await
         .is_err());
@@ -2006,7 +2305,8 @@ mod tests {
             0,
             "lentils",
             &estimation(),
-            "lentils"
+            "lentils",
+            None,
         )
         .await
         .is_err());
@@ -2047,6 +2347,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -2161,6 +2462,7 @@ mod tests {
             "lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -2173,6 +2475,7 @@ mod tests {
             "more lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -2191,6 +2494,7 @@ mod tests {
             "final lentils",
             &estimation(),
             "lentils",
+            None,
         )
         .await
         .unwrap();
@@ -2220,6 +2524,7 @@ mod tests {
             "creamy curry",
             &estimate,
             "creamy curry; no dairy; lentils and coconut milk",
+            None,
         )
         .await
         .unwrap();

@@ -757,6 +757,14 @@ async fn get_nutrition_log_at(
     access_token: &str,
 ) -> Result<Option<serde_json::Value>, anyhow::Error> {
     if !is_nutrition_log_name(name) {
+        let mut parts = name.rsplit('/');
+        if parts.next().is_some_and(|id| !id.is_empty()) && parts.next() == Some("operations") {
+            // The public Health v4 discovery exposes no Operation-read method,
+            // and matching a listed meal cannot establish this POST's identity.
+            anyhow::bail!(
+                "Legacy Google Health Operation reference {name} has no confirmed nutrition-log DataPoint name; cleanup was retained. Recovery requires the Operation's authoritative completed response"
+            );
+        }
         anyhow::bail!("Expected a nutrition-log DataPoint name, not an operation: {name}");
     }
     let response = Client::new()
@@ -1167,6 +1175,24 @@ mod tests {
                 .is_err()
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_operation_reference_is_never_confirmed_absent_or_deleted() {
+        for name in [
+            "operations/legacy-create",
+            "users/me/operations/legacy-create",
+            "users/me/dataTypes/nutrition-log/operations/legacy-create",
+        ] {
+            let (base, server) = nutrition_endpoint(Vec::new()).await;
+            let error = delete_nutrition_logs_at(&[name.to_owned()], &base, "token")
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("authoritative completed response"));
+            assert!(server.await.unwrap().is_empty());
+        }
     }
 
     #[test]

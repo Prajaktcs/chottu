@@ -1464,6 +1464,7 @@ async fn persist_food_log_and_tags(
     est: &chotu_common::NutritionEstimation,
     date_str: &str,
     assigned: &AssignedFoodTags,
+    context: &chotu_common::FoodSignalContext<'_>,
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -1601,6 +1602,7 @@ async fn persist_food_log_and_tags(
     .execute(&mut *tx)
     .await?;
 
+    chotu_common::write_food_signal_context(&mut *tx, log_id, context).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1627,6 +1629,7 @@ async fn persist_food_estimation(
         .to_string();
 
     let assigned = assign_food_tags(&est.tags, &format!("{food_description}\n{user_facts}"));
+    let context = food_steering::context(chat_id, sender_aci, user_facts);
     if let Err(e) = persist_food_log_and_tags(
         pool,
         &log_id,
@@ -1636,6 +1639,7 @@ async fn persist_food_estimation(
         est,
         &date_str,
         &assigned,
+        &context,
     )
     .await
     {
@@ -1643,7 +1647,6 @@ async fn persist_food_estimation(
         send_signal(&bot, chat_id, "Database error saving food log.").await?;
         return Ok(());
     }
-    food_steering::record_context(pool, chat_id, sender_aci, &log_id, user_facts).await?;
 
     let mut google_sync_note = String::new();
     if health_coach::member_health_credentials_configured(family_member_id, config) {
