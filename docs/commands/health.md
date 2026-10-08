@@ -77,11 +77,59 @@ Send a barcode, package, or plated meal (optional caption: `half the bowl` or `p
 
 Same logging path as `/food` (including Health push).
 
+**Steering ingredients:** put facts in the same photo's caption, for example:
+
+```text
+/food praj Paneer bhurji with cream, not scrambled eggs.
+No eggs anywhere in this meal. I ate half the bowl.
+Include the bread and vegetables shown.
+```
+
+Explicit ingredient identities, exclusions, quantities and consumed portions take precedence over visual guesses. Exclusions also constrain food tags; saying the bhurji is not eggs does not remove eggs from a separate omelette.
+
+Coordinated exclusions such as `without eggs or milk` apply to both named ingredients; a separately included side remains included. Standalone `no dairy or eggs` excludes both across the meal, and a trailing `anywhere in this meal` qualifier applies to the entire ingredient list. These exclusions survive portion-only corrections. Paneer itself still counts as dairy when only added milk is excluded.
+
+A separate photo following your recent meal logs asks whether to update a meal or log a new one. Nothing from that photo is saved until you answer `update`, `new`, or `cancel`. With multiple candidates, use `update <meal id>` from the list. Choices belong to the sender and conversation, expire after 15 minutes, and reject superseded questions or meals changed since the question. A new photo replaces your previous unanswered photo choice.
+
+Replying to a meal confirmation with a photo explicitly updates that meal. A `/food ...` photo caption explicitly starts a new meal, even when sent as a reply. Send one image at a time.
+
+A barcode cannot replace an existing whole meal: Chotu asks for the product, amount eaten, and component to replace, leaving the meal unchanged. Reply with those facts in text and explicitly retain any sides, or use `/food` to log a separate meal.
+
+If a photo update returns no meal description, Chotu asks you to retry with a clearer photo or the ingredients and amount eaten. The existing description, nutrition, user facts, revision, and daily totals remain unchanged; a partial caption never replaces the whole meal.
+
+### Correcting a logged meal
+
+Reply to its confirmation with a correction such as `It's paneer, not eggs; keep the cream and half-bowl portion.` Confirmations show an eight-character meal ID.
+
+```text
+/correctfood <meal id> The bhurji is paneer, not eggs. No eggs in this meal.
+```
+
+An unquoted correction can select a meal only when there is exactly one candidate you logged in this conversation within the last 20 minutes; otherwise Chotu asks which meal. This window uses interaction time, not the meal's consumption date. While evening reflection is open, use a reply or `/correctfood` so ordinary reflection text is not interpreted as a correction. Historical meals without new confirmation mappings can be targeted by ID in your linked DM; group corrections require recorded sender provenance.
+
+A quoted correction whose confirmation cannot be mapped never falls back to the most recent meal. Reply to a current confirmation or supply an explicit meal ID with `/correctfood`; an unmapped old quote cannot silently revise a newer lunch.
+
+Corrections replace nutrition and tags on the existing entry, preserving its member and consumption time, unaffected ingredients and portions, external nutrition, and activity. The original day's totals are rebuilt; no additional meal is created. Ambiguous model results ask for clarification without changing the entry. Analysis remains sequential: a correction sent during an estimate is processed after that estimate finishes, not acknowledged as an immediate interruption.
+
+Previously supplied exclusions remain active during portion-only corrections, even if the new model description guesses an excluded ingredient. A later explicit addition can replace the corresponding exclusion without reviving other old ingredient guesses.
+
+Initial meal facts and revised facts commit in the same transaction as nutrition, tags, and the day's summary. If facts or their sender/conversation provenance cannot be saved, the entire meal write rolls back; a later correction cannot read half-committed history.
+
+Google Health's anonymous nutrition logs cannot be edited, so a synced correction deletes the old remote log and creates its replacement. Local success is reported separately from remote success. Interrupted replacements keep durable, revision-specific retry state; `/sync` retries outstanding corrections, including meals on earlier dates. While a replacement is unresolved, sync refuses to overwrite corrected local nutrition with a stale remote rollup.
+
+Initial uploads use the same durable, named retry path (revision zero), so a scheduled upload already in flight cannot overwrite a newer correction's remote reference. Updated confirmations retain the existing private condition-watchlist behavior for newly applicable tags.
+
+Undo, clear, and adjust record deletion intent before remote cleanup. In-flight uploads settle into a durable resource ledger; every possibly created resource must be resolved and removed before local meals are deleted. Failed cleanup retains the selected entries and their retry state. `/sync` resumes outstanding deletions on their original days, including after restart or midnight, and does not overwrite nutrition while cleanup is unresolved.
+
+**Legacy Operation references:** older code could store a Google `Operation` name instead of a completed nutrition-log `DataPoint` name. These meals and their cleanup state remain retained. The published [Health API discovery](https://health.googleapis.com/$discovery/rest?version=v4) exposes no Operation-read method, and [DataPoint listing](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/list) has no authoritative Operation correlation. Recovery requires the original [completed Operation response](https://developers.google.com/health/reference/rest/Shared.Types/Operation) or another authoritative Operation-to-DataPoint mapping; retrying `/sync` cannot invent it. Chotu does not guess by similar food/timestamps, delete an unconfirmed resource, or create a potentially duplicate replacement. New uploads reject unfinished Operations rather than save them as meal names.
+
+Remote nutrition mutations are serialized within one supervisor process. Run only one writer process against the database; stop the old binary before starting an upgraded one.
+
 ---
 
 ## `/undofood [member_id]`
 
-Removes the last food entry logged through chat (and its Google Health log if synced). Rebuilds today’s summary from remaining `food_log` rows.
+Removes today's latest chat food entry by consumption timestamp (and its Google Health log if synced). Rebuilds today's summary from remaining `food_log` rows while preserving external nutrition and activity. If deletion cannot finish, the local entry and durable cleanup state are retained. Retrying `/undofood` resumes today's pending deletion before considering a newer meal; `/sync` can resume it on a later day.
 
 ---
 
@@ -91,13 +139,19 @@ Removes the last food entry logged through chat (and its Google Health log if sy
 /adjustfood 2100 160 200 70
 ```
 
-Overrides today’s totals. Clears meals logged through chat from Google Health first so the next sync doesn’t double-count.
+Overrides today’s macros after removing the explicitly selected chat meals and their Google Health logs. A meal arriving after selection is not deleted. The local adjustment is a signed audit delta against the current external-plus-remaining-meal base, so undo restores that base; micronutrients and activity are preserved.
+
+Sync reads local meal and adjustment audits inside its guarded summary-write transaction. An adjustment committed while remote metrics are being fetched is included before the sync writes totals.
+
+If remote deletion cannot be confirmed, the adjustment is not applied locally. If deletion succeeds but the adjustment cannot be saved, Chotu reports that separate failure and asks you to check `/status` before retrying.
 
 ---
 
 ## `/clearfood [member_id]`
 
-Wipes today’s food logs + summary for that member.
+Removes today's chat food logs selected when the command starts. Rebuilds the summary while preserving external nutrition, activity, and meals arriving after selection.
+
+If deletion cannot finish, selected local meals are retained with durable retry state. Retry `/clearfood`, or use `/sync` to resume outstanding deletions after the day changes.
 
 ---
 

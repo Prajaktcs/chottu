@@ -9,8 +9,7 @@ use crate::scheduled_delivery::{self, DeliveryOutcome, ScheduledJob};
 use chotu_common::{
     answer_memory_query, assign_food_tags, build_calendar_client, clear_budget_override,
     complete_all_open_tasks, compose_calendar_agenda, compute_budget_progress,
-    current_budget_month, default_member_id, delete_food_log_tags,
-    delete_food_log_tags_for_member_day, display_category, effective_food_time,
+    current_budget_month, default_member_id, display_category, effective_food_time,
     ensure_food_mutation_allowed, exchange_google_code, fetch_exchange_rates,
     fetch_stock_quotes_near_cost, format_budget_progress_markdown, has_signal_delivery,
     insert_food_log_tags, is_signal_conversation_allowed, list_completable_open_tasks,
@@ -24,6 +23,9 @@ use chotu_common::{
     TASK_CALENDAR_DURATION_MINUTES,
 };
 use finance_advisor::{run_stock_research_with_progress, ResearchProgress, StockResearcher};
+
+#[path = "food_steering.rs"]
+mod food_steering;
 
 type Bot = SignalClient;
 type ChatId = SignalRecipient;
@@ -60,6 +62,7 @@ const HELP_TEXT: &str = "\
 These commands are supported:
 /help — display this text.
 /food [member_id] <description> — log food.
+/correctfood [meal_id] <correction> — update a meal; replying to its confirmation selects it.
 /status — show today's status report.
 /plan [new] — weekly training plan.
 /brief — morning brief: calendar, tasks, bills, nutrition.
@@ -848,6 +851,29 @@ async fn handle_inbound(
         send_signal(&bot, &chat_id, reason).await?;
         return Ok(());
     }
+    let allow_unquoted_correction = !matches!(
+        states.read().await.get(&chat_id),
+        Some(ConversationState::WaitingForReflection { .. })
+    );
+    match food_steering::handle(
+        &bot,
+        &inbound,
+        &pool,
+        &llm,
+        &gemini_client,
+        &shared_config,
+        allow_unquoted_correction,
+    )
+    .await
+    {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("Food steering failed: {error:?}");
+            send_signal(&bot, &chat_id, "Couldn't finish meal handling. Check /status before retrying to avoid a duplicate; any saved correction can be synced with /sync.").await?;
+            return Err(error);
+        }
+    }
 
     match classify_inbound(&inbound) {
         InboundRoute::Image | InboundRoute::Message => {
@@ -911,7 +937,17 @@ async fn handle_command(
             send_signal(&bot, &chat_id, HELP_TEXT).await?;
         }
         Command::Food(args) => {
-            handle_food_log(&bot, &chat_id, args, &pool, &llm, &gemini_client, &config).await?;
+            handle_food_log(
+                &bot,
+                &chat_id,
+                &sender_aci,
+                args,
+                &pool,
+                &llm,
+                &gemini_client,
+                &config,
+            )
+            .await?;
         }
         Command::Status => {
             handle_status(&bot, &chat_id, &pool, &config, &llm).await?;
@@ -1149,6 +1185,7 @@ async fn handle_whoami(
 async fn handle_food_log(
     bot: &Bot,
     chat_id: &ChatId,
+    sender_aci: &str,
     args: String,
     pool: &SqlitePool,
     llm: &ChotuLlm,
@@ -1222,6 +1259,7 @@ async fn handle_food_log(
         pool,
         gemini_client,
         config,
+        sender_aci,
         &family_member_id,
         &description,
         food_date.as_deref(),
@@ -1240,6 +1278,7 @@ async fn log_food_for_member(
     pool: &SqlitePool,
     gemini_client: &GeminiClient,
     config: &AppConfig,
+    sender_aci: &str,
     family_member_id: &str,
     food_description: &str,
     food_date: Option<&str>,
@@ -1282,6 +1321,8 @@ async fn log_food_for_member(
                 chat_id,
                 pool,
                 config,
+                sender_aci,
+                timing_utterance,
                 family_member_id,
                 food_description,
                 &est,
@@ -1423,6 +1464,7 @@ async fn persist_food_log_and_tags(
     est: &chotu_common::NutritionEstimation,
     date_str: &str,
     assigned: &AssignedFoodTags,
+    context: &chotu_common::FoodSignalContext<'_>,
 ) -> anyhow::Result<()> {
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -1560,6 +1602,7 @@ async fn persist_food_log_and_tags(
     .execute(&mut *tx)
     .await?;
 
+    chotu_common::write_food_signal_context(&mut *tx, log_id, context).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1570,6 +1613,8 @@ async fn persist_food_estimation(
     chat_id: &ChatId,
     pool: &SqlitePool,
     config: &AppConfig,
+    sender_aci: &str,
+    user_facts: &str,
     family_member_id: &str,
     food_description: &str,
     est: &chotu_common::NutritionEstimation,
@@ -1583,7 +1628,8 @@ async fn persist_food_estimation(
         .format("%Y-%m-%d")
         .to_string();
 
-    let assigned = assign_food_tags(&est.tags, food_description);
+    let assigned = assign_food_tags(&est.tags, &format!("{food_description}\n{user_facts}"));
+    let context = food_steering::context(chat_id, sender_aci, user_facts);
     if let Err(e) = persist_food_log_and_tags(
         pool,
         &log_id,
@@ -1593,6 +1639,7 @@ async fn persist_food_estimation(
         est,
         &date_str,
         &assigned,
+        &context,
     )
     .await
     {
@@ -1721,6 +1768,10 @@ async fn persist_food_estimation(
         day_line,
         google_sync_note
     );
+    msg_text.push_str(&format!(
+        "\nMeal id: {} · Reply to this message to correct it.",
+        &log_id[..8]
+    ));
 
     let recipient = private_health_member_id(config, chat_id);
     let flags = match health_coach::conditions::pending_food_flags(
@@ -1743,7 +1794,8 @@ async fn persist_food_estimation(
         msg_text.push_str(&flag.confirmation_line());
     }
 
-    send_signal(&bot, chat_id, msg_text).await?;
+    let confirmation = send_signal(&bot, chat_id, msg_text).await?;
+    food_steering::record_confirmation(pool, chat_id, &log_id, confirmation).await?;
 
     if !flags.is_empty() {
         if let Err(error) = health_coach::conditions::mark_food_flags_sent(
@@ -1777,85 +1829,29 @@ async fn handle_clear_food(
     let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
         .expect("current configured civil day has valid bounds");
 
-    // Preserve Google Health (or other non-food_log) nutrition, then drop local food logs.
-    let external = match health_coach::external_nutrition_base(
-        pool,
-        &target_member_id,
-        &date_str,
-        config.resolved_tz(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to compute external nutrition base: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+    let ids: Vec<String> = match sqlx::query_scalar(
+        "SELECT id FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
+    ).bind(&target_member_id).bind(day_start).bind(day_end).fetch_all(pool).await {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("Could not select meals to clear: {error:?}");
+            send_signal(bot, chat_id, "Could not select today's meals. Nothing was cleared.").await?;
             return Ok(());
         }
     };
-
-    // Remove any meals we previously pushed to Google Health.
-    match health_coach::google_data_point_ids_for_day(
+    let rebuilt = match health_coach::delete_food_logs_for_day(
         pool,
+        config,
         &target_member_id,
         &date_str,
-        config.resolved_tz(),
+        &ids,
     )
     .await
     {
-        Ok(ids) => {
-            if let Err(e) =
-                health_coach::delete_google_nutrition_logs(&target_member_id, config, &ids).await
-            {
-                eprintln!(
-                    "Failed to delete Google Health nutrition logs on clear: {:?}",
-                    e
-                );
-            }
-        }
-        Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
-    }
-
-    if let Err(e) = (async {
-        let mut tx = pool.begin().await?;
-        delete_food_log_tags_for_member_day(
-            &mut tx,
-            &target_member_id,
-            &date_str,
-            config.resolved_tz(),
-        )
-        .await?;
-        sqlx::query(
-            "DELETE FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
-        )
-        .bind(&target_member_id)
-        .bind(day_start)
-        .bind(day_end)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-        anyhow::Ok(())
-    })
-    .await
-    {
-        eprintln!("Failed to clear food_log + tags: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error clearing food logs.").await?;
-        return Ok(());
-    }
-
-    let rebuilt = match health_coach::rebuild_summary_from_food_log(
-        pool,
-        &target_member_id,
-        &date_str,
-        config.resolved_tz(),
-        &external,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to rebuild health summary after clear: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error resetting health summary.").await?;
+        Ok(totals) => totals,
+        Err(error) => {
+            eprintln!("Meal clear remains pending: {error:?}");
+            send_signal(bot, chat_id, "Could not finish removing today's meals. Selected entries are retained with deletion pending; retry /clearfood.").await?;
             return Ok(());
         }
     };
@@ -1960,106 +1956,30 @@ async fn handle_adjust_food(
     let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
         .expect("current configured civil day has valid bounds");
 
-    // Infer Google Health (etc.) base, then replace local food_log with a delta
-    // so that external + food_log == the absolute totals the user requested. That keeps
-    // evening /sync (Google + food_log) consistent and makes /undofood rebuild cleanly.
-    let external = match health_coach::external_nutrition_base(
-        pool,
-        &member_id,
-        &date_str,
-        config.resolved_tz(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to compute external nutrition base: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
+    let ids: Vec<String> = match sqlx::query_scalar(
+        "SELECT id FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
+    ).bind(&member_id).bind(day_start).bind(day_end).fetch_all(pool).await {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("Could not select meals to adjust: {error:?}");
+            send_signal(bot, chat_id, "Could not select today's meals. No adjustment was applied.").await?;
             return Ok(());
         }
     };
-
-    // Drop previously pushed local meals from Google Health before replacing locally.
-    match health_coach::google_data_point_ids_for_day(
-        pool,
-        &member_id,
-        &date_str,
-        config.resolved_tz(),
+    if let Err(error) =
+        health_coach::delete_food_logs_for_day(pool, config, &member_id, &date_str, &ids).await
+    {
+        eprintln!("Meal replacement deletion remains pending: {error:?}");
+        send_signal(bot, chat_id, "Could not finish removing the selected meals. They are retained with deletion pending; no adjustment was applied. Retry /adjustfood.").await?;
+        return Ok(());
+    }
+    if let Err(error) = health_coach::adjust_food_totals(
+        pool, config, &member_id, &date_str, calories, protein, carbs, fats,
     )
     .await
     {
-        Ok(ids) => {
-            if let Err(e) =
-                health_coach::delete_google_nutrition_logs(&member_id, config, &ids).await
-            {
-                eprintln!(
-                    "Failed to delete Google Health nutrition logs before adjust: {:?}",
-                    e
-                );
-            }
-        }
-        Err(e) => eprintln!("Failed to list Google Health nutrition log IDs: {:?}", e),
-    }
-
-    // Keep micros from the external (Google) base; only macros are user-overridden.
-    let mut desired = external.clone();
-    desired.calories = calories as i64;
-    desired.protein = protein;
-    desired.carbs = carbs;
-    desired.fats = fats;
-
-    let delta = desired.saturating_sub(&external);
-    let log_id = uuid::Uuid::new_v4().to_string();
-    let now = chrono::Utc::now();
-    let desc = format!(
-        "Manual adjustment: {} kcal, {}g P, {}g C, {}g F",
-        calories, protein, carbs, fats
-    );
-
-    let assigned = assign_food_tags(Vec::<String>::new(), &desc);
-    if let Err(e) = (async {
-        let mut tx = pool.begin().await?;
-        delete_food_log_tags_for_member_day(&mut tx, &member_id, &date_str, config.resolved_tz())
-            .await?;
-        sqlx::query(
-            "DELETE FROM food_log WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)",
-        )
-        .bind(&member_id)
-        .bind(day_start)
-        .bind(day_end)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
-             estimated_calories, estimated_protein, estimated_carbs, estimated_fats) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&log_id)
-        .bind(now)
-        .bind(&member_id)
-        .bind(&desc)
-        .bind(delta.calories as i32)
-        .bind(delta.protein)
-        .bind(delta.carbs)
-        .bind(delta.fats)
-        .execute(&mut *tx)
-        .await?;
-        insert_food_log_tags(&mut tx, &log_id, &assigned).await?;
-        tx.commit().await?;
-        anyhow::Ok(())
-    })
-    .await
-    {
-        eprintln!("Failed to replace food_log + tags on adjust: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error adjusting food log.").await?;
-        return Ok(());
-    }
-
-    if let Err(e) =
-        health_coach::write_summary_nutrition(pool, &member_id, &date_str, &desired).await
-    {
-        eprintln!("Failed to adjust health summary: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error adjusting health summary.").await?;
+        eprintln!("Could not commit nutrition adjustment: {error:?}");
+        send_signal(bot, chat_id, "Selected meals were removed, but the adjustment could not be saved. Check /status before retrying.").await?;
         return Ok(());
     }
 
@@ -2093,28 +2013,15 @@ async fn handle_undo_food(
     let (day_start, day_end) = chotu_common::civil_day_bounds_utc(&date_str, config.resolved_tz())
         .expect("current configured civil day has valid bounds");
 
-    // Snapshot the non-food_log base before mutating food_log.
-    let external = match health_coach::external_nutrition_base(
-        pool,
-        &target_member_id,
-        &date_str,
-        config.resolved_tz(),
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to compute external nutrition base: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error reading today's summary.").await?;
-            return Ok(());
-        }
-    };
-
     let last_log: Option<chotu_common::FoodLog> = match sqlx::query_as::<_, chotu_common::FoodLog>(
-        "SELECT * FROM food_log \
-         WHERE family_member_id = ? AND julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?) \
-         ORDER BY timestamp DESC LIMIT 1",
+        "SELECT f.* FROM food_log f \
+         LEFT JOIN food_log_deletion_intents d ON d.food_log_id = f.id \
+           AND d.completed = 0 AND d.civil_date = ? \
+         WHERE f.family_member_id = ? \
+           AND julianday(f.timestamp) >= julianday(?) AND julianday(f.timestamp) < julianday(?) \
+         ORDER BY (d.food_log_id IS NOT NULL) DESC, f.timestamp DESC LIMIT 1",
     )
+    .bind(&date_str)
     .bind(&target_member_id)
     .bind(day_start)
     .bind(day_end)
@@ -2150,51 +2057,19 @@ async fn handle_undo_food(
         }
     };
 
-    if let Some(google_id) = log_entry.google_data_point_id.as_ref() {
-        if let Err(e) = health_coach::delete_google_nutrition_logs(
-            &target_member_id,
-            config,
-            &[google_id.clone()],
-        )
-        .await
-        {
-            eprintln!(
-                "Failed to delete Google Health nutrition log on undo: {:?}",
-                e
-            );
-        }
-    }
-
-    if let Err(e) = (async {
-        let mut tx = pool.begin().await?;
-        delete_food_log_tags(&mut tx, &log_entry.id).await?;
-        sqlx::query("DELETE FROM food_log WHERE id = ?")
-            .bind(&log_entry.id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        anyhow::Ok(())
-    })
-    .await
-    {
-        eprintln!("Failed to delete food_log + tags on undo: {:?}", e);
-        send_signal(&bot, chat_id, "❌ Database error deleting food log entry.").await?;
-        return Ok(());
-    }
-
-    let rebuilt = match health_coach::rebuild_summary_from_food_log(
+    let rebuilt = match health_coach::delete_food_logs_for_day(
         pool,
+        config,
         &target_member_id,
         &date_str,
-        config.resolved_tz(),
-        &external,
+        std::slice::from_ref(&log_entry.id),
     )
     .await
     {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to rebuild summary after undo: {:?}", e);
-            send_signal(&bot, chat_id, "❌ Database error updating today's summary.").await?;
+        Ok(totals) => totals,
+        Err(error) => {
+            eprintln!("Meal undo remains pending: {error:?}");
+            send_signal(bot, chat_id, "Could not finish removing that meal. The entry is retained with deletion pending; retry /undofood.").await?;
             return Ok(());
         }
     };
@@ -5351,6 +5226,7 @@ async fn handle_message(
                 &llm,
                 &gemini_client,
                 &config,
+                None,
             )
             .await?;
             send_signal(&bot, &chat_id, "Evening reflection is still open — type your journal reply, or send a command to cancel.").await?;
@@ -5458,6 +5334,7 @@ async fn handle_message(
             &llm,
             &gemini_client,
             &config,
+            None,
         )
         .await?;
     } else {
@@ -5470,6 +5347,7 @@ async fn handle_message(
             &gemini_client,
             config,
             &scope,
+            &inbound.sender_aci,
         )
         .await?;
     }
@@ -5485,6 +5363,7 @@ async fn handle_food_photo(
     llm: &ChotuLlm,
     gemini_client: &GeminiClient,
     config: &AppConfig,
+    update_target: Option<food_steering::FoodUpdateTarget>,
 ) -> Result<(), SignalError> {
     let Some(attachment) = inbound
         .attachments
@@ -5507,8 +5386,21 @@ async fn handle_food_photo(
     };
     let caption = strip_leading_food_command(caption_src);
 
-    let (member_id, caption_rest) =
+    let (parsed_member, caption_rest) =
         resolve_food_member_and_description(caption, config, chat_id.lookup_aci());
+    let member_id = update_target
+        .as_ref()
+        .map(|target| target.log.family_member_id.clone())
+        .unwrap_or(parsed_member);
+    let vision_caption = match &update_target {
+        Some(target) => format!(
+            "This photo updates ONE existing meal; preserve its consumed portion and supplied ingredients. \
+             Previous meal estimate: {}. Known user facts (later corrections take precedence): {}. \
+             New caption: {}. Use the photo to fill missing details, not replace explicit facts.",
+            target.log.raw_text_description, target.user_facts, caption_rest
+        ),
+        None => caption_rest.clone(),
+    };
     if reject_foreign_food_mutation(bot, chat_id, config, &member_id).await? {
         return Ok(());
     }
@@ -5539,7 +5431,7 @@ async fn handle_food_photo(
             .approximate_nutrition_from_image_with_fallback(
                 &image_bytes,
                 &attachment.content_type,
-                caption,
+                &vision_caption,
             )
             .await
     };
@@ -5553,6 +5445,24 @@ async fn handle_food_photo(
     };
     if analysis.kind == FoodPhotoKind::Unknown {
         send_signal(bot, chat_id, "Doesn't look like food — send a barcode, product package, or plated meal (optional caption like `praj half the bowl`).").await?;
+        return Ok(());
+    }
+    if update_target.is_some()
+        && (analysis.kind == FoodPhotoKind::Barcode || analysis.barcode.is_some())
+    {
+        send_signal(
+            bot, chat_id,
+            "A barcode identifies one product, not your whole meal. Nothing changed. Reply to the meal confirmation with the product, amount eaten, and which component to replace; keep any sides in the description. Use /food to log a separate meal.",
+        ).await?;
+        return Ok(());
+    }
+    if update_target.is_some() && analysis.description.trim().is_empty() {
+        send_signal(
+            bot,
+            chat_id,
+            "The photo analysis didn't describe the updated meal. Nothing changed. Retry the photo or reply with the ingredients and amount eaten; keep any unaffected sides in the description.",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -5611,15 +5521,8 @@ async fn handle_food_photo(
             } else {
                 caption_rest.clone()
             }
-        } else if caption_rest.is_empty()
-            || analysis
-                .description
-                .to_lowercase()
-                .contains(&caption_rest.to_lowercase())
-        {
-            analysis.description.clone()
         } else {
-            format!("{} ({})", analysis.description, caption_rest)
+            analysis.description.clone()
         };
         (desc, analysis.nutrition, vision_source.to_string())
     };
@@ -5634,6 +5537,31 @@ async fn handle_food_photo(
         format!("Using {} for *{}*…", source_note, member_id),
     )
     .await?;
+    if let Some(target) = update_target {
+        let facts = if caption_rest.is_empty() {
+            target.user_facts.clone()
+        } else {
+            format!("{}\nPhoto caption: {}", target.user_facts, caption_rest)
+        };
+        let tag_context = chotu_common::reconcile_food_tag_context(
+            &description,
+            &target.user_facts,
+            &caption_rest,
+        );
+        return food_steering::save_update(
+            bot,
+            chat_id,
+            &inbound.sender_aci,
+            pool,
+            config,
+            target,
+            &description,
+            &nutrition,
+            &facts,
+            &tag_context,
+        )
+        .await;
+    }
 
     let timing = if caption_rest.trim().is_empty() {
         resolve_food_log_timing_tz(None, None, config.resolved_tz())
@@ -5665,6 +5593,8 @@ async fn handle_food_photo(
         chat_id,
         pool,
         config,
+        &inbound.sender_aci,
+        &caption_rest,
         &member_id,
         &description,
         &nutrition,
@@ -5684,6 +5614,7 @@ async fn dispatch_free_text_intent(
     gemini_client: &GeminiClient,
     config: &AppConfig,
     scope: &CallerScope,
+    sender_aci: &str,
 ) -> Result<(), SignalError> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -5805,6 +5736,7 @@ async fn dispatch_free_text_intent(
                 pool,
                 gemini_client,
                 config,
+                sender_aci,
                 &family_member_id,
                 &description,
                 date.as_deref(),

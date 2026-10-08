@@ -14,3 +14,4 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 uuid = { workspace = true }
 schemars = { workspace = true }
+sha2 = { workspace = true }

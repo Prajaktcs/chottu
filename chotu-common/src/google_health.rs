@@ -640,136 +640,576 @@ impl GoogleHealthClient {
             .collect())
     }
 
-    /// Creates an anonymous nutrition-log data point. Returns the full resource `name`.
-    pub async fn create_nutrition_log(
+    /// Idempotent initial/replacement creation using a persisted client-provided DataPoint name.
+    /// A conflicting retry is accepted only after reading back the matching nutrition.
+    pub async fn create_nutrition_log_named(
         &self,
         entry: &NutritionLogWrite,
+        name: &str,
     ) -> Result<String, anyhow::Error> {
+        validate_client_nutrition_name(name)?;
         let access_token = self.access_token().await?;
-
-        let mut nutrients = Vec::new();
-        let mut push_g = |name: &str, grams: f64| {
-            if grams.abs() > f64::EPSILON {
-                nutrients.push(serde_json::json!({
-                    "nutrient": name,
-                    "quantity": { "grams": grams }
-                }));
-            }
-        };
-
-        push_g("PROTEIN", entry.protein_g);
-        push_g("SATURATED_FAT", entry.saturated_fat_g);
-        push_g("UNSATURATED_FAT", entry.unsaturated_fat_g);
-        push_g("SUGAR", entry.sugar_g);
-        push_g("DIETARY_FIBER", entry.fiber_g);
-        push_g("TRANS_FAT", entry.trans_fat_g);
-        push_g("CHOLESTEROL", mg_to_grams(entry.cholesterol_mg));
-        push_g("IRON", mg_to_grams(entry.iron_mg));
-        push_g("VITAMIN_C", mg_to_grams(entry.vitamin_c_mg));
-        push_g("SODIUM", mg_to_grams(entry.sodium_mg));
-        push_g("POTASSIUM", mg_to_grams(entry.potassium_mg));
-        push_g("CALCIUM", mg_to_grams(entry.calcium_mg));
-        push_g("MAGNESIUM", mg_to_grams(entry.magnesium_mg));
-        push_g("ZINC", mg_to_grams(entry.zinc_mg));
-        push_g("CAFFEINE", mg_to_grams(entry.caffeine_mg));
-        push_g("VITAMIN_E", mg_to_grams(entry.vitamin_e_mg));
-        // Combined B vitamins are stored as a single mg total locally.
-        push_g("VITAMIN_B6", mg_to_grams(entry.vitamin_b_mg));
-        push_g("VITAMIN_A", mcg_to_grams(entry.vitamin_a_mcg));
-        push_g("VITAMIN_D", mcg_to_grams(entry.vitamin_d_mcg));
-        push_g("VITAMIN_K", mcg_to_grams(entry.vitamin_k_mcg));
-
-        let body = serde_json::json!({
-            "nutritionLog": {
-                "interval": {
-                    "startTime": rfc3339_utc(entry.start_time),
-                    "endTime": rfc3339_utc(entry.end_time),
-                    "startUtcOffset": utc_offset_duration_str(entry.start_time),
-                    "endUtcOffset": utc_offset_duration_str(entry.end_time)
-                },
-                "foodDisplayName": entry.food_display_name,
-                "mealType": meal_type_for_timestamp(entry.start_time),
-                "energy": { "kcal": entry.calories_kcal },
-                "totalCarbohydrate": { "grams": entry.carbs_g },
-                "totalFat": { "grams": entry.fat_g },
-                "nutrients": nutrients,
-                "serving": { "amount": 1.0 }
-            }
-        });
-
-        let client = Client::new();
-        let url = "https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoints";
-        let response = client
-            .post(url)
-            .bearer_auth(&access_token)
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let data = response
-            .json::<serde_json::Value>()
-            .await
-            .unwrap_or_default();
-        if !status.is_success() {
-            return Err(anyhow::anyhow!(
-                "Google Health create nutrition-log failed: status {}, body: {}",
-                status,
-                data
-            ));
-        }
-
-        // create returns a long-running Operation; when done, response.name is the DataPoint.
-        let name = data
-            .get("response")
-            .and_then(|r| r.get("name"))
-            .and_then(|n| n.as_str())
-            .or_else(|| data.get("name").and_then(|n| n.as_str()))
-            .map(|s| s.to_string());
-
-        match name {
-            Some(n) if !n.is_empty() => Ok(n),
-            _ => Err(anyhow::anyhow!(
-                "Google Health create nutrition-log succeeded but returned no data point name: {}",
-                data
-            )),
-        }
+        create_nutrition_log_at(entry, Some(name), GOOGLE_HEALTH_API_BASE, &access_token).await
     }
 
-    /// Deletes one or more nutrition-log data points by full resource name.
+    /// Deletes immutable anonymous logs; absence is idempotent, incomplete operations are errors.
     pub async fn batch_delete_nutrition_logs(&self, names: &[String]) -> Result<(), anyhow::Error> {
         if names.is_empty() {
             return Ok(());
         }
-
         let access_token = self.access_token().await?;
-        let client = Client::new();
-        let url =
-            "https://health.googleapis.com/v4/users/me/dataTypes/nutrition-log/dataPoints:batchDelete";
-        let body = serde_json::json!({ "names": names });
-        let response = client
-            .post(url)
-            .bearer_auth(&access_token)
-            .json(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Google Health batchDelete nutrition-log failed: status {}, body: {}",
-                status,
-                body
-            ));
-        }
-        Ok(())
+        delete_nutrition_logs_at(names, GOOGLE_HEALTH_API_BASE, &access_token).await
     }
+}
+
+const GOOGLE_HEALTH_API_BASE: &str = "https://health.googleapis.com/v4";
+
+fn nutrition_log_body(entry: &NutritionLogWrite) -> serde_json::Value {
+    let mut nutrients = Vec::new();
+    let mut push_g = |name: &str, grams: f64| {
+        if grams.abs() > f64::EPSILON {
+            nutrients.push(serde_json::json!({
+                "nutrient": name,
+                "quantity": { "grams": grams }
+            }));
+        }
+    };
+
+    push_g("PROTEIN", entry.protein_g);
+    push_g("SATURATED_FAT", entry.saturated_fat_g);
+    push_g("UNSATURATED_FAT", entry.unsaturated_fat_g);
+    push_g("SUGAR", entry.sugar_g);
+    push_g("DIETARY_FIBER", entry.fiber_g);
+    push_g("TRANS_FAT", entry.trans_fat_g);
+    push_g("CHOLESTEROL", mg_to_grams(entry.cholesterol_mg));
+    push_g("IRON", mg_to_grams(entry.iron_mg));
+    push_g("VITAMIN_C", mg_to_grams(entry.vitamin_c_mg));
+    push_g("SODIUM", mg_to_grams(entry.sodium_mg));
+    push_g("POTASSIUM", mg_to_grams(entry.potassium_mg));
+    push_g("CALCIUM", mg_to_grams(entry.calcium_mg));
+    push_g("MAGNESIUM", mg_to_grams(entry.magnesium_mg));
+    push_g("ZINC", mg_to_grams(entry.zinc_mg));
+    push_g("CAFFEINE", mg_to_grams(entry.caffeine_mg));
+    push_g("VITAMIN_E", mg_to_grams(entry.vitamin_e_mg));
+    // Combined B vitamins are stored as a single mg total locally.
+    push_g("VITAMIN_B6", mg_to_grams(entry.vitamin_b_mg));
+    push_g("VITAMIN_A", mcg_to_grams(entry.vitamin_a_mcg));
+    push_g("VITAMIN_D", mcg_to_grams(entry.vitamin_d_mcg));
+    push_g("VITAMIN_K", mcg_to_grams(entry.vitamin_k_mcg));
+
+    let body = serde_json::json!({
+        "nutritionLog": {
+            "interval": {
+                "startTime": rfc3339_utc(entry.start_time),
+                "endTime": rfc3339_utc(entry.end_time),
+                "startUtcOffset": utc_offset_duration_str(entry.start_time),
+                "endUtcOffset": utc_offset_duration_str(entry.end_time)
+            },
+            "foodDisplayName": entry.food_display_name,
+            "mealType": meal_type_for_timestamp(entry.start_time),
+            "energy": { "kcal": entry.calories_kcal },
+            "totalCarbohydrate": { "grams": entry.carbs_g },
+            "totalFat": { "grams": entry.fat_g },
+            "nutrients": nutrients,
+            "serving": { "amount": 1.0 }
+        }
+    });
+    body
+}
+
+fn is_nutrition_log_name(name: &str) -> bool {
+    let mut parts = name.split('/');
+    parts.next() == Some("users")
+        && parts.next().is_some_and(|user| !user.is_empty())
+        && parts.next() == Some("dataTypes")
+        && parts.next() == Some("nutrition-log")
+        && parts.next() == Some("dataPoints")
+        && parts.next().is_some_and(|id| !id.is_empty())
+        && parts.next().is_none()
+}
+
+fn validate_client_nutrition_name(name: &str) -> Result<(), anyhow::Error> {
+    let leaf = name.rsplit('/').next().unwrap_or_default();
+    if !is_nutrition_log_name(name)
+        || !(4..=63).contains(&leaf.len())
+        || !leaf
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+    {
+        anyhow::bail!("Invalid client-provided Google nutrition-log name");
+    }
+    Ok(())
+}
+
+fn completed_operation(data: &serde_json::Value) -> Result<&serde_json::Value, anyhow::Error> {
+    if data.get("done").and_then(|value| value.as_bool()) != Some(true) {
+        anyhow::bail!("Google Health operation has not completed: {data}");
+    }
+    if let Some(error) = data.get("error") {
+        anyhow::bail!("Google Health operation failed: {error}");
+    }
+    Ok(data.get("response").unwrap_or(data))
+}
+
+async fn get_nutrition_log_at(
+    name: &str,
+    base: &str,
+    access_token: &str,
+) -> Result<Option<serde_json::Value>, anyhow::Error> {
+    if !is_nutrition_log_name(name) {
+        let mut parts = name.rsplit('/');
+        if parts.next().is_some_and(|id| !id.is_empty()) && parts.next() == Some("operations") {
+            // The public Health v4 discovery exposes no Operation-read method,
+            // and matching a listed meal cannot establish this POST's identity.
+            anyhow::bail!(
+                "Legacy Google Health Operation reference {name} has no confirmed nutrition-log DataPoint name; cleanup was retained. Recovery requires the Operation's authoritative completed response"
+            );
+        }
+        anyhow::bail!("Expected a nutrition-log DataPoint name, not an operation: {name}");
+    }
+    let response = Client::new()
+        .get(format!("{base}/{name}"))
+        .bearer_auth(access_token)
+        .send()
+        .await?;
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let status = response.status();
+    let data: serde_json::Value = response.json().await?;
+    if !status.is_success() {
+        anyhow::bail!("Google Health nutrition-log readback failed: status {status}, body: {data}");
+    }
+    if data.get("nutritionLog").is_none() {
+        anyhow::bail!("Google Health readback returned no nutrition log: {data}");
+    }
+    Ok(Some(data))
+}
+
+fn matching_nutrition_log(actual: &serde_json::Value, expected: &serde_json::Value) -> bool {
+    let Some(actual) = actual.get("nutritionLog") else {
+        return false;
+    };
+    let expected = &expected["nutritionLog"];
+    for field in ["foodDisplayName", "mealType"] {
+        if actual[field] != expected[field] {
+            return false;
+        }
+    }
+    for (field, unit) in [
+        ("energy", "kcal"),
+        ("totalCarbohydrate", "grams"),
+        ("totalFat", "grams"),
+        ("serving", "amount"),
+    ] {
+        let a = actual[field][unit].as_f64();
+        let e = expected[field][unit].as_f64();
+        if !matches!((a, e), (Some(a), Some(e)) if (a - e).abs() <= 1e-8 * e.abs().max(1.0)) {
+            return false;
+        }
+    }
+    for field in ["startTime", "endTime"] {
+        let parse = |value: &serde_json::Value| {
+            value
+                .as_str()
+                .and_then(|text| chrono::DateTime::parse_from_rfc3339(text).ok())
+        };
+        let a = parse(&actual["interval"][field]);
+        if a.is_none() || a != parse(&expected["interval"][field]) {
+            return false;
+        }
+    }
+    for field in ["startUtcOffset", "endUtcOffset"] {
+        if actual["interval"][field] != expected["interval"][field] {
+            return false;
+        }
+    }
+    let actual_nutrients = actual["nutrients"].as_array();
+    for nutrient in expected["nutrients"].as_array().into_iter().flatten() {
+        let actual = actual_nutrients.and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["nutrient"] == nutrient["nutrient"])
+        });
+        let a = actual.and_then(|value| value["quantity"]["grams"].as_f64());
+        let e = nutrient["quantity"]["grams"].as_f64();
+        if !matches!((a, e), (Some(a), Some(e)) if (a - e).abs() <= 1e-8 * e.abs().max(1.0)) {
+            return false;
+        }
+    }
+    // Unexpected nonzero nutrients are also a conflict, not a matching idempotent retry.
+    for nutrient in actual_nutrients.into_iter().flatten() {
+        if nutrient["quantity"]["grams"].as_f64().unwrap_or(0.0).abs() > 1e-8
+            && !expected["nutrients"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|item| item["nutrient"] == nutrient["nutrient"])
+        {
+            return false;
+        }
+    }
+    true
+}
+
+async fn create_nutrition_log_at(
+    entry: &NutritionLogWrite,
+    name: Option<&str>,
+    base: &str,
+    access_token: &str,
+) -> Result<String, anyhow::Error> {
+    let mut body = nutrition_log_body(entry);
+    if let Some(name) = name {
+        validate_client_nutrition_name(name)?;
+        body["name"] = serde_json::json!(name);
+    }
+    let response = Client::new()
+        .post(format!(
+            "{base}/users/me/dataTypes/nutrition-log/dataPoints"
+        ))
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await?;
+    let status = response.status();
+    let data: serde_json::Value = response.json().await?;
+    let conflict = status == reqwest::StatusCode::CONFLICT
+        || (data["done"] == true && data["error"]["code"] == 6);
+    if conflict {
+        if let Some(name) = name {
+            let point = get_nutrition_log_at(name, base, access_token).await?
+                .ok_or_else(|| anyhow::anyhow!("Conflicting Google nutrition log is not readable; replacement remains pending"))?;
+            let returned = point["name"].as_str().unwrap_or_default();
+            if is_nutrition_log_name(returned)
+                && returned.rsplit('/').next() == name.rsplit('/').next()
+                && matching_nutrition_log(&point, &body)
+            {
+                return Ok(returned.to_owned());
+            }
+            anyhow::bail!("Conflicting Google nutrition log does not match the saved correction");
+        }
+    }
+    if !status.is_success() {
+        anyhow::bail!("Google Health create nutrition-log failed: status {status}, body: {data}");
+    }
+    let point = completed_operation(&data)?;
+    let returned = point["name"].as_str().unwrap_or_default();
+    if !is_nutrition_log_name(returned)
+        || name.is_some_and(|name| returned.rsplit('/').next() != name.rsplit('/').next())
+    {
+        anyhow::bail!("Google Health completed create returned no matching nutrition-log DataPoint name: {data}");
+    }
+    Ok(returned.to_owned())
+}
+
+async fn delete_nutrition_logs_at(
+    names: &[String],
+    base: &str,
+    access_token: &str,
+) -> Result<(), anyhow::Error> {
+    let mut existing = Vec::with_capacity(names.len());
+    for name in names {
+        if get_nutrition_log_at(name, base, access_token)
+            .await?
+            .is_some()
+        {
+            existing.push(name);
+        }
+    }
+    if existing.is_empty() {
+        return Ok(());
+    }
+    let response = Client::new()
+        .post(format!(
+            "{base}/users/me/dataTypes/nutrition-log/dataPoints:batchDelete"
+        ))
+        .bearer_auth(access_token)
+        .json(&serde_json::json!({ "names": existing }))
+        .send()
+        .await?;
+    let status = response.status();
+    let data: serde_json::Value = response.json().await?;
+    if !status.is_success() {
+        anyhow::bail!(
+            "Google Health batchDelete nutrition-log failed: status {status}, body: {data}"
+        );
+    }
+    completed_operation(&data)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nutrition_entry() -> NutritionLogWrite {
+        let start_time = "2026-09-30T02:00:00Z".parse().unwrap();
+        NutritionLogWrite {
+            food_display_name: "lentil curry".into(),
+            start_time,
+            end_time: start_time + chrono::Duration::minutes(1),
+            calories_kcal: 240.0,
+            carbs_g: 24.0,
+            fat_g: 8.0,
+            protein_g: 12.0,
+            cholesterol_mg: 0.0,
+            saturated_fat_g: 1.0,
+            unsaturated_fat_g: 2.0,
+            iron_mg: 3.0,
+            vitamin_b_mg: 0.0,
+            vitamin_c_mg: 0.0,
+            sugar_g: 0.0,
+            fiber_g: 4.0,
+            sodium_mg: 80.0,
+            potassium_mg: 0.0,
+            calcium_mg: 0.0,
+            magnesium_mg: 0.0,
+            zinc_mg: 0.0,
+            vitamin_a_mcg: 0.0,
+            vitamin_d_mcg: 0.0,
+            vitamin_e_mg: 0.0,
+            vitamin_k_mcg: 0.0,
+            caffeine_mg: 0.0,
+            trans_fat_g: 0.0,
+        }
+    }
+
+    async fn nutrition_endpoint(
+        replies: Vec<(u16, serde_json::Value)>,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<Vec<(String, serde_json::Value)>>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, reply) in replies {
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+                        .await
+                        .expect("nutrition mock request timed out")
+                        .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 4096];
+                let (header_end, content_length) = loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "request ended before headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(pos) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = std::str::from_utf8(&request[..pos]).unwrap();
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        break (pos + 4, length);
+                    }
+                };
+                while request.len() < header_end + content_length {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "request ended before body");
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let headers = std::str::from_utf8(&request[..header_end])
+                    .unwrap()
+                    .to_owned();
+                let body = if content_length == 0 {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::from_slice(&request[header_end..header_end + content_length])
+                        .unwrap()
+                };
+                requests.push((headers, body));
+                let body = reply.to_string();
+                stream.write_all(format!(
+                    "HTTP/1.1 {status} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn nutrition_create_requires_completed_operation_and_datapoint_not_operation_name() {
+        let entry = nutrition_entry();
+        for reply in [
+            serde_json::json!({"name":"operations/pending","done":false}),
+            serde_json::json!({"name":"operations/failed","done":true,"error":{"code":13,"message":"failed"}}),
+            serde_json::json!({"name":"operations/not-a-meal","done":true,"response":{"name":"operations/not-a-meal"}}),
+        ] {
+            let (base, server) = nutrition_endpoint(vec![(200, reply)]).await;
+            assert!(create_nutrition_log_at(&entry, None, &base, "token")
+                .await
+                .is_err());
+            server.await.unwrap();
+        }
+        let name = "users/alex/dataTypes/nutrition-log/dataPoints/meal-id";
+        let (base, server) = nutrition_endpoint(vec![(
+            200,
+            serde_json::json!({
+                "done":true,"response":{"name":name}
+            }),
+        )])
+        .await;
+        assert_eq!(
+            create_nutrition_log_at(&entry, None, &base, "token")
+                .await
+                .unwrap(),
+            name
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ambiguous_create_retries_same_name_and_conflict_readback_prevents_duplicates() {
+        let entry = nutrition_entry();
+        let name = "users/me/dataTypes/nutrition-log/dataPoints/chotu-meal-r1";
+        let canonical = "users/alex/dataTypes/nutrition-log/dataPoints/chotu-meal-r1";
+        let mut point = nutrition_log_body(&entry);
+        point["name"] = serde_json::json!(canonical);
+        let (base, server) = nutrition_endpoint(vec![
+            (
+                200,
+                serde_json::json!({"name":"operations/in-flight","done":false}),
+            ),
+            (409, serde_json::json!({"error":{"code":409}})),
+            (200, point),
+        ])
+        .await;
+        assert!(create_nutrition_log_at(&entry, Some(name), &base, "token")
+            .await
+            .is_err());
+        assert_eq!(
+            create_nutrition_log_at(&entry, Some(name), &base, "token")
+                .await
+                .unwrap(),
+            canonical
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].1["name"], name);
+        assert_eq!(requests[1].1["name"], name);
+        assert!(requests[2].0.starts_with("GET "));
+    }
+
+    #[tokio::test]
+    async fn conflicting_create_must_match_remote_nutrition_and_timing() {
+        let entry = nutrition_entry();
+        let name = "users/me/dataTypes/nutrition-log/dataPoints/chotu-meal-r1";
+        for field in ["energy", "interval"] {
+            let mut point = nutrition_log_body(&entry);
+            point["name"] = serde_json::json!(name);
+            if field == "energy" {
+                point["nutritionLog"]["energy"]["kcal"] = serde_json::json!(999.0);
+            } else {
+                point["nutritionLog"]["interval"]["startTime"] =
+                    serde_json::json!("2026-09-29T02:00:00Z");
+            }
+            let (base, server) = nutrition_endpoint(vec![
+                (409, serde_json::json!({"error":{"code":409}})),
+                (200, point),
+            ])
+            .await;
+            assert!(create_nutrition_log_at(&entry, Some(name), &base, "token")
+                .await
+                .is_err());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_confirms_completion_and_restarted_retry_accepts_confirmed_absence() {
+        let name = "users/me/dataTypes/nutrition-log/dataPoints/old-meal".to_string();
+        let mut point = nutrition_log_body(&nutrition_entry());
+        point["name"] = serde_json::json!(name);
+        let (base, server) = nutrition_endpoint(vec![
+            (200, point),
+            (
+                200,
+                serde_json::json!({"name":"operations/deleting","done":false}),
+            ),
+            (404, serde_json::json!({"error":{"code":404}})),
+        ])
+        .await;
+        assert!(
+            delete_nutrition_logs_at(std::slice::from_ref(&name), &base, "token")
+                .await
+                .is_err()
+        );
+        assert!(
+            delete_nutrition_logs_at(std::slice::from_ref(&name), &base, "token")
+                .await
+                .is_ok()
+        );
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].0.starts_with("GET "));
+        assert!(requests[1].0.starts_with("POST "));
+        assert_eq!(requests[1].1["names"][0], name);
+        assert!(requests[2].0.starts_with("GET "));
+    }
+
+    #[tokio::test]
+    async fn completed_delete_with_error_is_not_success() {
+        let name = "users/me/dataTypes/nutrition-log/dataPoints/old-meal".to_string();
+        let mut point = nutrition_log_body(&nutrition_entry());
+        point["name"] = serde_json::json!(name);
+        let (base, server) = nutrition_endpoint(vec![
+            (200, point),
+            (
+                200,
+                serde_json::json!({"done":true,"error":{"code":13,"message":"failed"}}),
+            ),
+        ])
+        .await;
+        assert!(
+            delete_nutrition_logs_at(std::slice::from_ref(&name), &base, "token")
+                .await
+                .is_err()
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_operation_reference_is_never_confirmed_absent_or_deleted() {
+        for name in [
+            "operations/legacy-create",
+            "users/me/operations/legacy-create",
+            "users/me/dataTypes/nutrition-log/operations/legacy-create",
+        ] {
+            let (base, server) = nutrition_endpoint(Vec::new()).await;
+            let error = delete_nutrition_logs_at(&[name.to_owned()], &base, "token")
+                .await
+                .unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("authoritative completed response"));
+            assert!(server.await.unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn client_nutrition_names_enforce_documented_leaf_contract() {
+        assert!(validate_client_nutrition_name(
+            "users/me/dataTypes/nutrition-log/dataPoints/meal-r1"
+        )
+        .is_ok());
+        for invalid in [
+            "operations/meal-r1",
+            "users/me/dataTypes/nutrition-log/dataPoints/Ameal",
+            "users/me/dataTypes/nutrition-log/dataPoints/a_bcd",
+            "users/me/dataTypes/nutrition-log/dataPoints/abc",
+        ] {
+            assert!(validate_client_nutrition_name(invalid).is_err());
+        }
+    }
 
     #[test]
     fn test_deserialize_google_health_response() {

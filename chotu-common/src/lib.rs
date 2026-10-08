@@ -32,7 +32,8 @@ pub use calendar::{
 };
 pub use civil_day::civil_day_bounds_utc;
 pub use database::{
-    complete_all_open_tasks, init_db, list_completable_open_tasks, CompletedTaskRow,
+    complete_all_open_tasks, init_db, list_completable_open_tasks, write_food_signal_context,
+    CompletedTaskRow, FoodSignalContext,
 };
 pub use due_parse::{
     is_due_for_reminder, is_known_task_status_filter, looks_like_task_add_query, parse_due_phrase,
@@ -60,7 +61,8 @@ pub use food_parse::{
 pub use food_tags::{
     assign_food_tags, backfill_food_log_keyword_tags, delete_food_log_tags,
     delete_food_log_tags_for_member_day, food_tag_classifier_instruction, insert_food_log_tags,
-    keyword_tags_for, sanitize_food_tags, AssignedFoodTags, FOOD_TAG_VOCABULARY,
+    keyword_tags_for, reconcile_food_tag_context, sanitize_food_tags, AssignedFoodTags,
+    FOOD_TAG_VOCABULARY,
 };
 pub use google_health::{
     parse_exercise_data_points, ExerciseSession, GoogleHealthClient, GoogleHealthFoodSummary,
@@ -71,10 +73,10 @@ pub use ledger::{
     LedgerAmountReject, LEDGER_ABS_AMOUNT_HARD_MAX, LEDGER_USD_EQUIV_MAX,
 };
 pub use llm::{
-    ActionItemExtraction, ChotuLlm, FoodLogContext, FoodPhotoAnalysis, FoodPhotoKind, GeminiClient,
-    IntentClassification, IntentKind, LedgerExtraction, LlmError, MissingSyncNutrition,
-    NutritionEstimation, OpenRouterClient, PersonalReferenceExtraction, TravelItineraryExtraction,
-    UpcomingBillExtraction, UserIntent,
+    ActionItemExtraction, ChotuLlm, FoodCorrectionAnalysis, FoodLogContext, FoodPhotoAnalysis,
+    FoodPhotoKind, GeminiClient, IntentClassification, IntentKind, LedgerExtraction, LlmError,
+    MissingSyncNutrition, NutritionEstimation, OpenRouterClient, PersonalReferenceExtraction,
+    TravelItineraryExtraction, UpcomingBillExtraction, UserIntent,
 };
 pub use memory::{
     answer_memory_query, brain_dir, format_hit_list, memory_chunk_in_scope,

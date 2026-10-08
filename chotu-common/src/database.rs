@@ -3,6 +3,44 @@ use sqlx::{sqlite::SqliteConnectOptions, SqlitePool};
 use std::path::Path;
 use std::str::FromStr;
 
+/// Sender-scoped facts committed with a new or revised Signal meal.
+pub struct FoodSignalContext<'a> {
+    pub recipient_kind: &'a str,
+    pub recipient_id: &'a str,
+    pub sender_aci: &'a str,
+    pub user_facts: &'a str,
+}
+
+/// Use the meal's transaction so facts and nutrition cannot commit separately.
+pub async fn write_food_signal_context<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    food_log_id: &str,
+    context: &FoodSignalContext<'_>,
+) -> Result<()> {
+    let written = sqlx::query(
+        "INSERT INTO food_signal_context \
+         (food_log_id, recipient_kind, recipient_id, sender_aci, user_facts, logged_at) \
+         VALUES (?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(food_log_id) DO UPDATE SET \
+         user_facts = excluded.user_facts, logged_at = excluded.logged_at \
+         WHERE food_signal_context.recipient_kind = excluded.recipient_kind \
+         AND food_signal_context.recipient_id = excluded.recipient_id \
+         AND food_signal_context.sender_aci = excluded.sender_aci",
+    )
+    .bind(food_log_id)
+    .bind(context.recipient_kind)
+    .bind(context.recipient_id)
+    .bind(context.sender_aci)
+    .bind(context.user_facts)
+    .bind(chrono::Utc::now())
+    .execute(executor)
+    .await?;
+    if written.rows_affected() != 1 {
+        anyhow::bail!("Meal context belongs to a different conversation or sender");
+    }
+    Ok(())
+}
+
 /// Initializes the SQLite database, creating the file if it does not exist,
 /// and runs all embedded database migrations.
 pub async fn init_db(db_path: &str) -> Result<SqlitePool> {
