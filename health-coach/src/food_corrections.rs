@@ -78,6 +78,73 @@ async fn retain_resource(
     Ok(())
 }
 
+// A completed POST identifies the resource even when Google replaces the requested ID.
+// Commit that mapping before cleanup, including references captured by a newer revision
+// or deletion intent, so a restart cannot recreate the provisional resource.
+async fn confirm_created_resource(
+    tx: &mut Transaction<'_, Sqlite>,
+    log_id: &str,
+    requested: &str,
+    returned: &str,
+    revision: i64,
+    snapshot: &str,
+) -> Result<()> {
+    retain_resource(tx, log_id, returned, revision, Some(snapshot), false).await?;
+    sqlx::query(
+        "UPDATE food_log_remote_resources SET create_pending = 0 \
+         WHERE food_log_id = ? AND remote_name = ? AND revision = ?",
+    )
+    .bind(log_id)
+    .bind(returned)
+    .bind(revision)
+    .execute(&mut **tx)
+    .await?;
+    if returned != requested {
+        sqlx::query(
+            "DELETE FROM food_log_remote_resources \
+             WHERE food_log_id = ? AND remote_name = ? AND revision = ?",
+        )
+        .bind(log_id)
+        .bind(requested)
+        .bind(revision)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE food_log_corrections SET remote_name = ?, remote_create_pending = 0 \
+             WHERE food_log_id = ? AND remote_name = ? AND remote_snapshot_json = ?",
+        )
+        .bind(returned)
+        .bind(log_id)
+        .bind(requested)
+        .bind(snapshot)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE food_log SET google_data_point_id = ? \
+             WHERE id = ? AND google_data_point_id = ?",
+        )
+        .bind(returned)
+        .bind(log_id)
+        .bind(requested)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query(
+            "UPDATE food_log_deletion_intents SET \
+             google_name = CASE WHEN google_name = ? THEN ? ELSE google_name END, \
+             correction_remote_name = CASE WHEN correction_remote_name = ? THEN ? ELSE correction_remote_name END \
+             WHERE food_log_id = ? AND completed = 0",
+        )
+        .bind(requested)
+        .bind(returned)
+        .bind(requested)
+        .bind(returned)
+        .bind(log_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Delete only the selected meals on their original civil day.
 ///
 /// Intent is durable before HTTP cleanup. Failures keep the meals and their
@@ -408,18 +475,13 @@ async fn cleanup_deletion_resources<R: NutritionRemote>(
              WHERE r.food_log_id = ? AND d.completed = 0 ORDER BY r.remote_name LIMIT 1",
         ).bind(log_id).fetch_optional(&mut *tx).await?;
         tx.commit().await?;
-        let Some(resource) = resource else {
+        let Some(mut resource) = resource else {
             return Ok(());
         };
         let remote =
             remote.context("Google cleanup is pending; member credentials are required")?;
         if resource.create_pending {
-            resolve_pending_create(
-                remote,
-                &resource.remote_name,
-                resource.snapshot_json.as_deref(),
-            )
-            .await?;
+            resolve_pending_create(pool, remote, log_id, &mut resource).await?;
         }
         remote
             .delete(&resource.remote_name)
@@ -803,31 +865,8 @@ async fn finish_create(
         bail!("Food entry was deleted during Google sync");
     }
     let snapshot = serde_json::to_string(log)?;
-    retain_resource(
-        &mut tx,
-        &log.id,
-        name,
-        state.revision,
-        Some(&snapshot),
-        false,
-    )
-    .await?;
-    sqlx::query(
-        "UPDATE food_log_remote_resources SET create_pending = 0 \
-         WHERE food_log_id = ? AND remote_name IN (?, ?) AND revision = ?",
-    )
-    .bind(&log.id)
-    .bind(name)
-    .bind(&state.replacement_name)
-    .bind(state.revision)
-    .execute(&mut *tx)
-    .await?;
-    if name != state.replacement_name
-        && name.rsplit('/').next() == state.replacement_name.rsplit('/').next()
-    {
-        sqlx::query("DELETE FROM food_log_remote_resources WHERE food_log_id = ? AND remote_name = ? AND revision = ?")
-            .bind(&log.id).bind(&state.replacement_name).bind(state.revision).execute(&mut *tx).await?;
-    }
+    // Record the confirmed identity after the revision CAS below; canonicalizing
+    // the references first would invalidate the still-current provisional name.
     let changed = sqlx::query(
         "UPDATE food_log_corrections SET sync_state = 'synced', remote_name = ?, remote_snapshot_json = ?, remote_create_pending = 0 \
          WHERE food_log_id = ? AND revision = ? AND sync_state = 'create_pending' \
@@ -835,6 +874,15 @@ async fn finish_create(
          AND NOT EXISTS (SELECT 1 FROM food_log_deletion_intents d WHERE d.food_log_id = food_log_corrections.food_log_id)",
     ).bind(name).bind(&snapshot).bind(&log.id).bind(state.revision)
         .bind(&state.replacement_name).bind(&state.replacement_name).bind(&snapshot).execute(&mut *tx).await?;
+    confirm_created_resource(
+        &mut tx,
+        &log.id,
+        &state.replacement_name,
+        name,
+        state.revision,
+        &snapshot,
+    )
+    .await?;
     if changed.rows_affected() != 1 {
         let synced: Option<String> = sqlx::query_scalar(
             "SELECT f.google_data_point_id FROM food_log f JOIN food_log_corrections c ON c.food_log_id = f.id \
@@ -881,6 +929,11 @@ async fn sync_food_log_with_remote<R: NutritionRemote>(
         return Ok(());
     }
     cleanup_correction_resources(pool, remote, log_id, &state).await?;
+    let current = correction_state(pool, log_id).await?;
+    if current.revision != state.revision {
+        bail!("Food entry changed during Google cleanup; upload remains pending");
+    }
+    let state = current;
     let log = prepare_create(pool, log_id, &state).await?;
     // prepare_create durably authorizes this named snapshot before HTTP. Intent
     // may now be marked, but the deleter waits for this mutation window to end
@@ -905,7 +958,7 @@ async fn cleanup_correction_resources<R: NutritionRemote>(
     .bind(log_id)
     .fetch_all(pool)
     .await?;
-    for resource in resources {
+    for mut resource in resources {
         if state.sync_state == "synced"
             && state.remote_name.as_deref() == Some(resource.remote_name.as_str())
         {
@@ -919,12 +972,7 @@ async fn cleanup_correction_resources<R: NutritionRemote>(
             continue;
         }
         if resource.create_pending {
-            resolve_pending_create(
-                remote,
-                &resource.remote_name,
-                resource.snapshot_json.as_deref(),
-            )
-            .await?;
+            resolve_pending_create(pool, remote, log_id, &mut resource).await?;
         }
         remote
             .delete(&resource.remote_name)
@@ -946,17 +994,37 @@ async fn cleanup_correction_resources<R: NutritionRemote>(
 }
 
 async fn resolve_pending_create<R: NutritionRemote>(
+    pool: &SqlitePool,
     client: &R,
-    name: &str,
-    snapshot: Option<&str>,
+    log_id: &str,
+    resource: &mut RemoteResource,
 ) -> Result<()> {
-    let baseline: FoodLog =
-        serde_json::from_str(snapshot.context("Pending Google create is missing its snapshot")?)?;
-    // A missing GET alone cannot rule out an in-flight POST. Complete/read back the
-    // same persisted name and payload before removing it, including on undo/clear.
-    client.create(&baseline, name).await.context(
-        "Earlier Google nutrition creation is still unresolved; deletion remains pending",
-    )?;
+    let snapshot = resource
+        .snapshot_json
+        .as_deref()
+        .context("Pending Google create is missing its snapshot")?;
+    let baseline: FoodLog = serde_json::from_str(snapshot)?;
+    // A missing GET alone cannot rule out an in-flight POST. Resolve the same
+    // snapshot, then retain the authoritative name before attempting deletion.
+    let name = client
+        .create(&baseline, &resource.remote_name)
+        .await
+        .context(
+            "Earlier Google nutrition creation is still unresolved; deletion remains pending",
+        )?;
+    let mut tx = pool.begin().await?;
+    confirm_created_resource(
+        &mut tx,
+        log_id,
+        &resource.remote_name,
+        &name,
+        resource.revision,
+        snapshot,
+    )
+    .await?;
+    tx.commit().await?;
+    resource.remote_name = name;
+    resource.create_pending = false;
     Ok(())
 }
 
@@ -1029,6 +1097,7 @@ mod tests {
     #[derive(Default)]
     struct ControlledRemote {
         meals: Mutex<std::collections::BTreeMap<String, FoodLog>>,
+        server_assigned_name: Option<String>,
         creates: std::sync::atomic::AtomicUsize,
         deletes: std::sync::atomic::AtomicUsize,
         fail_create: std::sync::atomic::AtomicBool,
@@ -1046,11 +1115,15 @@ mod tests {
                 self.create_entered.notify_one();
                 self.create_release.notified().await;
             }
-            self.meals.lock().await.insert(name.to_owned(), log.clone());
+            let returned = self.server_assigned_name.as_deref().unwrap_or(name);
+            self.meals
+                .lock()
+                .await
+                .insert(returned.to_owned(), log.clone());
             if self.fail_create.load(SeqCst) {
                 bail!("Ambiguous create: the remote may have accepted the request");
             }
-            Ok(name.to_owned())
+            Ok(returned.to_owned())
         }
 
         async fn delete(&self, name: &str) -> Result<()> {
@@ -1086,6 +1159,156 @@ mod tests {
         .unwrap();
         sqlx::query("UPDATE health_family_summary SET step_count = 1234, active_calories_burned = 80, sleep_hours = 7 WHERE family_member_id = 'alex'")
             .execute(pool).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn server_assigned_upload_is_synced_and_deleted_by_confirmed_name() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let config = config();
+        let original = original(&pool, None).await;
+        baseline_summary(&pool).await;
+        ensure_food_log_upload_state(&pool, &original)
+            .await
+            .unwrap();
+        let canonical =
+            "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102";
+        let remote = ControlledRemote {
+            server_assigned_name: Some(canonical.into()),
+            ..Default::default()
+        };
+        sync_food_log_with_remote(&pool, &remote, "meal")
+            .await
+            .unwrap();
+        let state = correction_state(&pool, "meal").await.unwrap();
+        assert_eq!(state.sync_state, "synced");
+        assert_eq!(state.remote_name.as_deref(), Some(canonical));
+        let saved: String =
+            sqlx::query_scalar("SELECT google_data_point_id FROM food_log WHERE id = 'meal'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(saved, canonical);
+        let resources: Vec<(String, bool)> = sqlx::query_as(
+            "SELECT remote_name, create_pending FROM food_log_remote_resources WHERE food_log_id = 'meal'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(resources, vec![(canonical.into(), false)]);
+        ensure_corrections_synced_for_member(&pool, "alex", config.resolved_tz())
+            .await
+            .unwrap();
+        sync_food_log_with_remote(&pool, &remote, "meal")
+            .await
+            .unwrap();
+        assert_eq!(remote.creates.load(SeqCst), 1);
+        assert_eq!(remote.deletes.load(SeqCst), 0);
+        let ids = vec![original.id.clone()];
+        mark_deletion_intents(&pool, &config, "alex", "2026-09-29", &ids)
+            .await
+            .unwrap();
+        let totals =
+            delete_marked_food_logs(&pool, &config, "alex", "2026-09-29", &ids, Some(&remote))
+                .await
+                .unwrap();
+        assert_eq!(totals.calories, 100);
+        assert!(remote.meals.lock().await.is_empty());
+        assert_eq!(remote.creates.load(SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_cleanup_retains_server_assigned_name_before_failed_delete() {
+        use std::sync::atomic::Ordering::SeqCst;
+        for deletion_intent in [false, true] {
+            let pool = chotu_common::init_db(":memory:").await.unwrap();
+            let config = config();
+            let original = original(&pool, None).await;
+            baseline_summary(&pool).await;
+            ensure_food_log_upload_state(&pool, &original)
+                .await
+                .unwrap();
+            let initial = correction_state(&pool, "meal").await.unwrap();
+            prepare_create(&pool, "meal", &initial).await.unwrap();
+            let canonical =
+                "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102";
+            let mut remote = ControlledRemote {
+                server_assigned_name: Some(canonical.into()),
+                ..Default::default()
+            };
+            remote.fail_delete.store(true, SeqCst);
+            let ids = vec![original.id.clone()];
+            if deletion_intent {
+                mark_deletion_intents(&pool, &config, "alex", "2026-09-29", &ids)
+                    .await
+                    .unwrap();
+                assert!(delete_marked_food_logs(
+                    &pool,
+                    &config,
+                    "alex",
+                    "2026-09-29",
+                    &ids,
+                    Some(&remote)
+                )
+                .await
+                .is_err());
+            } else {
+                revise_food_log(
+                    &pool,
+                    &config,
+                    &original,
+                    0,
+                    "lentils",
+                    &estimation(),
+                    "lentils",
+                    None,
+                )
+                .await
+                .unwrap();
+                assert!(sync_food_log_with_remote(&pool, &remote, "meal")
+                    .await
+                    .is_err());
+            }
+            let resources: Vec<(String, bool)> = sqlx::query_as(
+                "SELECT remote_name, create_pending FROM food_log_remote_resources WHERE food_log_id = 'meal'",
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            assert_eq!(resources, vec![(canonical.into(), false)]);
+            assert!(remote.meals.lock().await.contains_key(canonical));
+            assert_eq!(remote.creates.load(SeqCst), 1);
+            remote.fail_delete.store(false, SeqCst);
+            if deletion_intent {
+                let totals = delete_marked_food_logs(
+                    &pool,
+                    &config,
+                    "alex",
+                    "2026-09-29",
+                    &ids,
+                    Some(&remote),
+                )
+                .await
+                .unwrap();
+                assert_eq!(totals.calories, 100);
+                assert!(remote.meals.lock().await.is_empty());
+                assert_eq!(remote.creates.load(SeqCst), 1);
+            } else {
+                let replacement =
+                    "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5399112628367628998";
+                remote.server_assigned_name = Some(replacement.into());
+                sync_food_log_with_remote(&pool, &remote, "meal")
+                    .await
+                    .unwrap();
+                let meals = remote.meals.lock().await;
+                assert!(!meals.contains_key(canonical));
+                assert_eq!(meals[replacement].estimated_calories, 240);
+                assert_eq!(remote.creates.load(SeqCst), 2);
+                ensure_corrections_synced_for_member(&pool, "alex", config.resolved_tz())
+                    .await
+                    .unwrap();
+            }
+        }
     }
 
     #[tokio::test]
@@ -1183,7 +1406,13 @@ mod tests {
         )
         .await
         .unwrap();
-        let remote = Arc::new(ControlledRemote::default());
+        let remote = Arc::new(ControlledRemote {
+            server_assigned_name: Some(
+                "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102"
+                    .into(),
+            ),
+            ..Default::default()
+        });
         remote.meals.lock().await.insert(old.to_owned(), original);
         remote.block_create.store(true, SeqCst);
         let worker_pool = pool.clone();
@@ -1997,11 +2226,11 @@ mod tests {
         ensure_food_log_upload_state(&pool, &original)
             .await
             .unwrap();
-        assert!(
-            finish_create(&pool, &in_flight, &initial, &initial.replacement_name)
-                .await
-                .is_err()
-        );
+        let canonical =
+            "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102";
+        assert!(finish_create(&pool, &in_flight, &initial, canonical)
+            .await
+            .is_err());
         assert!(prepare_create(&pool, "meal", &initial).await.is_err());
         let saved: FoodLog = sqlx::query_as("SELECT * FROM food_log WHERE id = 'meal'")
             .fetch_one(&pool)
@@ -2009,10 +2238,10 @@ mod tests {
             .unwrap();
         assert_eq!(saved.raw_text_description, "lentils");
         assert_eq!(saved.estimated_calories, 240);
-        assert_eq!(
-            saved.google_data_point_id.as_deref(),
-            Some(initial.replacement_name.as_str())
-        );
+        assert_eq!(saved.google_data_point_id.as_deref(), Some(canonical));
+        let confirmed = correction_state(&pool, "meal").await.unwrap();
+        assert_eq!(confirmed.remote_name.as_deref(), Some(canonical));
+        assert!(!confirmed.remote_create_pending);
         assert_eq!(food_log_revision(&pool, "meal").await.unwrap(), 1);
     }
 

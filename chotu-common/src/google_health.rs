@@ -640,7 +640,8 @@ impl GoogleHealthClient {
             .collect())
     }
 
-    /// Idempotent initial/replacement creation using a persisted client-provided DataPoint name.
+    /// Requests creation using a persisted client-provided DataPoint name.
+    /// Google may assign its own ID; the completed response's name is authoritative.
     /// A conflicting retry is accepted only after reading back the matching nutrition.
     pub async fn create_nutrition_log_named(
         &self,
@@ -894,10 +895,10 @@ async fn create_nutrition_log_at(
     }
     let point = completed_operation(&data)?;
     let returned = point["name"].as_str().unwrap_or_default();
-    if !is_nutrition_log_name(returned)
-        || name.is_some_and(|name| returned.rsplit('/').next() != name.rsplit('/').next())
-    {
-        anyhow::bail!("Google Health completed create returned no matching nutrition-log DataPoint name: {data}");
+    if !is_nutrition_log_name(returned) {
+        anyhow::bail!(
+            "Google Health completed create returned no nutrition-log DataPoint name: {data}"
+        );
     }
     Ok(returned.to_owned())
 }
@@ -1063,6 +1064,30 @@ mod tests {
                 .await
                 .unwrap(),
             name
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn named_nutrition_create_accepts_authoritative_server_assigned_id() {
+        let entry = nutrition_entry();
+        let requested = "users/me/dataTypes/nutrition-log/dataPoints/chotu-meal-r1";
+        let returned =
+            "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102";
+        let mut point = nutrition_log_body(&entry);
+        point["name"] = serde_json::json!(returned);
+        point["@type"] =
+            serde_json::json!("type.googleapis.com/google.devicesandservices.health.v4.DataPoint");
+        let (base, server) = nutrition_endpoint(vec![(
+            200,
+            serde_json::json!({"done": true, "response": point}),
+        )])
+        .await;
+        assert_eq!(
+            create_nutrition_log_at(&entry, Some(requested), &base, "token")
+                .await
+                .unwrap(),
+            returned
         );
         server.await.unwrap();
     }
