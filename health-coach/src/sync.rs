@@ -1363,7 +1363,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn manual_sync_resumes_prior_day_deletions_without_touching_other_meals() {
+    async fn pending_deletions_resume_prior_days_without_touching_other_meals() {
         let pool = chotu_common::init_db(":memory:").await.unwrap();
         let config = AppConfig::default();
         for (id, member, date, calories, pending) in [
@@ -1398,12 +1398,11 @@ mod tests {
             .await
             .unwrap();
         }
-        // No account is configured: durable local cleanup still precedes login failure.
-        assert!(
-            sync_member_for_date(&pool, None, &config, "alex", "2026-10-07")
-                .await
-                .is_err()
-        );
+        // Exercise historical cleanup directly; full sync can use developer
+        // credentials loaded by `just test` and upload fixture meals to Google.
+        crate::food_corrections::resume_pending_food_deletions(&pool, &config, "alex")
+            .await
+            .unwrap();
         let remaining: Vec<String> = sqlx::query_scalar("SELECT id FROM food_log ORDER BY id")
             .fetch_all(&pool)
             .await
