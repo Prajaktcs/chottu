@@ -1,10 +1,10 @@
 use crate::models::{EmailClassification, EmailMetadata, OllamaClassificationResponse};
-use rig_core::client::{CompletionClient, Nothing};
-use rig_core::completion::Prompt;
+use rig_agent::agent::AgentBuilder;
+use rig_agent::extractor::ExtractorBuilder;
 use rig_core::message::ToolChoice;
-use rig_core::providers::gemini;
-use rig_core::providers::ollama;
-use rig_core::providers::openrouter;
+use rig_core::providers::gemini::{Gemini, GeminiConfig};
+use rig_core::providers::ollama::{Ollama, OllamaConfig};
+use rig_core::providers::openai::{wire::OPENROUTER, OpenAI, OpenAIConfig};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -684,7 +684,7 @@ static INTENT_DECISION_QUESTIONS: std::sync::LazyLock<serde_json::Value> = std::
 
 #[derive(Debug, Clone)]
 pub struct ChotuLlm {
-    client: ollama::Client,
+    client: Ollama,
     model: String,
     prompt_path: Option<String>,
     decision: Option<JevClient>,
@@ -695,13 +695,8 @@ impl ChotuLlm {
     /// `host` should be a URL scheme + host, e.g. "http://localhost"
     pub fn new(host: &str, port: u16, model: &str) -> Self {
         let base_url = format!("{}:{}", host, port);
-        let client = ollama::Client::builder()
-            .api_key(Nothing)
-            .base_url(&base_url)
-            .build()
-            .unwrap();
         Self {
-            client,
+            client: OllamaConfig::new().with_base_url(base_url).client(),
             model: model.to_string(),
             prompt_path: None,
             decision: None,
@@ -711,11 +706,16 @@ impl ChotuLlm {
     /// Creates a new `ChotuLlm` connector using default settings (http://localhost:11434).
     pub fn new_default(model: &str) -> Self {
         Self {
-            client: ollama::Client::new(Nothing).unwrap(),
+            client: Ollama::new(),
             model: model.to_string(),
             prompt_path: None,
             decision: None,
         }
+    }
+
+    /// An agent on Ollama's native `/api/chat`, which honors `think` and model `options`.
+    fn agent(&self) -> AgentBuilder {
+        AgentBuilder::new(self.client.native_completion(&self.model))
     }
 
     /// Set an optional path to a text file containing a custom system prompt.
@@ -752,14 +752,15 @@ impl ChotuLlm {
         user_prompt: &str,
     ) -> Result<String, LlmError> {
         let agent = self
-            .client
-            .agent(&self.model)
+            .agent()
             .preamble(system_prompt)
+            .additional_params(serde_json::json!({ "think": false }))
             .build();
 
         let response = agent
             .prompt(user_prompt)
             .await
+            .map(|response| response.output())
             .map_err(|e| LlmError::Client(e.to_string()))?;
 
         Ok(response)
@@ -772,8 +773,7 @@ impl ChotuLlm {
         user_prompt: &str,
     ) -> Result<String, LlmError> {
         let agent = self
-            .client
-            .agent(&self.model)
+            .agent()
             .preamble(system_prompt)
             .temperature(0.2)
             .max_tokens(400)
@@ -786,6 +786,7 @@ impl ChotuLlm {
         let response = agent
             .prompt(user_prompt)
             .await
+            .map(|response| response.output())
             .map_err(|e| LlmError::Client(e.to_string()))?;
 
         Ok(response)
@@ -813,10 +814,8 @@ impl ChotuLlm {
     where
         T: JsonSchema + for<'a> Deserialize<'a> + Serialize + Send + Sync + 'static,
     {
-        let extractor = self
-            .client
-            .extractor::<T>(&self.model)
-            .preamble(system_prompt)
+        let extractor = ExtractorBuilder::<T>::new(self.client.native_completion(&self.model))
+            .append_preamble(system_prompt)
             .additional_params(serde_json::json!({ "think": false }))
             .retries(2)
             .build();
@@ -824,6 +823,7 @@ impl ChotuLlm {
         extractor
             .extract(user_prompt)
             .await
+            .map(|response| response.output)
             .map_err(|e| LlmError::Client(e.to_string()))
     }
 
@@ -1021,8 +1021,7 @@ in YYYY-MM-DD form from the email metadata and body.";
         // Intent routing needs data, not tool execution. Accept schema-constrained
         // JSON directly so a model that skips the extractor's submit tool still works.
         let agent = self
-            .client
-            .agent(&self.model)
+            .agent()
             .preamble(INTENT_CLASSIFIER_SYSTEM_PROMPT)
             .output_schema::<IntentClassification>()
             .temperature(0.0)
@@ -1034,6 +1033,7 @@ in YYYY-MM-DD form from the email metadata and body.";
         let response = agent
             .prompt(&user_prompt)
             .await
+            .map(|response| response.output())
             .map_err(|e| LlmError::Client(e.to_string()))?;
         serde_json::from_str(&clean_json_response(&response))
             .map_err(|e| LlmError::JsonParse(e, response))
@@ -1119,7 +1119,7 @@ notes from the email metadata and body.";
 
 #[derive(Clone)]
 pub struct OpenRouterClient {
-    client: openrouter::Client,
+    client: OpenAI,
     api_key: String,
 }
 
@@ -1133,10 +1133,8 @@ impl std::fmt::Debug for OpenRouterClient {
 
 impl OpenRouterClient {
     pub fn new(api_key: impl AsRef<str>) -> Result<Self, LlmError> {
-        let client = openrouter::Client::new(api_key.as_ref())
-            .map_err(|e| LlmError::Client(format!("Failed to init OpenRouter client: {e}")))?;
         Ok(Self {
-            client,
+            client: OpenAIConfig::with_key(&OPENROUTER, api_key.as_ref()).client(),
             api_key: api_key.as_ref().to_owned(),
         })
     }
@@ -1161,11 +1159,14 @@ impl OpenRouterClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<String, LlmError> {
-        let agent = self.client.agent(model).preamble(system_prompt).build();
+        let agent = AgentBuilder::new(self.client.chat(model))
+            .preamble(system_prompt)
+            .build();
 
         agent
             .prompt(user_prompt)
             .await
+            .map(|response| response.output())
             .map_err(|e| LlmError::Client(e.to_string()))
     }
 
@@ -1188,17 +1189,16 @@ impl OpenRouterClient {
             ToolChoice::Required
         };
 
-        let extractor = self
-            .client
-            .extractor::<T>(model)
-            .preamble(system_prompt)
-            .tool_choice(tool_choice)
+        let extractor = ExtractorBuilder::<T>::new(self.client.chat(model))
+            .append_preamble(system_prompt)
             .retries(2)
             .build();
 
         extractor
             .extract(user_prompt)
+            .tool_choice(tool_choice)
             .await
+            .map(|response| response.output)
             .map_err(|e| LlmError::Client(e.to_string()))
     }
 
@@ -1281,25 +1281,23 @@ const GEMINI_GENERATE_CONTENT_URL: &str =
 
 #[derive(Debug, Clone)]
 pub struct GeminiClient {
-    client: gemini::Client,
+    client: Gemini,
     api_key: String,
 }
 
 impl GeminiClient {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: gemini::Client::new(&api_key).unwrap(),
+            client: Gemini::new(api_key.as_str()),
             api_key,
         }
     }
 
     /// Allows custom base url for testing / mocking
     pub fn with_base_url(api_key: String, base_url: String) -> Self {
-        let client = gemini::Client::builder()
-            .api_key(&api_key)
-            .base_url(&base_url)
-            .build()
-            .unwrap();
+        let client = GeminiConfig::new(api_key.as_str())
+            .with_base_url(base_url)
+            .client();
         Self { client, api_key }
     }
 
@@ -1605,14 +1603,14 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             serde_json::json!(food_description)
         );
 
-        let extractor = self
-            .client
-            .extractor::<NutritionEstimation>("gemini-3.6-flash")
-            .preamble(&system_prompt)
-            .build();
+        let extractor = ExtractorBuilder::<NutritionEstimation>::new(
+            self.client.completion("gemini-3.6-flash"),
+        )
+        .append_preamble(&system_prompt)
+        .build();
 
         let response = match extractor.extract(&user_prompt).await {
-            Ok(response) => response,
+            Ok(response) => response.output,
             Err(gemini_error) => {
                 eprintln!("Gemini text nutrition failed; trying OpenRouter: {gemini_error}");
                 let openrouter = openrouter().map_err(|e| {
@@ -1682,13 +1680,13 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             "correction": correction,
         })
         .to_string();
-        let extractor = self
-            .client
-            .extractor::<FoodCorrectionAnalysis>("gemini-3.6-flash")
-            .preamble(&system_prompt)
-            .build();
+        let extractor = ExtractorBuilder::<FoodCorrectionAnalysis>::new(
+            self.client.completion("gemini-3.6-flash"),
+        )
+        .append_preamble(&system_prompt)
+        .build();
         let mut analysis = match extractor.extract(&user_prompt).await {
-            Ok(response) => response,
+            Ok(response) => response.output,
             Err(gemini_error) => {
                 let openrouter = openrouter().map_err(|e| {
                     LlmError::Client(format!(
@@ -1734,15 +1732,16 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             calories, protein, carbs, fat
         );
 
-        let extractor = self
-            .client
-            .extractor::<MissingSyncNutrition>("gemini-3.6-flash")
-            .preamble(system_prompt)
-            .build();
+        let extractor = ExtractorBuilder::<MissingSyncNutrition>::new(
+            self.client.completion("gemini-3.6-flash"),
+        )
+        .append_preamble(system_prompt)
+        .build();
 
         let response = extractor
             .extract(&user_prompt)
             .await
+            .map(|response| response.output)
             .map_err(|e| LlmError::Client(e.to_string()))?;
 
         Ok(response)
@@ -1858,11 +1857,7 @@ mod tests {
 
     fn email_cascade(decision_url: &str, chat_url: &str) -> ChotuLlm {
         ChotuLlm {
-            client: ollama::Client::builder()
-                .api_key(Nothing)
-                .base_url(chat_url)
-                .build()
-                .unwrap(),
+            client: OllamaConfig::new().with_base_url(chat_url).client(),
             model: "test".into(),
             prompt_path: None,
             decision: Some(JevClient {
@@ -1931,7 +1926,7 @@ mod tests {
                         "arguments": {"classification": "TRASH", "reason": "rating request"}
                     }}]
                 },
-                "done": true
+                "done": true, "done_reason": "stop"
             })
             .to_string();
             let (chat_url, chat_server) = mock_photo_endpoint(200, chat_body).await;
@@ -2029,16 +2024,12 @@ mod tests {
                     "role": "assistant",
                     "content": r#"{"intent":"CALENDAR","calendar_window":"tomorrow","reason":"agenda only"}"#,
                 },
-                "done": true,
+                "done": true, "done_reason": "stop",
             })
             .to_string();
             let (chat_url, chat_server) = mock_photo_endpoint(200, chat_body).await;
             let llm = ChotuLlm {
-                client: ollama::Client::builder()
-                    .api_key(Nothing)
-                    .base_url(&chat_url)
-                    .build()
-                    .unwrap(),
+                client: OllamaConfig::new().with_base_url(&chat_url).client(),
                 model: "test".into(),
                 prompt_path: None,
                 decision: Some(JevClient {
@@ -2134,16 +2125,12 @@ mod tests {
         let body = serde_json::json!({
             "model": "test", "created_at": "2026-09-29T23:05:00Z",
             "message": {"role": "assistant", "content": content.to_string()},
-            "done": true
+            "done": true, "done_reason": "stop"
         })
         .to_string();
         let (url, server) = mock_photo_endpoint(200, body).await;
         let llm = ChotuLlm {
-            client: ollama::Client::builder()
-                .api_key(Nothing)
-                .base_url(&url)
-                .build()
-                .unwrap(),
+            client: OllamaConfig::new().with_base_url(&url).client(),
             model: "test".into(),
             prompt_path: None,
             decision: None,
@@ -2342,11 +2329,9 @@ mod tests {
         let estimate = gemini
             .approximate_nutrition_with_fallback(description, || {
                 Ok(OpenRouterClient {
-                    client: openrouter::Client::builder()
-                        .api_key("router-secret")
-                        .base_url(&router_base)
-                        .build()
-                        .unwrap(),
+                    client: OpenAIConfig::with_key(&OPENROUTER, "router-secret")
+                        .with_base_url(&router_base)
+                        .client(),
                     api_key: "router-secret".into(),
                 })
             })
@@ -2375,7 +2360,7 @@ mod tests {
             "responseId": "test",
             "candidates": [{"content": {"role": "model", "parts": [{
                 "functionCall": {"name": "submit", "args": nutrition}
-            }]}}]
+            }]}, "finishReason": "STOP"}]
         });
         let (base, server) = mock_photo_endpoint(200, response.to_string()).await;
         let gemini = GeminiClient::with_base_url("gemini-test".into(), base);
@@ -2416,11 +2401,9 @@ mod tests {
         let result = gemini
             .approximate_nutrition_with_fallback("2 eggs", || {
                 Ok(OpenRouterClient {
-                    client: openrouter::Client::builder()
-                        .api_key("router-secret")
-                        .base_url(&router_base)
-                        .build()
-                        .unwrap(),
+                    client: OpenAIConfig::with_key(&OPENROUTER, "router-secret")
+                        .with_base_url(&router_base)
+                        .client(),
                     api_key: "router-secret".into(),
                 })
             })
