@@ -676,7 +676,13 @@ impl LegacyColumns {
         hasher.update(merchant.to_lowercase().trim().as_bytes());
         hasher.update(currency.to_lowercase().trim().as_bytes());
         hasher.update(self.institution.to_lowercase().trim().as_bytes());
-        Some(format!("{:x}", hasher.finalize()))
+        Some(
+            hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect(),
+        )
     }
 }
 

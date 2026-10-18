@@ -17,11 +17,11 @@ reqwest = { workspace = true }
 serde_yaml = { workspace = true }
 rig-core = { workspace = true }
 schemars = { workspace = true }
-base64 = "0.22"
+base64 = "0.23"
 sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-jsonschema = { version = "0.58", default-features = false }
+jsonschema = { version = "0.59", default-features = false }
 
 
