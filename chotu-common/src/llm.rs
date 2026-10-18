@@ -1274,6 +1274,11 @@ processed_meat, fried, spicy, nightshades, caffeine, shellfish, eggs, soy, citru
 // Gemini Client
 // -------------------------------------------------------------
 
+/// Gemini generateContent endpoint. The API key is sent in the `x-goog-api-key`
+/// request header so it never appears in URLs or request logs.
+const GEMINI_GENERATE_CONTENT_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent";
+
 #[derive(Debug, Clone)]
 pub struct GeminiClient {
     client: gemini::Client,
@@ -1324,12 +1329,6 @@ impl GeminiClient {
             _ => "image/png", // fallback
         };
 
-        // Construct Gemini URL
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
-            self.api_key
-        );
-
         // Construct prompt
         let prompt_text = "\
 You are a financial and document parser assistant. Analyze this document (image or PDF) to determine its document type:
@@ -1377,7 +1376,8 @@ Do not include any explanation or markdown formatting outside the JSON block.";
 
         let http_client = reqwest::Client::new();
         let res = http_client
-            .post(&url)
+            .post(GEMINI_GENERATE_CONTENT_URL)
+            .header("x-goog-api-key", self.api_key.as_str())
             .json(&payload)
             .send()
             .await
@@ -1492,6 +1492,7 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         let http_client = reqwest::Client::new();
         let res = http_client
             .post(url)
+            .header("x-goog-api-key", self.api_key.as_str())
             .json(&payload)
             .send()
             .await
@@ -1529,16 +1530,12 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         mime_type: &str,
         caption: &str,
     ) -> Result<(FoodPhotoAnalysis, &'static str), LlmError> {
-        let gemini_url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
-            self.api_key
-        );
         self.approximate_nutrition_from_image_with_fallback_at(
             OpenRouterClient::from_env,
             image_bytes,
             mime_type,
             caption,
-            &gemini_url,
+            GEMINI_GENERATE_CONTENT_URL,
             "https://openrouter.ai/api/v1/chat/completions",
         )
         .await
@@ -1754,11 +1751,6 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
     /// Sends a free-form prompt to Gemini and returns the plain text response.
     /// Useful for composing narrative text like morning briefs and weekly prep notes.
     pub async fn ask(&self, prompt: &str) -> Result<String, LlmError> {
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={}",
-            self.api_key
-        );
-
         let body = serde_json::json!({
             "contents": [{
                 "parts": [{"text": prompt}]
@@ -1766,7 +1758,8 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
         });
 
         let resp = reqwest::Client::new()
-            .post(&url)
+            .post(GEMINI_GENERATE_CONTENT_URL)
+            .header("x-goog-api-key", self.api_key.as_str())
             .json(&body)
             .send()
             .await
@@ -2455,9 +2448,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!(
-                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
-                ),
+                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
                 &format!("{router_base}/api/v1/chat/completions"),
             )
             .await
@@ -2467,9 +2458,11 @@ mod tests {
         assert_eq!(analysis.barcode.as_deref(), Some("737628064502"));
         assert_eq!(analysis.nutrition.total_calories, 200);
         let (gemini_headers, gemini_payload) = gemini_server.await.unwrap();
-        assert!(gemini_headers.starts_with(
-            "POST /v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test HTTP/1.1"
-        ));
+        assert!(gemini_headers
+            .starts_with("POST /v1beta/models/gemini-3.6-flash:generateContent HTTP/1.1"));
+        assert!(gemini_headers
+            .to_ascii_lowercase()
+            .contains("x-goog-api-key: gemini-test"));
         assert_eq!(
             gemini_payload["contents"][0]["parts"][1]["inlineData"]["data"],
             "cGhvdG8="
@@ -2506,9 +2499,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!(
-                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
-                ),
+                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
                 "http://127.0.0.1:1/api/v1/chat/completions",
             )
             .await
@@ -2530,9 +2521,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!(
-                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
-                ),
+                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
                 &format!("{router_base}/api/v1/chat/completions"),
             )
             .await;
@@ -2558,9 +2547,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!(
-                    "{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent?key=gemini-test"
-                ),
+                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
                 "http://127.0.0.1:1/api/v1/chat/completions",
             )
             .await;
