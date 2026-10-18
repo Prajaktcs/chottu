@@ -138,6 +138,8 @@ cargo run -p health-coach --bin recover-health-operation -- \
   --member alex --meal MEAL_ID --response /path/to/original-completed-operation.json
 ```
 
+On Unix, the backup destination is reserved atomically with owner-only permissions (`0600`) before SQLite writes any household data. A permissive umask cannot make the backup group- or world-readable.
+
 The backup path must not already exist. The offline tool opens an existing database, makes a consistent SQLite backup, then commits the original response, mapping, resource ledger, and matching meal/correction/deletion-intent references in one transaction. It performs no HTTP requests, does not authorize deletion, and does not change meal revisions, nutrition, consumption times, or cleanup intent. Restart the supervisor and run `/sync`; existing authorized deletions and corrections resume on their original days. Reimporting the same mapping is safe after restart or completed cleanup; conflicting mappings are refused. Unknown, unfinished, failed, malformed, or wrong-meal responses do not change meal state. To roll back before resuming sync, keep all writers stopped and restore the standalone backup to a clean database path; a database rollback cannot undo remote cleanup already performed.
 
 Remote nutrition mutations are serialized within one supervisor process. Run only one writer process against the database; stop the old binary before starting an upgraded one.

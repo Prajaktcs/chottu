@@ -80,7 +80,18 @@ async fn main() -> Result<()> {
         .execute(&pool)
         .await
         .context("Recovery schema missing; run the upgraded application once, then stop it")?;
-    // VACUUM INTO includes committed WAL data and refuses an existing destination.
+    // Reserve a private destination before SQLite writes household data.
+    // VACUUM INTO accepts an existing empty file and includes committed WAL data.
+    let mut backup_options = std::fs::OpenOptions::new();
+    backup_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        backup_options.mode(0o600);
+    }
+    backup_options
+        .open(&backup)
+        .context("Cannot exclusively create private database backup; recovery not started")?;
     sqlx::query("VACUUM INTO ?")
         .bind(backup.to_str().context("Backup path must be UTF-8")?)
         .execute(&pool)
