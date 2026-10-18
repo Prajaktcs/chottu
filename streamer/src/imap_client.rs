@@ -346,7 +346,7 @@ where
 
                 match res.classification {
                     EmailClassification::Trash => {
-                        println!("Moving message {} to AI-Trash...", uid);
+                        println!("Moving message to AI-Trash...");
                         session.uid_copy(&query, "AI-Trash").await?;
                         let mut delete_stream =
                             session.uid_store(&query, "+FLAGS (\\Deleted)").await?;
@@ -356,7 +356,7 @@ where
                         while expunge_stream.next().await.is_some() {}
                     }
                     EmailClassification::LedgerStream => {
-                        println!("Parsing ledger transaction for message {}...", uid);
+                        println!("Parsing ledger transaction...");
                         if looks_like_non_transaction_alert(
                             &metadata.subject,
                             metadata.body_preview.as_deref(),
@@ -417,13 +417,13 @@ where
                         while seen_stream.next().await.is_some() {}
                     }
                     EmailClassification::Archive => {
-                        println!("Archiving message {}...", uid);
+                        println!("Archiving message...");
                         // Mark as seen
                         let mut seen_stream = session.uid_store(&query, "+FLAGS (\\Seen)").await?;
                         while seen_stream.next().await.is_some() {}
                     }
                     EmailClassification::ActionItem => {
-                        println!("Parsing action item for message {}...", uid);
+                        println!("Parsing action item...");
                         let (task_desc, due_date) = match llm.extract_action_item(&metadata).await {
                             Ok(ext) => {
                                 let ext: ActionItemExtraction = ext;
@@ -525,7 +525,7 @@ where
                         while seen_stream.next().await.is_some() {}
                     }
                     EmailClassification::TravelItinerary => {
-                        println!("Parsing travel itinerary for message {}...", uid);
+                        println!("Parsing travel itinerary...");
                         let ext = match llm.extract_travel_itinerary(&metadata).await {
                             Ok(e) => e,
                             Err(err) => {
@@ -627,7 +627,7 @@ where
                         while seen_stream.next().await.is_some() {}
                     }
                     EmailClassification::FinancialBill => {
-                        println!("Parsing financial bill for message {}...", uid);
+                        println!("Parsing financial bill...");
                         let ext = match llm.extract_upcoming_bill(&metadata).await {
                             Ok(e) => e,
                             Err(err) => {
@@ -693,7 +693,7 @@ where
                         while seen_stream.next().await.is_some() {}
                     }
                     EmailClassification::StatementDocument => {
-                        println!("Processing statement document email for message {}...", uid);
+                        println!("Processing statement document email...");
                         let mut fetch_stream = session
                             .uid_fetch(&query, "RFC822")
                             .await
@@ -760,7 +760,7 @@ where
                         while seen_stream.next().await.is_some() {}
                     }
                     EmailClassification::Newsletter => {
-                        println!("Processing newsletter for message {}...", uid);
+                        println!("Processing newsletter...");
                         session.uid_copy(&query, "AI-ReadingList").await?;
                         let mut delete_stream =
                             session.uid_store(&query, "+FLAGS (\\Deleted)").await?;
@@ -818,7 +818,7 @@ where
                         }
                     }
                     EmailClassification::PersonalReference => {
-                        println!("Parsing personal reference for message {}...", uid);
+                        println!("Parsing personal reference...");
                         let ext = match llm.extract_personal_reference(&metadata).await {
                             Ok(e) => e,
                             Err(err) => {
