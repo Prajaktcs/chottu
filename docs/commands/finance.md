@@ -6,6 +6,14 @@ Ledger rows come from email triage (Streamer) and `~/chotu_drop/` imports (Janit
 
 ---
 
+## `/status`
+
+Today's financial ledger report, with **Total Spend** converted to your configured base currency. CSV purchases count as spend and refunds reduce it; transfers, card payments, income, and investment movements are excluded.
+
+CSV spend rows display signed cash flow (`-12.50` for a purchase, `refund +11.88` for a refund). Excluded CSV rows are omitted from the itemization. Email and receipt row descriptions are unchanged.
+
+---
+
 ## `/monthly [YYYY-MM]`
 
 ```text

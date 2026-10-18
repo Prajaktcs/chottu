@@ -10,6 +10,7 @@ pub struct SimpleTx {
     pub amount: f64,
     pub category: String,
     pub currency: String,
+    pub source_type: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -163,7 +164,7 @@ pub async fn get_daily_data(
     // Query financials
     let txs = sqlx::query_as::<_, SimpleTx>(
         r#"
-        SELECT merchant, amount, category, currency
+        SELECT merchant, amount, category, currency, source_type
         FROM financial_ledger
         WHERE julianday(timestamp) >= julianday(?) AND julianday(timestamp) < julianday(?)
         "#,
@@ -243,6 +244,34 @@ pub async fn get_daily_data(
     Ok((txs, healths))
 }
 
+fn financial_logs_summary(txs: &[SimpleTx]) -> String {
+    let mut summary = String::from("=== Financial Transactions ===\n");
+    if txs.is_empty() {
+        summary.push_str("No transactions logged today.\n");
+    } else {
+        for tx in txs {
+            if tx.source_type == "CSV_IMPORT" {
+                let spend =
+                    chotu_common::expense_contribution(tx.amount, &tx.source_type, &tx.category);
+                if spend == 0.0 {
+                    continue;
+                }
+                let label = if spend < 0.0 { "refund " } else { "" };
+                summary.push_str(&format!(
+                    "- {}{:+.2} {} at {} (Category: {})\n",
+                    label, tx.amount, tx.currency, tx.merchant, tx.category
+                ));
+            } else {
+                summary.push_str(&format!(
+                    "- spent {:.2} {} at {} (Category: {})\n",
+                    tx.amount, tx.currency, tx.merchant, tx.category
+                ));
+            }
+        }
+    }
+    summary
+}
+
 pub async fn generate_reflection_prompt(
     llm: &ChotuLlm,
     txs: &[SimpleTx],
@@ -251,18 +280,7 @@ pub async fn generate_reflection_prompt(
     core_values: Option<&chotu_common::CoreValues>,
 ) -> Result<String> {
     // Format the logs to feed to LLM
-    let mut logs_summary = String::new();
-    logs_summary.push_str("=== Financial Transactions ===\n");
-    if txs.is_empty() {
-        logs_summary.push_str("No transactions logged today.\n");
-    } else {
-        for tx in txs {
-            logs_summary.push_str(&format!(
-                "- spent {:.2} {} at {} (Category: {})\n",
-                tx.amount, tx.currency, tx.merchant, tx.category
-            ));
-        }
-    }
+    let mut logs_summary = financial_logs_summary(txs);
 
     logs_summary.push_str("\n=== Family Health & Nutrition Metrics ===\n");
     if healths.is_empty() {
@@ -405,6 +423,31 @@ fn reflection_file_path(
         .join(file_name))
 }
 
+fn append_financials_yaml(content: &mut String, txs: &[SimpleTx]) {
+    content.push_str("financials:\n");
+    let total_spent: f64 = txs
+        .iter()
+        .map(|tx| chotu_common::expense_contribution(tx.amount, &tx.source_type, &tx.category))
+        .sum();
+    content.push_str(&format!("  total_spent: {:.2}\n", total_spent));
+    content.push_str("  transactions:\n");
+    for tx in txs {
+        content.push_str(&format!(
+            "    - merchant: \"{}\"\n",
+            escape_yaml_double_quoted(&tx.merchant)
+        ));
+        content.push_str(&format!("      amount: {:.2}\n", tx.amount));
+        content.push_str(&format!(
+            "      category: \"{}\"\n",
+            escape_yaml_double_quoted(&tx.category)
+        ));
+        content.push_str(&format!(
+            "      currency: \"{}\"\n",
+            escape_yaml_double_quoted(&tx.currency)
+        ));
+    }
+}
+
 pub async fn save_reflection(
     date: &str,
     prompt: &str,
@@ -446,25 +489,7 @@ pub async fn save_reflection(
     let escaped_prompt = escape_yaml_double_quoted(&prompt.replace('\n', " "));
     content.push_str(&format!("prompt: \"{}\"\n", escaped_prompt));
 
-    content.push_str("financials:\n");
-    let total_spent: f64 = txs.iter().map(|tx| tx.amount).sum();
-    content.push_str(&format!("  total_spent: {:.2}\n", total_spent));
-    content.push_str("  transactions:\n");
-    for tx in txs {
-        content.push_str(&format!(
-            "    - merchant: \"{}\"\n",
-            escape_yaml_double_quoted(&tx.merchant)
-        ));
-        content.push_str(&format!("      amount: {:.2}\n", tx.amount));
-        content.push_str(&format!(
-            "      category: \"{}\"\n",
-            escape_yaml_double_quoted(&tx.category)
-        ));
-        content.push_str(&format!(
-            "      currency: \"{}\"\n",
-            escape_yaml_double_quoted(&tx.currency)
-        ));
-    }
+    append_financials_yaml(&mut content, txs);
 
     content.push_str("health:\n");
     for h in healths {
@@ -542,6 +567,44 @@ mod tests {
         let mut merchants: Vec<_> = txs.into_iter().map(|t| t.merchant).collect();
         merchants.sort();
         assert_eq!(merchants, vec!["evening", "first"]);
+    }
+
+    #[tokio::test]
+    async fn daily_spend_nets_csv_refunds_and_preserves_legacy_expenses() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let mut config = AppConfig::default();
+        config.timezone = Some("UTC".into());
+        for (merchant, amount, category, source) in [
+            ("Grocer", -120.0, "Food", "CSV_IMPORT"),
+            ("Refund", 25.0, "Food", "CSV_IMPORT"),
+            ("Email", 30.0, "Food", "EMAIL_STREAM"),
+            ("Receipt", -10.0, "Food", "BATCH_DROP"),
+            ("Card payment", 100.0, "Transfer", "CSV_IMPORT"),
+            ("Transfer out", -500.0, "Transfer", "CSV_IMPORT"),
+            ("Investment", -600.0, "Investment", "CSV_IMPORT"),
+            ("Salary", 1000.0, "Income", "CSV_IMPORT"),
+        ] {
+            sqlx::query("INSERT INTO financial_ledger (id, timestamp, amount, currency, institution, merchant, category, source_type) VALUES (?, '2026-10-01T12:00:00Z', ?, 'CAD', 'bank', ?, ?, ?)")
+                .bind(merchant).bind(amount).bind(merchant).bind(category).bind(source)
+                .execute(&pool).await.unwrap();
+        }
+        let (txs, _) = get_daily_data(&pool, "2026-10-01", &config).await.unwrap();
+        let mut yaml = String::new();
+        append_financials_yaml(&mut yaml, &txs);
+        assert!(yaml.contains("  total_spent: 135.00\n"), "{yaml}");
+        // Journal rows retain raw cash flow, even when excluded from spend.
+        assert!(yaml.contains("merchant: \"Grocer\"\n      amount: -120.00"));
+        assert!(yaml.contains("merchant: \"Card payment\"\n      amount: 100.00"));
+
+        let summary = financial_logs_summary(&txs);
+        assert!(summary.contains("-120.00 CAD at Grocer"));
+        assert!(summary.contains("refund +25.00 CAD at Refund"));
+        assert!(summary.contains("spent 30.00 CAD at Email"));
+        assert!(summary.contains("spent -10.00 CAD at Receipt"));
+        assert!(!summary.contains("spent -120.00"));
+        for excluded in ["Card payment", "Transfer out", "Investment", "Salary"] {
+            assert!(!summary.contains(excluded), "{summary}");
+        }
     }
 
     fn condition(id: &str, label: &str) -> HealthCondition {

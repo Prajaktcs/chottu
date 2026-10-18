@@ -105,6 +105,8 @@ Reply directly to this message to record your daily reflection entry in your jou
 
 Your reply is saved under `~/chotu_brain/Journal/` (or `CHOTU_BRAIN_DIR`). Needs Ollama; uses today’s ledger + health rows from SQLite.
 
+Reflection prompts distinguish signed CSV purchases from refunds and omit CSV transfers, income, and investment movements. The journal's `financials.total_spent` nets refunds and excludes those non-spend categories, while transaction rows retain their original signed amounts. Legacy email and receipt expenses keep their existing spend convention.
+
 In a linked personal DM, conditions configured with `health_conditions[].check_in: true`
 add optional symptom questions. Answer on separate lines, using the condition id
 or full label:
