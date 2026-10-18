@@ -45,14 +45,19 @@ async fn recovery_fixture() -> PathBuf {
 }
 
 fn recover_under_umask_022(root: &Path) -> Output {
+    recover_under_umask_022_to(root, &root.join("backup.db"))
+}
+
+fn recover_under_umask_022_to(root: &Path, backup: &Path) -> Output {
     // Change umask only in the child, never the shared test process.
     Command::new("sh")
+        .current_dir(root)
         .args(["-c", "umask 022; exec \"$@\"", "recover-health-operation"])
         .arg(env!("CARGO_BIN_EXE_recover-health-operation"))
         .args(["--apply", "--database"])
         .arg(root.join("source.db"))
         .arg("--backup")
-        .arg(root.join("backup.db"))
+        .arg(backup)
         .args(["--member", "alex", "--meal", "meal", "--response"])
         .arg(root.join("response.json"))
         .output()
@@ -134,5 +139,30 @@ async fn recovery_refuses_an_existing_empty_backup_without_changing_the_meal() {
         0
     );
     source.close().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn relative_file_uri_backup_name_writes_only_the_reserved_private_file() {
+    let root = recovery_fixture().await;
+    // SQLite would read a relative `file:` name as a URI for `backup.db`.
+    let output = recover_under_umask_022_to(&root, Path::new("file:backup.db"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!root.join("backup.db").exists());
+    let reserved = std::fs::metadata(root.join("file:backup.db")).unwrap();
+    assert_eq!(reserved.permissions().mode() & 0o777, 0o600);
+    assert!(reserved.len() > 0);
+    let backup = open_database(&root.join("file:backup.db")).await;
+    let original_reference: String =
+        sqlx::query_scalar("SELECT google_data_point_id FROM food_log WHERE id = 'meal'")
+            .fetch_one(&backup)
+            .await
+            .unwrap();
+    assert_eq!(original_reference, OPERATION);
+    backup.close().await;
     std::fs::remove_dir_all(root).unwrap();
 }

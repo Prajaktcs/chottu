@@ -92,11 +92,26 @@ async fn main() -> Result<()> {
     backup_options
         .open(&backup)
         .context("Cannot exclusively create private database backup; recovery not started")?;
-    sqlx::query("VACUUM INTO ?")
-        .bind(backup.to_str().context("Backup path must be UTF-8")?)
-        .execute(&pool)
-        .await
-        .context("Cannot create database backup; recovery not started")?;
+    // SQLite treats a relative `file:` name as a URI and would write elsewhere,
+    // bypassing the reservation. The canonical absolute path names exactly the
+    // reserved file.
+    let reserved = std::fs::canonicalize(&backup)
+        .context("Cannot resolve reserved backup path; recovery not started")?;
+    let vacuum = match reserved.to_str() {
+        Some(path) => sqlx::query("VACUUM INTO ?")
+            .bind(path)
+            .execute(&pool)
+            .await
+            .context("Cannot create database backup; recovery not started"),
+        None => Err(anyhow::anyhow!(
+            "Backup path must be UTF-8; recovery not started"
+        )),
+    };
+    if let Err(error) = vacuum {
+        // The file is ours (create_new); drop any partial copy so the path can be retried.
+        let _ = std::fs::remove_file(&reserved);
+        return Err(error);
+    }
     println!("Backup: {}", backup.display());
     let name =
         health_coach::recover_legacy_food_operation(&pool, &member, &meal, &completed_response)
