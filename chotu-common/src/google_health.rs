@@ -752,6 +752,46 @@ fn completed_operation(data: &serde_json::Value) -> Result<&serde_json::Value, a
     Ok(data.get("response").unwrap_or(data))
 }
 
+/// Extract an identity mapping from a trusted, original completed create response.
+///
+/// This validates the response's structure, not its provenance. Health v4 has no
+/// Operation-read method; callers must obtain the original response independently
+/// and match its Operation name to the retained local reference.
+pub fn completed_nutrition_operation_mapping(
+    data: &serde_json::Value,
+) -> Result<(&str, &str), anyhow::Error> {
+    let operation = data["name"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Recovery requires the original Operation name"))?;
+    let mut parts = operation.rsplit('/');
+    if !parts.next().is_some_and(|id| !id.is_empty()) || parts.next() != Some("operations") {
+        anyhow::bail!("Recovery requires an Operation name, not a guessed DataPoint mapping");
+    }
+    let point = completed_operation(data)?;
+    if data.get("response").is_none()
+        || point["@type"].as_str()
+            != Some("type.googleapis.com/google.devicesandservices.health.v4.DataPoint")
+        || !point["nutritionLog"].is_object()
+    {
+        anyhow::bail!("Recovery requires the original completed nutrition-log DataPoint response");
+    }
+    let name = point["name"].as_str().unwrap_or_default();
+    // Resource names are paths, not URLs. Never let imported query strings,
+    // escapes, fragments or dot segments change the resource cleanup addresses.
+    if !is_nutrition_log_name(name)
+        || !name.split('/').all(|part| {
+            part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"-._~".contains(&c))
+        })
+    {
+        anyhow::bail!("Recovery response has no valid nutrition-log DataPoint name");
+    }
+    Ok((operation, name))
+}
+
 async fn get_nutrition_log_at(
     name: &str,
     base: &str,
@@ -763,7 +803,7 @@ async fn get_nutrition_log_at(
             // The public Health v4 discovery exposes no Operation-read method,
             // and matching a listed meal cannot establish this POST's identity.
             anyhow::bail!(
-                "Legacy Google Health Operation reference {name} has no confirmed nutrition-log DataPoint name; cleanup was retained. Recovery requires the Operation's authoritative completed response"
+                "Legacy Google Health Operation reference {name} has no confirmed nutrition-log DataPoint name; cleanup was retained. Import its original completed response with recover-health-operation (see docs/commands/health.md), then retry /sync. Without that authoritative response, recovery remains blocked"
             );
         }
         anyhow::bail!("Expected a nutrition-log DataPoint name, not an operation: {name}");
@@ -1037,6 +1077,74 @@ mod tests {
         (base, server)
     }
 
+    #[test]
+    fn recovery_mapping_requires_a_completed_typed_nutrition_datapoint() {
+        let operation = "users/me/dataTypes/nutrition-log/operations/legacy-create";
+        let name =
+            "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102";
+        let response = serde_json::json!({
+            "name": operation,
+            "done": true,
+            "response": {
+                "@type": "type.googleapis.com/google.devicesandservices.health.v4.DataPoint",
+                "name": name,
+                "nutritionLog": {"foodDisplayName": "milk curry", "energy": {"kcal": 500}}
+            }
+        });
+        assert_eq!(
+            completed_nutrition_operation_mapping(&response).unwrap(),
+            (operation, name)
+        );
+        for (pointer, invalid) in [
+            ("/name", serde_json::Value::Null),
+            ("/name", serde_json::json!(name)),
+            ("/done", serde_json::json!(false)),
+            ("/done", serde_json::Value::Null),
+            (
+                "/error",
+                serde_json::json!({"code": 13, "message": "failed"}),
+            ),
+            ("/response", serde_json::Value::Null),
+            (
+                "/response/@type",
+                serde_json::json!("type.googleapis.com/google.protobuf.Empty"),
+            ),
+            ("/response/nutritionLog", serde_json::Value::Null),
+            ("/response/name", serde_json::json!(operation)),
+            (
+                "/response/name",
+                serde_json::json!("users/me/dataTypes/sleep/dataPoints/unrelated"),
+            ),
+            (
+                "/response/name",
+                serde_json::json!("users/me/dataTypes/nutrition-log/dataPoints/.."),
+            ),
+            (
+                "/response/name",
+                serde_json::json!("users/me/dataTypes/nutrition-log/dataPoints/meal?other=1"),
+            ),
+            (
+                "/response/name",
+                serde_json::json!("users/me/dataTypes/nutrition-log/dataPoints/meal#other"),
+            ),
+            (
+                "/response/name",
+                serde_json::json!("users/me/dataTypes/nutrition-log/dataPoints/meal%2Fother"),
+            ),
+        ] {
+            let mut invalid_response = response.clone();
+            if pointer == "/error" {
+                invalid_response["error"] = invalid;
+            } else {
+                *invalid_response.pointer_mut(pointer).unwrap() = invalid;
+            }
+            assert!(
+                completed_nutrition_operation_mapping(&invalid_response).is_err(),
+                "{invalid_response}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn nutrition_create_requires_completed_operation_and_datapoint_not_operation_name() {
         let entry = nutrition_entry();
@@ -1210,12 +1318,9 @@ mod tests {
             "users/me/dataTypes/nutrition-log/operations/legacy-create",
         ] {
             let (base, server) = nutrition_endpoint(Vec::new()).await;
-            let error = delete_nutrition_logs_at(&[name.to_owned()], &base, "token")
+            assert!(delete_nutrition_logs_at(&[name.to_owned()], &base, "token")
                 .await
-                .unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("authoritative completed response"));
+                .is_err());
             assert!(server.await.unwrap().is_empty());
         }
     }
