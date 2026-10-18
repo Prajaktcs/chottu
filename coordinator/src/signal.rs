@@ -4041,6 +4041,55 @@ async fn refresh_task_memory(pool: &SqlitePool, task_id: &str) {
     }
 }
 
+fn format_daily_finance_report(
+    date: &str,
+    txs: &[crate::reflection::SimpleTx],
+    config: &AppConfig,
+    rates: &HashMap<String, f64>,
+) -> String {
+    let mut report = format!("💳 *Financial Ledger ({})*\n\n", date);
+    if txs.is_empty() {
+        report.push_str("_No transactions logged today._\n");
+    } else {
+        let total_spent: f64 = txs
+            .iter()
+            .map(|t| {
+                config.convert_to_base(
+                    chotu_common::expense_contribution(t.amount, &t.source_type, &t.category),
+                    &t.currency,
+                    rates,
+                )
+            })
+            .sum();
+        report.push_str(&format!(
+            "• *Total Spend*: {:.2} {}\n",
+            total_spent,
+            config.currency()
+        ));
+        report.push_str("• *Transactions*:\n");
+        for t in txs {
+            if t.source_type == "CSV_IMPORT" {
+                let spend =
+                    chotu_common::expense_contribution(t.amount, &t.source_type, &t.category);
+                if spend == 0.0 {
+                    continue;
+                }
+                let label = if spend < 0.0 { "refund " } else { "" };
+                report.push_str(&format!(
+                    "  - {}{:+.2} {} at *{}* ({})\n",
+                    label, t.amount, t.currency, t.merchant, t.category
+                ));
+            } else {
+                report.push_str(&format!(
+                    "  - spent {:.2} {} at *{}* ({})\n",
+                    t.amount, t.currency, t.merchant, t.category
+                ));
+            }
+        }
+    }
+    report
+}
+
 async fn handle_status(
     bot: &Bot,
     chat_id: &ChatId,
@@ -4068,23 +4117,7 @@ async fn handle_status(
     // 1. Send Financial Ledger Status
     let base = config.currency();
     let rates = fetch_exchange_rates(base).await;
-    let mut finance_report = format!("💳 *Financial Ledger ({})*\n\n", date_str);
-    if txs.is_empty() {
-        finance_report.push_str("_No transactions logged today._\n");
-    } else {
-        let total_spent: f64 = txs
-            .iter()
-            .map(|t| config.convert_to_base(t.amount, &t.currency, &rates))
-            .sum();
-        finance_report.push_str(&format!("• *Total Spend*: {:.2} {}\n", total_spent, base));
-        finance_report.push_str("• *Transactions*:\n");
-        for t in txs {
-            finance_report.push_str(&format!(
-                "  - spent {:.2} {} at *{}* ({})\n",
-                t.amount, t.currency, t.merchant, t.category
-            ));
-        }
-    }
+    let finance_report = format_daily_finance_report(&date_str, &txs, config, &rates);
     send_signal(&bot, chat_id, finance_report).await?;
 
     // 2. Build per-member health reports, then coach tips in parallel.
@@ -6796,6 +6829,42 @@ mod tests {
         AppConfig {
             currency: Some("CAD".to_string()),
             ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn daily_finance_report_nets_csv_refunds_before_currency_conversion() {
+        let txs: Vec<_> = [
+            ("Grocer", -12.50, "CAD", "Food", "CSV_IMPORT"),
+            ("Refund", 1.50, "CAD", "Food", "CSV_IMPORT"),
+            ("US shop", -5.0, "USD", "Food", "CSV_IMPORT"),
+            ("Email", 30.0, "CAD", "Food", "EMAIL_STREAM"),
+            ("Receipt", -10.0, "CAD", "Food", "BATCH_DROP"),
+            ("Card payment", 100.0, "CAD", "Transfer", "CSV_IMPORT"),
+            ("Investment", -600.0, "CAD", "Investment", "CSV_IMPORT"),
+            ("Salary", 1000.0, "CAD", "Income", "CSV_IMPORT"),
+        ]
+        .into_iter()
+        .map(
+            |(merchant, amount, currency, category, source_type)| crate::reflection::SimpleTx {
+                merchant: merchant.into(),
+                amount,
+                category: category.into(),
+                currency: currency.into(),
+                source_type: source_type.into(),
+            },
+        )
+        .collect();
+        let rates = HashMap::from([("USD".into(), 0.5)]);
+        let report = format_daily_finance_report("2026-10-01", &txs, &cad_config(), &rates);
+        assert!(report.contains("*Total Spend*: 61.00 CAD"), "{report}");
+        assert!(report.contains("-12.50 CAD at *Grocer*"));
+        assert!(report.contains("refund +1.50 CAD at *Refund*"));
+        assert!(report.contains("spent 30.00 CAD at *Email*"));
+        assert!(report.contains("spent -10.00 CAD at *Receipt*"));
+        assert!(!report.contains("spent -12.50"));
+        for excluded in ["Card payment", "Investment", "Salary"] {
+            assert!(!report.contains(excluded), "{report}");
         }
     }
 
