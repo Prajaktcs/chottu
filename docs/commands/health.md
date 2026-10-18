@@ -125,7 +125,22 @@ Google may assign a numeric DataPoint ID even when Chotu requests a revision-spe
 
 Undo, clear, and adjust record deletion intent before remote cleanup. In-flight uploads settle into a durable resource ledger; every possibly created resource must be resolved and removed before local meals are deleted. Failed cleanup retains the selected entries and their retry state. `/sync` resumes outstanding deletions on their original days, including after restart or midnight, and does not overwrite nutrition while cleanup is unresolved.
 
-**Legacy Operation references:** older code could store a Google `Operation` name instead of a completed nutrition-log `DataPoint` name. These meals and their cleanup state remain retained. The published [Health API discovery](https://health.googleapis.com/$discovery/rest?version=v4) exposes no Operation-read method, and [DataPoint listing](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/list) has no authoritative Operation correlation. Recovery requires the original [completed Operation response](https://developers.google.com/health/reference/rest/Shared.Types/Operation) or another authoritative Operation-to-DataPoint mapping; retrying `/sync` cannot invent it. Chotu does not guess by similar food/timestamps, delete an unconfirmed resource, or create a potentially duplicate replacement. New uploads reject unfinished Operations rather than save them as meal names.
+**Legacy Operation references:** older code could store a Google `Operation` name instead of a completed nutrition-log `DataPoint` name. The published [Health API discovery](https://health.googleapis.com/$discovery/rest?version=v4) exposes no Operation-read method, and [DataPoint listing](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/list) has no authoritative Operation correlation. `/sync` cannot recover identity by itself. Chotu does not guess endpoints, match similar foods/timestamps, or create a replacement while the identity is unknown.
+
+Recovery accepts only the **original completed create response from a trusted record**, such as a captured Google Health HTTP response. The [Operation contract](https://developers.google.com/health/reference/rest/Shared.Types/Operation) supplies the exact Operation `name`, `done: true`, and a successful `response` containing the nutrition-log DataPoint and its name. The [create contract](https://developers.google.com/health/reference/rest/v4/users.dataTypes.dataPoints/create) establishes that the returned Operation belongs to that create. A handwritten Operation/DataPoint pair, a similar listed meal, or an arbitrary JSON file is not authoritative evidence. The tool validates structure and exact stored identity; it cannot authenticate a file's provenance. If no trusted completed response exists, recovery remains blocked and local meals, totals, and cleanup state stay retained.
+
+After running the upgraded application once to apply migrations, stop the supervisor and all other database writers. Import one response for one explicitly selected member and meal:
+
+```sh
+cargo run -p health-coach --bin recover-health-operation -- \
+  --apply --database /path/to/chotu.db \
+  --backup /path/to/chotu-before-recovery.db \
+  --member alex --meal MEAL_ID --response /path/to/original-completed-operation.json
+```
+
+On Unix, the backup destination is reserved atomically with owner-only permissions (`0600`) before SQLite writes any household data. A permissive umask cannot make the backup group- or world-readable.
+
+The backup path must not already exist. The offline tool opens an existing database, makes a consistent SQLite backup, then commits the original response, mapping, resource ledger, and matching meal/correction/deletion-intent references in one transaction. It performs no HTTP requests, does not authorize deletion, and does not change meal revisions, nutrition, consumption times, or cleanup intent. Restart the supervisor and run `/sync`; existing authorized deletions and corrections resume on their original days. Reimporting the same mapping is safe after restart or completed cleanup; conflicting mappings are refused. Unknown, unfinished, failed, malformed, or wrong-meal responses do not change meal state. To roll back before resuming sync, keep all writers stopped and restore the standalone backup to a clean database path; a database rollback cannot undo remote cleanup already performed.
 
 Remote nutrition mutations are serialized within one supervisor process. Run only one writer process against the database; stop the old binary before starting an upgraded one.
 

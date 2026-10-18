@@ -145,6 +145,154 @@ async fn confirm_created_resource(
     Ok(())
 }
 
+/// Import a trusted original completed Operation response without remote mutation.
+///
+/// The caller is responsible for provenance; JSON structure alone is not proof.
+/// Exact identity, member ownership and all live references are checked under the
+/// nutrition mutation guard and one SQLite writer transaction. The audit survives
+/// meal deletion, so retrying an import never resurrects confirmed cleanup work.
+pub async fn recover_legacy_food_operation(
+    pool: &SqlitePool,
+    member_id: &str,
+    log_id: &str,
+    completed_response: &serde_json::Value,
+) -> Result<String> {
+    let (operation, name) =
+        chotu_common::google_health::completed_nutrition_operation_mapping(completed_response)?;
+    let _remote_guard = NUTRITION_MUTATIONS.lock().await;
+    let mut tx = pool.begin().await?;
+    sqlx::query("UPDATE food_log_operation_recoveries SET operation_name = operation_name WHERE 0")
+        .execute(&mut *tx)
+        .await?;
+    let saved: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT family_member_id, food_log_id, data_point_name \
+         FROM food_log_operation_recoveries WHERE operation_name = ?",
+    )
+    .bind(operation)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some((member, meal, point)) = saved {
+        if member != member_id || meal != log_id || point != name {
+            bail!("Operation already has a different recovery mapping; local state was retained");
+        }
+        tx.commit().await?;
+        return Ok(name.to_owned());
+    }
+    let baseline: Option<(i64, Option<String>)> = sqlx::query_as(
+        "SELECT COALESCE(r.revision, c.revision, 0), r.snapshot_json \
+         FROM food_log f LEFT JOIN food_log_corrections c ON c.food_log_id = f.id \
+         LEFT JOIN food_log_remote_resources r ON r.food_log_id = f.id AND r.remote_name = ? \
+         WHERE f.id = ? AND f.family_member_id = ? AND \
+         (f.google_data_point_id = ? OR c.remote_name = ? OR r.remote_name = ?)",
+    )
+    .bind(operation)
+    .bind(log_id)
+    .bind(member_id)
+    .bind(operation)
+    .bind(operation)
+    .bind(operation)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let (revision, snapshot) = baseline.context(
+        "Operation does not match a retained reference for this member and meal; \
+         supply that reference's original completed response. Local state was retained",
+    )?;
+    let claimed_elsewhere: bool = sqlx::query_scalar(
+        "WITH references_to_meals(food_log_id, remote_name) AS ( \
+         SELECT id, google_data_point_id FROM food_log \
+         UNION ALL SELECT food_log_id, remote_name FROM food_log_corrections \
+         UNION ALL SELECT food_log_id, replacement_name FROM food_log_corrections \
+         UNION ALL SELECT food_log_id, remote_name FROM food_log_remote_resources \
+         UNION ALL SELECT food_log_id, google_name FROM food_log_deletion_intents \
+         UNION ALL SELECT food_log_id, correction_remote_name FROM food_log_deletion_intents \
+         UNION ALL SELECT food_log_id, correction_replacement_name FROM food_log_deletion_intents) \
+         SELECT EXISTS(SELECT 1 FROM references_to_meals \
+         WHERE food_log_id != ? AND remote_name IN (?, ?))",
+    )
+    .bind(log_id)
+    .bind(operation)
+    .bind(name)
+    .fetch_one(&mut *tx)
+    .await?;
+    if claimed_elsewhere {
+        bail!("Operation or DataPoint is referenced by another meal; local state was retained");
+    }
+    let pending_create: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM food_log_remote_resources \
+         WHERE food_log_id = ? AND remote_name = ? AND create_pending = 1)",
+    )
+    .bind(log_id)
+    .bind(name)
+    .fetch_one(&mut *tx)
+    .await?;
+    if pending_create {
+        bail!("Recovered DataPoint conflicts with an unresolved create; local state was retained");
+    }
+    sqlx::query(
+        "INSERT INTO food_log_operation_recoveries \
+         (operation_name, food_log_id, family_member_id, data_point_name, completed_response_json) \
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(operation)
+    .bind(log_id)
+    .bind(member_id)
+    .bind(name)
+    .bind(serde_json::to_string(completed_response)?)
+    .execute(&mut *tx)
+    .await
+    .context("Cannot record authoritative mapping; no recovery changes were committed")?;
+    retain_resource(&mut tx, log_id, name, revision, snapshot.as_deref(), false).await?;
+    sqlx::query(
+        "UPDATE food_log SET google_data_point_id = ? \
+         WHERE id = ? AND google_data_point_id = ?",
+    )
+    .bind(name)
+    .bind(log_id)
+    .bind(operation)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE food_log_corrections SET \
+         remote_create_pending = CASE WHEN remote_name = ? THEN 0 ELSE remote_create_pending END, \
+         remote_name = CASE WHEN remote_name = ? THEN ? ELSE remote_name END, \
+         replacement_name = CASE WHEN replacement_name = ? THEN ? ELSE replacement_name END \
+         WHERE food_log_id = ?",
+    )
+    .bind(operation)
+    .bind(operation)
+    .bind(name)
+    .bind(operation)
+    .bind(name)
+    .bind(log_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE food_log_deletion_intents SET \
+         google_name = CASE WHEN google_name = ? THEN ? ELSE google_name END, \
+         correction_remote_name = CASE WHEN correction_remote_name = ? THEN ? ELSE correction_remote_name END, \
+         correction_replacement_name = CASE WHEN correction_replacement_name = ? THEN ? ELSE correction_replacement_name END \
+         WHERE food_log_id = ? AND completed = 0",
+    )
+    .bind(operation)
+    .bind(name)
+    .bind(operation)
+    .bind(name)
+    .bind(operation)
+    .bind(name)
+    .bind(log_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM food_log_remote_resources WHERE food_log_id = ? AND remote_name = ?")
+        .bind(log_id)
+        .bind(operation)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit()
+        .await
+        .context("Commit recovered Operation identity before cleanup")?;
+    Ok(name.to_owned())
+}
+
 /// Delete only the selected meals on their original civil day.
 ///
 /// Intent is durable before HTTP cleanup. Failures keep the meals and their
@@ -1689,6 +1837,427 @@ mod tests {
         assert!(remote.meals.lock().await.is_empty());
         pool.close().await;
         std::fs::remove_file(path).unwrap();
+    }
+
+    const LEGACY_OPERATION: &str = "users/me/dataTypes/nutrition-log/operations/legacy-create";
+    const RECOVERED_POINT: &str =
+        "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587102";
+    const SIMILAR_POINT: &str =
+        "users/3000619570105090901/dataTypes/nutrition-log/dataPoints/5034455849498587103";
+
+    fn legacy_completed_response() -> serde_json::Value {
+        // The published create/Operation contract: an exact Operation name and
+        // its completed, typed DataPoint. Synthetic fixture, not account evidence.
+        serde_json::json!({
+            "name": LEGACY_OPERATION,
+            "done": true,
+            "response": {
+                "@type": "type.googleapis.com/google.devicesandservices.health.v4.DataPoint",
+                "name": RECOVERED_POINT,
+                "nutritionLog": {
+                    "foodDisplayName": "milk curry",
+                    "energy": {"kcal": 500},
+                    "interval": {
+                        "startTime": "2026-09-30T02:00:00Z",
+                        "endTime": "2026-09-30T02:00:00Z"
+                    }
+                }
+            }
+        })
+    }
+
+    async fn migrated_legacy_meal(pool: &SqlitePool) -> FoodLog {
+        let log = original(pool, Some(LEGACY_OPERATION)).await;
+        baseline_summary(pool).await;
+        sqlx::query(
+            "INSERT INTO food_log_remote_resources \
+             (food_log_id, remote_name, revision, create_pending) VALUES ('meal', ?, 0, 0)",
+        )
+        .bind(LEGACY_OPERATION)
+        .execute(pool)
+        .await
+        .unwrap();
+        log
+    }
+
+    #[tokio::test]
+    async fn recovered_legacy_deletion_survives_restart_and_partial_failure_without_touching_similar_meal(
+    ) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let path = std::env::temp_dir().join(format!(
+            "chotu-recovered-operation-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let pool = chotu_common::init_db(path.to_str().unwrap()).await.unwrap();
+        let config = config();
+        let original = migrated_legacy_meal(&pool).await;
+        ensure_food_log_upload_state(&pool, &original)
+            .await
+            .unwrap();
+        let ids = vec!["meal".to_owned()];
+        mark_deletion_intents(&pool, &config, "alex", "2026-09-29", &ids)
+            .await
+            .unwrap();
+        let remote = ControlledRemote::default();
+        // Identical meal content, source and time do not establish identity.
+        remote.meals.lock().await.extend([
+            (RECOVERED_POINT.to_owned(), original.clone()),
+            (SIMILAR_POINT.to_owned(), original.clone()),
+        ]);
+        let response = legacy_completed_response();
+        recover_legacy_food_operation(&pool, "alex", "meal", &response)
+            .await
+            .unwrap();
+        let references: (String, String, String, String) = sqlx::query_as(
+            "SELECT f.google_data_point_id, c.remote_name, d.google_name, d.correction_remote_name \
+             FROM food_log f JOIN food_log_corrections c ON c.food_log_id = f.id \
+             JOIN food_log_deletion_intents d ON d.food_log_id = f.id WHERE f.id = 'meal'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            references,
+            (
+                RECOVERED_POINT.into(),
+                RECOVERED_POINT.into(),
+                RECOVERED_POINT.into(),
+                RECOVERED_POINT.into(),
+            )
+        );
+        let (saved_response,): (String,) = sqlx::query_as(
+            "SELECT completed_response_json FROM food_log_operation_recoveries WHERE operation_name = ?",
+        ).bind(LEGACY_OPERATION).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&saved_response).unwrap(),
+            response
+        );
+        assert_eq!(remote.deletes.load(SeqCst), 0);
+        remote.fail_delete.store(true, SeqCst);
+        assert!(
+            delete_marked_food_logs(&pool, &config, "alex", "2026-09-29", &ids, Some(&remote),)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-09-29")
+                .await
+                .unwrap()
+                .calories,
+            600
+        );
+        pool.close().await;
+
+        let pool = chotu_common::init_db(path.to_str().unwrap()).await.unwrap();
+        recover_legacy_food_operation(&pool, "alex", "meal", &response)
+            .await
+            .unwrap();
+        remote.fail_delete.store(false, SeqCst);
+        // Remote cleanup succeeds but the local delete transaction cannot commit.
+        sqlx::query("CREATE TRIGGER reject_recovered_local_delete BEFORE DELETE ON food_log BEGIN SELECT RAISE(ABORT, 'local deletion failed'); END")
+            .execute(&pool).await.unwrap();
+        assert!(
+            delete_marked_food_logs(&pool, &config, "alex", "2026-09-29", &ids, Some(&remote),)
+                .await
+                .is_err()
+        );
+        let retained: FoodLog = sqlx::query_as("SELECT * FROM food_log WHERE id = 'meal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(retained.timestamp, original.timestamp);
+        assert_eq!(retained.estimated_calories, 500);
+        assert_eq!(
+            retained.google_data_point_id.as_deref(),
+            Some(RECOVERED_POINT)
+        );
+        recover_legacy_food_operation(&pool, "alex", "meal", &response)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM food_log_remote_resources")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        let deletes = remote.deletes.load(SeqCst);
+        sqlx::query("DROP TRIGGER reject_recovered_local_delete")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let totals =
+            delete_marked_food_logs(&pool, &config, "alex", "2026-09-29", &ids, Some(&remote))
+                .await
+                .unwrap();
+        assert_eq!(totals.calories, 100);
+        assert_eq!(remote.deletes.load(SeqCst), deletes);
+        assert_eq!(remote.creates.load(SeqCst), 0);
+        let meals = remote.meals.lock().await;
+        assert!(!meals.contains_key(RECOVERED_POINT));
+        assert_eq!(
+            serde_json::to_value(&meals[SIMILAR_POINT]).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        drop(meals);
+        let activity: (i32, i32, f64) = sqlx::query_as(
+            "SELECT step_count, active_calories_burned, sleep_hours FROM health_family_summary \
+             WHERE family_member_id = 'alex' AND date = '2026-09-29'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(activity, (1234, 80, 7.0));
+        recover_legacy_food_operation(&pool, "alex", "meal", &response)
+            .await
+            .unwrap();
+        let mut conflicting = response;
+        conflicting["response"]["name"] = serde_json::json!(SIMILAR_POINT);
+        assert!(
+            recover_legacy_food_operation(&pool, "alex", "meal", &conflicting)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM food_log")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(sqlx::query_scalar::<_, bool>(
+            "SELECT completed FROM food_log_deletion_intents WHERE food_log_id = 'meal'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap());
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM food_log_remote_resources")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        pool.close().await;
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovered_legacy_correction_keeps_latest_revision_and_unrelated_remote_meal() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let config = config();
+        let original = migrated_legacy_meal(&pool).await;
+        ensure_food_log_upload_state(&pool, &original)
+            .await
+            .unwrap();
+        revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "lentils",
+            &estimation(),
+            "lentils",
+            None,
+        )
+        .await
+        .unwrap();
+        let revised: FoodLog = sqlx::query_as("SELECT * FROM food_log WHERE id = 'meal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let mut half = estimation();
+        half.total_calories = 120;
+        revise_food_log(
+            &pool,
+            &config,
+            &revised,
+            1,
+            "half the lentils",
+            &half,
+            "lentils",
+            None,
+        )
+        .await
+        .unwrap();
+        let remote = ControlledRemote::default();
+        remote.meals.lock().await.extend([
+            (RECOVERED_POINT.to_owned(), original.clone()),
+            (SIMILAR_POINT.to_owned(), original.clone()),
+        ]);
+        recover_legacy_food_operation(&pool, "alex", "meal", &legacy_completed_response())
+            .await
+            .unwrap();
+        let state = correction_state(&pool, "meal").await.unwrap();
+        assert_eq!(state.revision, 2);
+        assert_eq!(state.sync_state, "delete_pending");
+        assert_eq!(state.remote_name.as_deref(), Some(RECOVERED_POINT));
+        assert_eq!(
+            serde_json::from_str::<FoodLog>(state.remote_snapshot_json.as_deref().unwrap())
+                .unwrap()
+                .estimated_calories,
+            500
+        );
+        sync_food_log_with_remote(&pool, &remote, "meal")
+            .await
+            .unwrap();
+        // A retry imports no old resource and creates no second replacement.
+        recover_legacy_food_operation(&pool, "alex", "meal", &legacy_completed_response())
+            .await
+            .unwrap();
+        sync_food_log_with_remote(&pool, &remote, "meal")
+            .await
+            .unwrap();
+        let state = correction_state(&pool, "meal").await.unwrap();
+        assert_eq!(state.revision, 2);
+        assert_eq!(state.sync_state, "synced");
+        assert_eq!(remote.creates.load(SeqCst), 1);
+        let meals = remote.meals.lock().await;
+        assert!(!meals.contains_key(RECOVERED_POINT));
+        assert_eq!(meals[&state.replacement_name].estimated_calories, 120);
+        assert_eq!(
+            serde_json::to_value(&meals[SIMILAR_POINT]).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        drop(meals);
+        let saved: FoodLog = sqlx::query_as("SELECT * FROM food_log WHERE id = 'meal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(saved.timestamp, original.timestamp);
+        assert_eq!(
+            saved.google_data_point_id.as_deref(),
+            Some(state.replacement_name.as_str())
+        );
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-09-29")
+                .await
+                .unwrap()
+                .calories,
+            220
+        );
+        ensure_corrections_synced_for_member(&pool, "alex", config.resolved_tz())
+            .await
+            .unwrap();
+        assert!(revise_food_log(
+            &pool,
+            &config,
+            &original,
+            0,
+            "stale correction",
+            &estimation(),
+            "lentils",
+            None
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_recovery_rejects_unknown_identity_and_rolls_back_all_references_on_failure() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let original = migrated_legacy_meal(&pool).await;
+        ensure_food_log_upload_state(&pool, &original)
+            .await
+            .unwrap();
+        let ids = vec!["meal".to_owned()];
+        mark_deletion_intents(&pool, &config(), "alex", "2026-09-29", &ids)
+            .await
+            .unwrap();
+        let response = legacy_completed_response();
+        let mut unknown = response.clone();
+        unknown["name"] = serde_json::json!("operations/unrelated-create");
+        let mut unfinished = response.clone();
+        unfinished["done"] = serde_json::json!(false);
+        let mut failed = response.clone();
+        failed["error"] = serde_json::json!({"code": 13, "message": "failed"});
+        for (member, meal, input) in [
+            ("alex", "meal", &unknown),
+            ("alex", "meal", &unfinished),
+            ("alex", "meal", &failed),
+            ("another-member", "meal", &response),
+            ("alex", "another-meal", &response),
+        ] {
+            assert!(recover_legacy_food_operation(&pool, member, meal, input)
+                .await
+                .is_err());
+        }
+        sqlx::query(
+            "INSERT INTO food_log (id, timestamp, family_member_id, raw_text_description, \
+             estimated_calories, google_data_point_id) VALUES ('another', ?, 'alex', 'milk curry', 500, ?)",
+        ).bind(original.timestamp).bind(SIMILAR_POINT).execute(&pool).await.unwrap();
+        let mut claimed = response.clone();
+        claimed["response"]["name"] = serde_json::json!(SIMILAR_POINT);
+        assert!(
+            recover_legacy_food_operation(&pool, "alex", "meal", &claimed)
+                .await
+                .is_err()
+        );
+        // Fail the final statement, after audit/ledger/meal/correction/intent writes.
+        sqlx::query("CREATE TRIGGER reject_operation_mapping BEFORE DELETE ON food_log_remote_resources BEGIN SELECT RAISE(ABORT, 'mapping rejected'); END")
+            .execute(&pool).await.unwrap();
+        assert!(
+            recover_legacy_food_operation(&pool, "alex", "meal", &response)
+                .await
+                .is_err()
+        );
+        let references: (String, String, String, String) = sqlx::query_as(
+            "SELECT f.google_data_point_id, c.remote_name, d.google_name, d.correction_remote_name \
+             FROM food_log f JOIN food_log_corrections c ON c.food_log_id = f.id \
+             JOIN food_log_deletion_intents d ON d.food_log_id = f.id WHERE f.id = 'meal'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            references,
+            (
+                LEGACY_OPERATION.into(),
+                LEGACY_OPERATION.into(),
+                LEGACY_OPERATION.into(),
+                LEGACY_OPERATION.into(),
+            )
+        );
+        let resources: Vec<String> = sqlx::query_scalar(
+            "SELECT remote_name FROM food_log_remote_resources WHERE food_log_id = 'meal'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(resources, vec![LEGACY_OPERATION]);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM food_log_operation_recoveries")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0
+        );
+        let retained: FoodLog = sqlx::query_as("SELECT * FROM food_log WHERE id = 'meal'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&retained).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(
+            fetch_summary_nutrition(&pool, "alex", "2026-09-29")
+                .await
+                .unwrap()
+                .calories,
+            600
+        );
+        sqlx::query("DROP TRIGGER reject_operation_mapping")
+            .execute(&pool)
+            .await
+            .unwrap();
+        recover_legacy_food_operation(&pool, "alex", "meal", &response)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, String>(
+                "SELECT google_data_point_id FROM food_log WHERE id = 'meal'"
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            RECOVERED_POINT
+        );
     }
 
     #[tokio::test]
