@@ -5,3 +5,4 @@ chotu.db-wal
 config.yaml
 .env
 .antigravitycli/
+__pycache__/
