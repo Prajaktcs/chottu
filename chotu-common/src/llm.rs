@@ -2149,7 +2149,10 @@ mod tests {
                 time: Some("17:00".into()),
             }
         );
-        let (_, request) = server.await.unwrap();
+        let (headers, request) = server.await.unwrap();
+        assert!(headers.starts_with("POST /api/chat "), "{headers}");
+        assert_eq!(request["think"], false);
+        assert_eq!(request["options"]["num_predict"], 512);
         let schema = &request["format"];
         let validator = jsonschema::validator_for(schema).unwrap();
         validator.validate(&arguments).unwrap();
@@ -2167,6 +2170,39 @@ mod tests {
                 validator.validate(&arguments).unwrap();
             }
             arguments[name] = value;
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_prompt_disables_thinking_on_native_chat() {
+        for (fast, num_predict) in [(false, None), (true, Some(400))] {
+            let body = serde_json::json!({
+                "model": "test", "created_at": "2026-10-18T00:00:00Z",
+                "message": {"role": "assistant", "content": "hi"},
+                "done": true, "done_reason": "stop"
+            })
+            .to_string();
+            let (url, server) = mock_photo_endpoint(200, body).await;
+            let llm = ChotuLlm {
+                client: OllamaConfig::new().with_base_url(&url).client(),
+                model: "test".into(),
+                prompt_path: None,
+                decision: None,
+            };
+            let output = if fast {
+                llm.generate_prompt_fast("system", "hello").await
+            } else {
+                llm.generate_prompt("system", "hello").await
+            };
+            assert_eq!(output.unwrap(), "hi");
+            let (headers, request) = server.await.unwrap();
+            assert!(headers.starts_with("POST /api/chat "), "{headers}");
+            assert_eq!(request["think"], false, "fast={fast}");
+            assert_eq!(
+                request["options"]["num_predict"].as_u64(),
+                num_predict,
+                "fast={fast}"
+            );
         }
     }
 
