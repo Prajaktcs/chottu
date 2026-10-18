@@ -220,7 +220,7 @@ fn hash_parts(parts: &[&str]) -> String {
         hash.update((part.len() as u64).to_be_bytes());
         hash.update(part.as_bytes());
     }
-    format!("{:x}", hash.finalize())
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn normalize_merchant(value: &str) -> String {
