@@ -23,9 +23,9 @@ pub use fitness_plan::{
     activity_matches_plan_kind, classify_activity_type, count_strength_sessions,
     count_strengthish_sessions, current_week_start_str, generate_and_store_weekly_plan,
     load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days, plan_session_adherence,
-    render_plan_markdown, session_for_date, session_for_date_from_stored, sum_cardio_minutes,
-    week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind, StoredWeeklyPlan,
-    WeeklyFitnessPlan,
+    render_plan_markdown, render_today_session, session_for_date, session_for_date_from_stored,
+    sum_cardio_minutes, week_start_monday, weekday_name, ActivityKind, PlanDay, PlanDayKind,
+    PlanExercise, StoredWeeklyPlan, WeeklyFitnessPlan,
 };
 pub use food_corrections::{
     adjust_food_totals, delete_food_logs_for_day, food_log_revision, recover_legacy_food_operation,

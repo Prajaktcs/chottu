@@ -3792,14 +3792,7 @@ async fn handle_plan(
             let mut msg = stored.plan_md.clone();
             let today = config.now_in_tz().date_naive();
             if let Some(session) = health_coach::session_for_date_from_stored(&stored, today) {
-                let notes = session.notes.trim();
-                msg.push_str("\n📌 *Today:* ");
-                if notes.is_empty() {
-                    msg.push_str(session.kind.as_str());
-                } else {
-                    msg.push_str(&format!("{} — {}", session.kind.as_str(), notes));
-                }
-                msg.push('\n');
+                msg.push_str(&health_coach::render_today_session(&session));
             }
             if let Some(progress) = health_coach::plan_week_progress_line(
                 pool,
@@ -3840,14 +3833,7 @@ async fn handle_plan(
                 if let Some(session) =
                     health_coach::session_for_date(&stored.week_start, &plan, today)
                 {
-                    let notes = session.notes.trim();
-                    msg.push_str("\n📌 *Today:* ");
-                    if notes.is_empty() {
-                        msg.push_str(session.kind.as_str());
-                    } else {
-                        msg.push_str(&format!("{} — {}", session.kind.as_str(), notes));
-                    }
-                    msg.push('\n');
+                    msg.push_str(&health_coach::render_today_session(session));
                 }
             }
             if let Some(progress) = health_coach::plan_week_progress_line(
