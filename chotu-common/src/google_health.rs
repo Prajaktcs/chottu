@@ -565,7 +565,7 @@ impl GoogleHealthClient {
     ) -> Result<Vec<ExerciseSession>, anyhow::Error> {
         let access_token = self.access_token().await?;
         let data = self
-            .query_reconcile(&access_token, "exercise", "civil_end_time", date)
+            .query_reconcile(&access_token, "exercise", "civil_start_time", date)
             .await?;
         Ok(parse_exercise_data_points(&data))
     }

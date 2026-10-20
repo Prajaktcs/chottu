@@ -1,16 +1,18 @@
 use anyhow::{bail, Context, Result};
 use chrono::{Duration, NaiveDate};
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 
 const USAGE: &str = "backfill-health-summary [--from YYYY-MM-DD] [--to YYYY-MM-DD] \
     [--member ID] [--apply]\n\
-    Rebuilds past daily nutrition summaries from Google Health entries. \
-    Dry run by default: prints stored vs recomputed totals without writing. \
-    --from defaults to the earliest logged day, --to to yesterday, --member to \
-    every member with Google Health credentials. Days with unsynced local meals \
-    (possible duplicates) or fewer Google calories than stored are skipped and \
-    listed for manual review. Pending meals are never pushed. \
-    Back up the database first. See docs/commands/health.md.";
+    Rebuilds past daily summaries from Google Health entries. \
+    Dry run by default: opens the database read-only and prints stored vs \
+    recomputed totals. --from defaults to the earliest logged day, --to to \
+    yesterday, --member to every member with Google Health credentials. Days \
+    with unsynced local meals (possible duplicates) or fewer Google calories \
+    than stored are skipped and listed for manual review. Nothing is pushed \
+    to Google. Run the upgraded app once first (migrations) and back up the \
+    database. See docs/commands/health.md.";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -40,7 +42,18 @@ async fn main() -> Result<()> {
     let config = chotu_common::load_config(&config_path)
         .map_err(anyhow::Error::msg)
         .context("Failed to load configuration")?;
-    let pool = chotu_common::init_db(&db_path).await?;
+    // Not init_db: that creates, migrates and backfills. A dry run must not write.
+    let options = SqliteConnectOptions::new()
+        .filename(&db_path)
+        .create_if_missing(false)
+        .read_only(!apply)
+        .foreign_keys(true)
+        .busy_timeout(std::time::Duration::from_secs(30));
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await
+        .with_context(|| format!("Cannot open existing database {db_path}"))?;
     let gemini = std::env::var("GEMINI_API_KEY")
         .ok()
         .map(chotu_common::GeminiClient::new);
@@ -58,22 +71,21 @@ async fn main() -> Result<()> {
     if members.is_empty() {
         bail!("No members with Google Health credentials");
     }
-    let today = config.now_in_tz().date_naive();
+    let yesterday = config.now_in_tz().date_naive() - Duration::days(1);
     // Today is owned by the regular sync, which also pushes pending meals.
-    let to = to
-        .unwrap_or(today - Duration::days(1))
-        .min(today - Duration::days(1));
+    let to = to.unwrap_or(yesterday).min(yesterday);
 
     println!(
         "{} for {} ({db_path})",
         if apply {
             "Applying backfill"
         } else {
-            "Dry run (no writes)"
+            "Dry run (read-only)"
         },
         members.join(", ")
     );
     let mut skipped = Vec::new();
+    let mut written = 0;
     for member_id in &members {
         let from = match from {
             Some(d) => d,
@@ -89,20 +101,12 @@ async fn main() -> Result<()> {
         while date <= to {
             let day = date.format("%Y-%m-%d").to_string();
             let mut attempt = 1;
-            let skip = loop {
-                let run = Day {
-                    pool: &pool,
-                    config: &config,
-                    client: &client,
-                    gemini: gemini.as_ref(),
-                    member_id,
-                    day: &day,
-                };
-                match run.backfill(apply).await {
-                    Ok(skip) => break skip,
+            let past = loop {
+                match health_coach::fetch_past_day(&pool, &client, &config, member_id, &day).await {
+                    Ok(past) => break past,
                     // Google Health returns sporadic 503s over long ranges.
-                    Err(e) if attempt < 4 => {
-                        eprintln!("  {day}: attempt {attempt} failed, retrying: {e:#}");
+                    Err(_) if attempt < 4 => {
+                        eprintln!("  {day}: fetch attempt {attempt} failed, retrying");
                         tokio::time::sleep(std::time::Duration::from_secs(5 * attempt)).await;
                         attempt += 1;
                     }
@@ -111,8 +115,33 @@ async fn main() -> Result<()> {
                     }
                 }
             };
-            if skip {
+            let note = past
+                .skip_reason
+                .map(|why| format!("  SKIP: {why}"))
+                .unwrap_or_default();
+            if past.stored_calories != 0 || past.calories != 0 {
+                println!(
+                    "  {day}  {:>6}→{:<6}       {:>6.1}→{:<6.1}{note}",
+                    past.stored_calories,
+                    past.calories,
+                    past.stored_saturated_fat_g,
+                    past.saturated_fat_g
+                );
+            }
+            if past.skip_reason.is_some() {
                 skipped.push(format!("{member_id} {day}"));
+            } else if apply && past.calories != 0 {
+                health_coach::write_past_day(
+                    &pool,
+                    gemini.as_ref(),
+                    &config,
+                    member_id,
+                    &day,
+                    past,
+                )
+                .await
+                .with_context(|| format!("Backfill failed at {member_id} {day}"))?;
+                written += 1;
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             date += Duration::days(1);
@@ -125,60 +154,13 @@ async fn main() -> Result<()> {
             skipped.join(", ")
         );
     }
-    if !apply {
+    if apply {
+        println!("\nRewrote {written} day(s).");
+    } else {
         println!("\nNothing written. Re-run with --apply to rewrite these days.");
     }
     pool.close().await;
     Ok(())
-}
-
-struct Day<'a> {
-    pool: &'a SqlitePool,
-    config: &'a chotu_common::AppConfig,
-    client: &'a chotu_common::google_health::GoogleHealthClient,
-    gemini: Option<&'a chotu_common::GeminiClient>,
-    member_id: &'a str,
-    day: &'a str,
-}
-
-impl Day<'_> {
-    /// Prints stored vs recomputed totals and, with `apply`, rewrites the day.
-    /// Returns true when the day is left unchanged for manual review.
-    async fn backfill(&self, apply: bool) -> Result<bool> {
-        let Day {
-            pool,
-            config,
-            client,
-            gemini,
-            member_id,
-            day,
-        } = *self;
-        let (stored_kcal, stored_sat) = stored_summary(pool, member_id, day).await?;
-        let google = client.fetch_nutrition_summary(day).await?;
-        let local =
-            health_coach::sum_unsynced_food_log_for_day(pool, member_id, day, config.resolved_tz())
-                .await?;
-        let new_kcal = google.calories.round() as i64 + local.calories;
-        let new_sat = google.saturated_fat + local.saturated_fat_g;
-        // Old unsynced meals may already be in Google (a push whose id was never
-        // recorded, or the same meal logged in another app), so adding them would
-        // double count. Fewer Google calories than stored means entries went missing.
-        let skip = if local.calories > 0 {
-            Some("has unsynced local meals; check Google for duplicates")
-        } else if new_kcal + 1 < stored_kcal {
-            Some("Google has fewer calories than stored")
-        } else {
-            None
-        };
-        let note = skip.map(|why| format!("  SKIP: {why}")).unwrap_or_default();
-        if stored_kcal != 0 || new_kcal != 0 {
-            println!("  {day}  nutrition totals redacted{note}");
-        }
-        if apply && skip.is_none() && new_kcal != 0 {
-            health_coach::resync_member_for_past_date(pool, gemini, config, member_id, day).await?;
-        }
-        Ok(skip.is_some())
-    }
 }
 
 fn parse_date(value: String) -> Result<NaiveDate> {
@@ -197,16 +179,4 @@ async fn earliest_logged_day(pool: &SqlitePool, member_id: &str) -> Result<Optio
     .fetch_one(pool)
     .await?;
     earliest.map(parse_date).transpose()
-}
-
-async fn stored_summary(pool: &SqlitePool, member_id: &str, day: &str) -> Result<(i64, f64)> {
-    let row: Option<(i64, f64)> = sqlx::query_as(
-        "SELECT COALESCE(total_calories_ingested, 0), COALESCE(saturated_fat_g, 0.0) \
-         FROM health_family_summary WHERE family_member_id = ? AND date = ?",
-    )
-    .bind(member_id)
-    .bind(day)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.unwrap_or((0, 0.0)))
 }

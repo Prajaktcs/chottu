@@ -197,7 +197,12 @@ just backfill-health --from 2026-10-01 --member praj  # narrow the range
 just backfill-health --apply                          # rewrite the listed days
 ```
 
-The dry run prints stored vs recomputed calories and saturated fat per day without writing. `--apply` reruns the normal sync for each past day, including activity and sleep, but never pushes pending meals to Google. Days with unsynced local meals (they may already be in Google, so adding them would double count) or with fewer Google calories than stored are skipped and listed for manual review. Transient Google errors are retried. Back up the database first (`sqlite3 chotu.db ".backup chotu-before-backfill.db"`); the run is safe to repeat.
+The dry run opens the database read-only (no migrations) and prints stored vs recomputed calories and saturated fat per day. `--apply` writes exactly the snapshot it fetched: nutrition, activity, sleep and exercise. It never pushes anything to Google. Any failed Google request fails the day, which is retried instead of being written as zeros. These days are skipped and listed for manual review:
+
+- days with unsynced local meals, which may already be in Google, so adding them would double count
+- days where Google now reports fewer calories than stored (rechecked inside the write transaction)
+
+If corrections or deletions are pending, the run stops; run `/sync` first. Run the upgraded app once so migrations are applied, and back up the database first (`sqlite3 chotu.db ".backup chotu-before-backfill.db"`). The run is safe to repeat.
 
 ---
 
