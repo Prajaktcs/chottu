@@ -239,6 +239,11 @@ run: setup
 
     cargo run -p coordinator
 
+# Rebuild past daily health summaries from Google Health (dry run unless --apply)
+# Example: just backfill-health --from 2026-10-01 --member praj --apply
+backfill-health *args:
+    cargo run -q -p health-coach --bin backfill-health-summary -- {{args}}
+
 # Build the full workspace
 build:
     cargo build --workspace

@@ -12,6 +12,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
+dotenvy = { workspace = true }
 uuid = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }

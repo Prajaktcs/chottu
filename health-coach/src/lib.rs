@@ -36,10 +36,10 @@ pub use sync::{
     exercises_for_day, exercises_for_range, external_nutrition_base,
     google_health_client_for_member, google_health_client_from_env,
     member_health_credentials_configured, push_food_log_to_google, push_pending_food_logs,
-    rebuild_summary_from_food_log, replace_exercise_log_for_day, sum_food_log_for_day,
-    sum_unsynced_food_log_for_day, sync_configured_members_today, sync_member_for_date,
-    sync_primary_today, write_summary_nutrition, DayNutritionTotals, ExerciseLogEntry,
-    HealthSyncReport,
+    rebuild_summary_from_food_log, replace_exercise_log_for_day, resync_member_for_past_date,
+    sum_food_log_for_day, sum_unsynced_food_log_for_day, sync_configured_members_today,
+    sync_member_for_date, sync_primary_today, write_summary_nutrition, DayNutritionTotals,
+    ExerciseLogEntry, HealthSyncReport,
 };
 pub use trends::build_nutrition_trend_reports;
 

@@ -1162,6 +1162,7 @@ dependencies = [
  "chotu-common",
  "chrono",
  "chrono-tz",
+ "dotenvy",
  "schemars",
  "serde",
  "serde_json",

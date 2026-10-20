@@ -304,8 +304,8 @@ async fn guard_summary_refresh(
 
 /// Syncs Google Health metrics for `member_id` on `date` (YYYY-MM-DD) into SQLite.
 ///
-/// Nutrition is Google Health's daily rollup (which already includes local meals
-/// that were pushed upstream) **plus** any still-unsynced local `/food` rows.
+/// Nutrition is the sum of Google Health's nutrition entries (which already include
+/// local meals that were pushed upstream) **plus** any still-unsynced local `/food` rows.
 pub async fn sync_member_for_date(
     pool: &SqlitePool,
     gemini_client: Option<&GeminiClient>,
@@ -313,17 +313,43 @@ pub async fn sync_member_for_date(
     member_id: &str,
     date: &str,
 ) -> Result<HealthSyncReport> {
+    sync_member_for_date_with(pool, gemini_client, config, member_id, date, true).await
+}
+
+/// Rebuilds a past day's summary from Google Health without pushing that day's
+/// pending local meals upstream. Unsynced meals still count locally, so totals
+/// match a normal sync while the backfill makes no new Google writes for old days.
+pub async fn resync_member_for_past_date(
+    pool: &SqlitePool,
+    gemini_client: Option<&GeminiClient>,
+    config: &AppConfig,
+    member_id: &str,
+    date: &str,
+) -> Result<HealthSyncReport> {
+    sync_member_for_date_with(pool, gemini_client, config, member_id, date, false).await
+}
+
+async fn sync_member_for_date_with(
+    pool: &SqlitePool,
+    gemini_client: Option<&GeminiClient>,
+    config: &AppConfig,
+    member_id: &str,
+    date: &str,
+    push_pending: bool,
+) -> Result<HealthSyncReport> {
     crate::food_corrections::resume_pending_food_deletions(pool, config, member_id).await?;
     let client = google_health_client_for_member(member_id, config)?;
 
     // Best-effort: push any pending local meals so Google becomes the shared store.
-    if let Err(e) =
-        push_pending_food_logs(pool, &client, member_id, date, config.resolved_tz()).await
-    {
-        eprintln!(
-            "Health Coach: Failed to push pending food logs to Google Health: {:?}",
-            e
-        );
+    if push_pending {
+        if let Err(e) =
+            push_pending_food_logs(pool, &client, member_id, date, config.resolved_tz()).await
+        {
+            eprintln!(
+                "Health Coach: Failed to push pending food logs to Google Health: {:?}",
+                e
+            );
+        }
     }
     // A pending immutable-log replacement has an old or ambiguous upstream value.
     // Do not add the corrected local meal to that value or erase it with a stale rollup.
