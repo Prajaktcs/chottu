@@ -746,6 +746,7 @@ mod tests {
             weekday: "Tuesday".into(),
             kind: PlanDayKind::Strength,
             notes: "lower body".into(),
+            exercises: vec![],
         };
         let ctx = FitnessCoachContext::from_day_summary("Praj", &sample_summary(), None)
             .with_fitness(

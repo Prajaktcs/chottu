@@ -15,7 +15,18 @@ Prefer progressive, realistic sessions for the stated equipment and session leng
 If recent exercise history is thin, keep the week beginner-friendly.\
 Return a structured week with exactly 7 days (Monday through Sunday).\
 Each day kind must be one of: rest, strength, cardio, mixed.\
-Keep notes short (one sentence) and actionable.";
+Keep notes short (one sentence) and actionable.\
+For strength and mixed days list 4-7 exercises with sets and reps that fit the equipment and session minutes.\
+For cardio days list 1-3 entries with sets 1 and the duration or distance in reps (e.g. \"30 min easy\").\
+Rest days have no exercises.\
+Rotate muscle groups so the same group is not trained hard on consecutive days.\
+Use reps like \"8-10\", \"12 each side\" or \"45s\"; put load or effort cues (e.g. \"RPE 7\") in the day notes.\
+If last week's completed sessions are under 60% of planned, plan fewer or shorter sessions.\
+If last week's planned sessions were all completed, progress slightly (one more set or a harder variation).\
+If average sleep is under 6 hours, keep intensity moderate.";
+
+/// Most exercises kept per day; longer model lists are truncated.
+const MAX_EXERCISES_PER_DAY: usize = 8;
 
 /// Session kind for a plan day.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
@@ -55,6 +66,44 @@ pub struct PlanDay {
     /// Short session note (empty ok for rest).
     #[serde(default)]
     pub notes: String,
+    /// Prescribed exercises (empty for rest; absent in plans stored before this field).
+    #[serde(default)]
+    pub exercises: Vec<PlanExercise>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
+pub struct PlanExercise {
+    /// Exercise name, e.g. "Goblet squat".
+    pub name: String,
+    #[serde(default)]
+    pub sets: u32,
+    /// Reps, time, or distance per set, e.g. "8-10", "45s", "30 min easy".
+    #[serde(default)]
+    pub reps: String,
+}
+
+impl PlanExercise {
+    fn render(&self) -> String {
+        let reps = self.reps.trim();
+        match (self.sets, reps.is_empty()) {
+            (0 | 1, true) => self.name.trim().to_string(),
+            (0 | 1, false) => format!("{} — {}", self.name.trim(), reps),
+            (n, true) => format!("{} — {} sets", self.name.trim(), n),
+            (n, false) => format!("{} — {}×{}", self.name.trim(), n, reps),
+        }
+    }
+}
+
+/// Drop blank names, cap list length, and clear exercises on rest days.
+fn normalize_exercises(kind: PlanDayKind, exercises: Vec<PlanExercise>) -> Vec<PlanExercise> {
+    if kind == PlanDayKind::Rest {
+        return Vec::new();
+    }
+    exercises
+        .into_iter()
+        .filter(|e| !e.name.trim().is_empty())
+        .take(MAX_EXERCISES_PER_DAY)
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, JsonSchema)]
@@ -63,6 +112,17 @@ pub struct WeeklyFitnessPlan {
     /// One-line week theme.
     #[serde(default)]
     pub theme: String,
+}
+
+/// Daily averages over the 7 days before the plan week (from synced summaries).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecentMetrics {
+    pub calories: f64,
+    pub protein_g: f64,
+    pub steps: f64,
+    pub active_calories: f64,
+    /// 0 when no sleep was synced.
+    pub sleep_hours: f64,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -166,6 +226,7 @@ pub fn normalize_weekly_plan(mut plan: WeeklyFitnessPlan) -> Result<WeeklyFitnes
                 weekday: key,
                 kind: day.kind,
                 notes: day.notes,
+                exercises: normalize_exercises(day.kind, day.exercises),
             },
         );
     }
@@ -175,6 +236,7 @@ pub fn normalize_weekly_plan(mut plan: WeeklyFitnessPlan) -> Result<WeeklyFitnes
             weekday: name.to_string(),
             kind: PlanDayKind::Rest,
             notes: String::new(),
+            exercises: Vec::new(),
         }));
     }
     plan.days = days;
@@ -220,8 +282,29 @@ pub fn render_plan_markdown(week_start: &str, plan: &WeeklyFitnessPlan) -> Strin
                 note
             ));
         }
+        push_exercise_lines(&mut out, day);
     }
     out
+}
+
+/// "📌 Today" block for `/plan`, including the day's exercises.
+pub fn render_today_session(day: &PlanDay) -> String {
+    let notes = day.notes.trim();
+    let mut out = String::from("\n📌 *Today:* ");
+    if notes.is_empty() {
+        out.push_str(day.kind.as_str());
+    } else {
+        out.push_str(&format!("{} — {}", day.kind.as_str(), notes));
+    }
+    out.push('\n');
+    push_exercise_lines(&mut out, day);
+    out
+}
+
+fn push_exercise_lines(out: &mut String, day: &PlanDay) {
+    for exercise in &day.exercises {
+        out.push_str(&format!("    ◦ {}\n", exercise.render()));
+    }
 }
 
 /// Session planned for a civil date within `plan` (week starting Monday).
@@ -249,10 +332,8 @@ pub fn build_plan_user_prompt(
     fitness: &FitnessGoals,
     nutrition: Option<&NutritionGoals>,
     week_start: &str,
-    avg_calories: f64,
-    avg_protein: f64,
-    avg_steps: f64,
-    avg_active: f64,
+    metrics: RecentMetrics,
+    last_week_adherence: Option<(i32, i32)>,
     recent_exercises: &[(String, String)],
 ) -> String {
     let mut lines = Vec::new();
@@ -325,10 +406,22 @@ pub fn build_plan_user_prompt(
         }
     }
     lines.push("Recent 7-day averages (logged):".to_string());
-    lines.push(format!("  - calories: {:.0}", avg_calories));
-    lines.push(format!("  - protein_g: {:.1}", avg_protein));
-    lines.push(format!("  - steps: {:.0}", avg_steps));
-    lines.push(format!("  - active_calories: {:.0}", avg_active));
+    lines.push(format!("  - calories: {:.0}", metrics.calories));
+    lines.push(format!("  - protein_g: {:.1}", metrics.protein_g));
+    lines.push(format!("  - steps: {:.0}", metrics.steps));
+    lines.push(format!(
+        "  - active_calories: {:.0}",
+        metrics.active_calories
+    ));
+    if metrics.sleep_hours > 0.0 {
+        lines.push(format!("  - sleep_hours: {:.1}", metrics.sleep_hours));
+    }
+    if let Some((matched, planned)) = last_week_adherence.filter(|(_, planned)| *planned > 0) {
+        lines.push(format!(
+            "Last week: completed {} of {} planned sessions (Google Health)",
+            matched, planned
+        ));
+    }
     if recent_exercises.is_empty() {
         lines.push("Recent exercises: none logged".to_string());
     } else {
@@ -374,21 +467,19 @@ pub async fn generate_and_store_weekly_plan(
     let hist_start = (start - Duration::days(7)).format("%Y-%m-%d").to_string();
     let hist_end = (start - Duration::days(1)).format("%Y-%m-%d").to_string();
 
-    let (avg_cal, avg_protein, avg_steps, avg_active) =
-        week_averages(pool, member_id, &hist_start, &hist_end).await?;
+    let metrics = week_averages(pool, member_id, &hist_start, &hist_end).await?;
     let recent = crate::sync::exercises_for_range(pool, member_id, &hist_start, &hist_end)
         .await
         .context("Failed to load recent exercises for weekly plan")?;
+    let last_week_adherence = last_week_adherence(pool, member_id, &hist_start, &hist_end).await?;
 
     let user_prompt = build_plan_user_prompt(
         &member.name,
         fitness,
         member.nutrition_goals.as_ref(),
         week_start,
-        avg_cal,
-        avg_protein,
-        avg_steps,
-        avg_active,
+        metrics,
+        last_week_adherence,
         &recent,
     );
 
@@ -405,7 +496,7 @@ pub async fn generate_and_store_weekly_plan(
             let raw = llm
                 .generate_prompt_fast(
                     &(PLAN_SYSTEM_PROMPT.to_string()
-                        + " Reply with JSON only: {\"theme\":\"...\",\"days\":[{\"weekday\":\"Monday\",\"kind\":\"strength\",\"notes\":\"...\"}, ... 7 days]}"),
+                        + " Reply with JSON only: {\"theme\":\"...\",\"days\":[{\"weekday\":\"Monday\",\"kind\":\"strength\",\"notes\":\"...\",\"exercises\":[{\"name\":\"...\",\"sets\":3,\"reps\":\"8-10\"}]}, ... 7 days]}"),
                     &user_prompt,
                 )
                 .await
@@ -421,24 +512,58 @@ pub async fn generate_and_store_weekly_plan(
     save_weekly_plan(pool, &member.id, week_start, &plan).await
 }
 
+/// Previous week's `(matched, planned)` sessions, scored against synced workouts.
+/// `None` when no plan was stored for that week.
+async fn last_week_adherence(
+    pool: &SqlitePool,
+    member_id: &str,
+    prev_week_start: &str,
+    prev_week_end: &str,
+) -> Result<Option<(i32, i32)>> {
+    let Some(stored) = load_weekly_plan(pool, member_id, prev_week_start).await? else {
+        return Ok(None);
+    };
+    let Ok(plan) = parse_plan_json(&stored.plan_json) else {
+        return Ok(None);
+    };
+    let as_of = NaiveDate::parse_from_str(prev_week_end, "%Y-%m-%d")
+        .context("prev_week_end must be YYYY-MM-DD")?;
+    let entries =
+        crate::sync::exercise_entries_for_range(pool, member_id, prev_week_start, prev_week_end)
+            .await
+            .context("Failed to load last week's exercises for plan adherence")?;
+    let labels: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| (e.date.clone(), e.activity_label()))
+        .collect();
+    Ok(Some(plan_session_adherence(
+        prev_week_start,
+        &plan,
+        as_of,
+        &labels,
+    )))
+}
+
 async fn week_averages(
     pool: &SqlitePool,
     member_id: &str,
     start: &str,
     end: &str,
-) -> Result<(f64, f64, f64, f64)> {
+) -> Result<RecentMetrics> {
     #[derive(sqlx::FromRow)]
     struct Row {
         avg_cal: Option<f64>,
         avg_protein: Option<f64>,
         avg_steps: Option<f64>,
         avg_active: Option<f64>,
+        avg_sleep: Option<f64>,
     }
     let row: Row = sqlx::query_as(
         "SELECT AVG(total_calories_ingested) as avg_cal, \
                 AVG(protein_grams) as avg_protein, \
                 AVG(step_count) as avg_steps, \
-                AVG(active_calories_burned) as avg_active \
+                AVG(active_calories_burned) as avg_active, \
+                AVG(sleep_hours) as avg_sleep \
          FROM health_family_summary \
          WHERE family_member_id = ? AND date >= ? AND date <= ?",
     )
@@ -448,12 +573,13 @@ async fn week_averages(
     .fetch_one(pool)
     .await
     .context("Failed to average health_family_summary for plan")?;
-    Ok((
-        row.avg_cal.unwrap_or(0.0),
-        row.avg_protein.unwrap_or(0.0),
-        row.avg_steps.unwrap_or(0.0),
-        row.avg_active.unwrap_or(0.0),
-    ))
+    Ok(RecentMetrics {
+        calories: row.avg_cal.unwrap_or(0.0),
+        protein_g: row.avg_protein.unwrap_or(0.0),
+        steps: row.avg_steps.unwrap_or(0.0),
+        active_calories: row.avg_active.unwrap_or(0.0),
+        sleep_hours: row.avg_sleep.unwrap_or(0.0),
+    })
 }
 
 /// Pull the first `{...}` object from model text (strips fences).
@@ -744,6 +870,7 @@ mod tests {
                 weekday: "mon".into(),
                 kind: PlanDayKind::Strength,
                 notes: "squats".into(),
+                exercises: vec![],
             }],
         };
         let n = normalize_weekly_plan(plan).unwrap();
@@ -773,6 +900,57 @@ mod tests {
         let s = session_for_date(week, &plan, wed).unwrap();
         assert_eq!(s.kind, PlanDayKind::Cardio);
         assert!(s.notes.contains("bike"));
+    }
+
+    #[test]
+    fn exercises_parse_render_and_normalize() {
+        let json = r#"{
+            "theme": "Gym base",
+            "days": [
+                {"weekday":"Monday","kind":"strength","notes":"upper, RPE 7","exercises":[
+                    {"name":"Bench press","sets":3,"reps":"8-10"},
+                    {"name":"  ","sets":3,"reps":"10"},
+                    {"name":"Plank","sets":3,"reps":"45s"}
+                ]},
+                {"weekday":"Tuesday","kind":"rest","exercises":[{"name":"Walk","sets":1,"reps":"20 min"}]},
+                {"weekday":"Wednesday","kind":"cardio","exercises":[{"name":"Bike","sets":1,"reps":"30 min easy"}]}
+            ]
+        }"#;
+        let plan = parse_plan_json(json).unwrap();
+        assert_eq!(plan.days[0].exercises.len(), 2, "blank names dropped");
+        assert!(
+            plan.days[1].exercises.is_empty(),
+            "rest days carry no exercises"
+        );
+
+        let md = render_plan_markdown("2026-08-03", &plan);
+        assert!(md.contains("◦ Bench press — 3×8-10"));
+        assert!(md.contains("◦ Bike — 30 min easy"));
+
+        let today = render_today_session(&plan.days[0]);
+        assert!(today.contains("strength — upper, RPE 7"));
+        assert!(today.contains("◦ Plank — 3×45s"));
+    }
+
+    #[test]
+    fn legacy_plan_without_exercises_still_parses() {
+        let json =
+            r#"{"theme":"x","days":[{"weekday":"Monday","kind":"strength","notes":"upper"}]}"#;
+        let plan = parse_plan_json(json).unwrap();
+        assert!(plan.days[0].exercises.is_empty());
+    }
+
+    #[test]
+    fn exercises_capped_per_day() {
+        let exercises = (0..12)
+            .map(|i| PlanExercise {
+                name: format!("Move {i}"),
+                sets: 3,
+                reps: "10".into(),
+            })
+            .collect();
+        let kept = normalize_exercises(PlanDayKind::Strength, exercises);
+        assert_eq!(kept.len(), MAX_EXERCISES_PER_DAY);
     }
 
     #[test]
@@ -823,36 +1001,43 @@ mod tests {
                     weekday: "Monday".into(),
                     kind: PlanDayKind::Strength,
                     notes: "upper".into(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Tuesday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Wednesday".into(),
                     kind: PlanDayKind::Cardio,
                     notes: "bike".into(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Thursday".into(),
                     kind: PlanDayKind::Strength,
                     notes: "lower".into(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Friday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Saturday".into(),
                     kind: PlanDayKind::Mixed,
                     notes: "circuit".into(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Sunday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
             ],
         };
@@ -894,36 +1079,43 @@ mod tests {
                     weekday: "Monday".into(),
                     kind: PlanDayKind::Strength,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Tuesday".into(),
                     kind: PlanDayKind::Cardio,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Wednesday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Thursday".into(),
                     kind: PlanDayKind::Mixed,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Friday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Saturday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
                 PlanDay {
                     weekday: "Sunday".into(),
                     kind: PlanDayKind::Rest,
                     notes: String::new(),
+                    exercises: vec![],
                 },
             ],
         };
@@ -959,14 +1151,32 @@ mod tests {
             &fitness,
             None,
             "2026-08-03",
-            2000.0,
-            120.0,
-            8000.0,
-            350.0,
+            RecentMetrics {
+                calories: 2000.0,
+                protein_g: 120.0,
+                steps: 8000.0,
+                active_calories: 350.0,
+                sleep_hours: 5.5,
+            },
+            Some((2, 4)),
             &[("2026-08-01".into(), "Weights 40m".into())],
         );
         assert!(prompt.contains("beach body"));
         assert!(prompt.contains("no hard runs"));
         assert!(prompt.contains("Weights 40m"));
+        assert!(prompt.contains("sleep_hours: 5.5"));
+        assert!(prompt.contains("Last week: completed 2 of 4 planned sessions"));
+
+        let bare = build_plan_user_prompt(
+            "Alex",
+            &fitness,
+            None,
+            "2026-08-03",
+            RecentMetrics::default(),
+            None,
+            &[],
+        );
+        assert!(!bare.contains("sleep_hours"));
+        assert!(!bare.contains("Last week"));
     }
 }

@@ -246,10 +246,30 @@ Requires non-empty `fitness_goals` for the (linked) member in `config.yaml`.
 
 ```text
 🏋️ Building this week's training plan (local Ollama)…
-<markdown week plan>
-📌 Today: strength — upper body
+🏋️ Training plan (week of 2026-10-19)
+• Monday: strength — upper push, RPE 7
+    ◦ Bench press — 3×8-10
+    ◦ Seated row — 3×10-12
+    ◦ Plank — 3×45s
+• Tuesday: cardio — easy aerobic
+    ◦ Bike — 30 min easy
+• Wednesday: rest
+…
+📌 Today: strength — upper push, RPE 7
+    ◦ Bench press — 3×8-10
+    …
 Week progress: 2/4 sessions …
 ```
+
+Each strength/mixed day lists 4–7 exercises with sets × reps; cardio days list
+duration; rest days list none. Muscle groups rotate across the week.
+
+The plan uses data already synced from Google Health: the previous 7 days'
+workouts and step/active-calorie/sleep averages, plus how many of last week's
+planned sessions were completed. Low adherence shrinks the week; full adherence
+progresses it slightly; average sleep under 6h keeps intensity moderate. Google
+Health only reports workout type and duration, so progress is scored per
+session, not per exercise.
 
 Without goals:
 
