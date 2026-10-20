@@ -304,8 +304,8 @@ async fn guard_summary_refresh(
 
 /// Syncs Google Health metrics for `member_id` on `date` (YYYY-MM-DD) into SQLite.
 ///
-/// Nutrition is Google Health's daily rollup (which already includes local meals
-/// that were pushed upstream) **plus** any still-unsynced local `/food` rows.
+/// Nutrition is the sum of Google Health's nutrition entries (which already include
+/// local meals that were pushed upstream) **plus** any still-unsynced local `/food` rows.
 pub async fn sync_member_for_date(
     pool: &SqlitePool,
     gemini_client: Option<&GeminiClient>,
@@ -384,6 +384,136 @@ pub async fn sync_member_for_date(
             sleep_hours,
             exercises,
         },
+        None,
+    )
+    .await
+}
+
+/// A past day's Google Health data, fetched strictly so a failed request can
+/// never overwrite history with zeros. [`write_past_day`] persists exactly this
+/// snapshot, so what a backfill previews is what it writes.
+pub struct PastDay {
+    versions: Vec<(String, i64, String)>,
+    snapshot: SyncSnapshot,
+    pub stored_calories: i64,
+    pub stored_saturated_fat_g: f64,
+    pub calories: i64,
+    pub saturated_fat_g: f64,
+    pub stored_steps: i64,
+    pub steps: i64,
+    /// Why writing this day is unsafe, if it is.
+    pub skip_reason: Option<&'static str>,
+    /// False when neither the stored summary nor Google has anything for the day.
+    pub has_data: bool,
+}
+
+/// Reads a past day for backfill without changing local or Google state.
+pub async fn fetch_past_day(
+    pool: &SqlitePool,
+    client: &GoogleHealthClient,
+    config: &AppConfig,
+    member_id: &str,
+    date: &str,
+) -> Result<PastDay> {
+    let versions = correction_versions(pool, member_id).await?;
+    if versions.iter().any(|(_, _, state)| state != "synced") {
+        bail!("{member_id} has pending food corrections or deletions; run /sync first");
+    }
+    let unsynced =
+        sum_unsynced_food_log_for_day(pool, member_id, date, config.resolved_tz()).await?;
+    let stored: Option<(i64, f64, f64, f64, i64)> = sqlx::query_as(
+        "SELECT COALESCE(total_calories_ingested, 0), COALESCE(saturated_fat_g, 0.0), \
+         COALESCE(omega_3_dha_mg, 0.0), COALESCE(triglycerides_mg, 0.0), COALESCE(step_count, 0) \
+         FROM health_family_summary WHERE family_member_id = ? AND date = ?",
+    )
+    .bind(member_id)
+    .bind(date)
+    .fetch_optional(pool)
+    .await?;
+    let (
+        stored_calories,
+        stored_saturated_fat_g,
+        stored_omega_3,
+        stored_triglycerides,
+        stored_steps,
+    ) = stored.unwrap_or_default();
+
+    let summary = client.fetch_nutrition_summary(date).await?;
+    let steps = client.fetch_steps_summary(date).await?;
+    let active_calories = client.fetch_active_energy_summary(date).await?;
+    let sleep_hours = Some(client.fetch_sleep_summary(date).await?);
+    let exercises = client.fetch_exercise_sessions(date).await?;
+
+    let calories = summary.calories as i64 + unsynced.calories;
+    let saturated_fat_g = summary.saturated_fat + unsynced.saturated_fat_g;
+    // An old unsynced meal may already be in Google (a push whose id was never
+    // recorded, or the same meal logged in another app), so adding it double counts.
+    let skip_reason = if unsynced.entry_count > 0 {
+        Some("has unsynced local meals; check Google for duplicates")
+    } else if calories < stored_calories {
+        Some("Google has fewer calories than stored")
+    } else {
+        None
+    };
+    let has_data = stored.is_some()
+        || summary != GoogleHealthFoodSummary::default()
+        || steps != 0
+        || active_calories != 0
+        || sleep_hours.is_some_and(|h| h > 0.0)
+        || !exercises.is_empty();
+    Ok(PastDay {
+        versions,
+        snapshot: SyncSnapshot {
+            summary,
+            // Google has no DHA/triglyceride data; keep stored estimates unless
+            // write_past_day is given an estimator to refresh them.
+            gemini_est: MissingSyncNutrition {
+                omega_3_dha_mg: stored_omega_3,
+                triglycerides_mg: stored_triglycerides,
+            },
+            steps,
+            active_calories,
+            sleep_hours,
+            exercises,
+        },
+        stored_calories,
+        stored_saturated_fat_g,
+        calories,
+        saturated_fat_g,
+        stored_steps,
+        steps: i64::from(steps),
+        skip_reason,
+        has_data,
+    })
+}
+
+/// Writes a day from [`fetch_past_day`]. Never pushes meals to Google; refuses
+/// days with a skip reason, and rechecks the calorie floor inside the guarded write.
+pub async fn write_past_day(
+    pool: &SqlitePool,
+    gemini_client: Option<&GeminiClient>,
+    config: &AppConfig,
+    member_id: &str,
+    date: &str,
+    mut day: PastDay,
+) -> Result<HealthSyncReport> {
+    if let Some(reason) = day.skip_reason {
+        bail!("{member_id} {date} {reason}");
+    }
+    if let Some(gemini) = gemini_client {
+        let s = &day.snapshot.summary;
+        day.snapshot.gemini_est = gemini
+            .estimate_missing_sync_nutrients(s.calories, s.protein, s.carbs, s.fat)
+            .await?;
+    }
+    persist_sync_snapshot(
+        pool,
+        member_id,
+        date,
+        config.resolved_tz(),
+        &day.versions,
+        day.snapshot,
+        Some(day.stored_calories as i32),
     )
     .await
 }
@@ -404,6 +534,7 @@ async fn persist_sync_snapshot(
     timezone: chrono_tz::Tz,
     versions: &[(String, i64, String)],
     snapshot: SyncSnapshot,
+    min_calories: Option<i32>,
 ) -> Result<HealthSyncReport> {
     let SyncSnapshot {
         summary,
@@ -427,6 +558,11 @@ async fn persist_sync_snapshot(
     .await?;
 
     let calories = (summary.calories as i32).saturating_add(manual.calories as i32);
+    if min_calories.is_some_and(|min| calories < min) {
+        bail!(
+            "Google Health reports fewer calories than stored for {date}; summary left unchanged"
+        );
+    }
     let protein = summary.protein + manual.protein;
     let carbs = summary.carbs + manual.carbs;
     let fats = summary.fat + manual.fats;
@@ -1262,6 +1398,7 @@ mod tests {
                 config.resolved_tz(),
                 &versions,
                 snapshot(),
+                None,
             )
             .await
             .unwrap();
@@ -1289,6 +1426,7 @@ mod tests {
                     timezone,
                     &sync_versions,
                     pending_snapshot,
+                    None,
                 )
                 .await
                 .unwrap()
@@ -1360,6 +1498,69 @@ mod tests {
             .unwrap();
             assert_eq!(activity, (1234, 80, Some(7.5)));
         }
+    }
+
+    #[tokio::test]
+    async fn past_day_write_refuses_fewer_calories_than_stored() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        let date = "2026-10-07";
+        let versions = correction_versions(&pool, "alex").await.unwrap();
+        let snapshot = |calories: f64| SyncSnapshot {
+            summary: GoogleHealthFoodSummary {
+                calories,
+                saturated_fat: 9.0,
+                ..Default::default()
+            },
+            gemini_est: MissingSyncNutrition {
+                omega_3_dha_mg: 0.0,
+                triglycerides_mg: 0.0,
+            },
+            steps: 1234,
+            active_calories: 80,
+            sleep_hours: Some(7.5),
+            exercises: Vec::new(),
+        };
+        let tz = chrono_tz::UTC;
+        persist_sync_snapshot(&pool, "alex", date, tz, &versions, snapshot(900.0), None)
+            .await
+            .unwrap();
+
+        // Google lost an entry since the backfill read the stored total.
+        let err = persist_sync_snapshot(
+            &pool,
+            "alex",
+            date,
+            tz,
+            &versions,
+            snapshot(400.0),
+            Some(900),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("fewer calories"), "{err}");
+        let (calories, steps): (i64, i64) = sqlx::query_as(
+            "SELECT total_calories_ingested, step_count FROM health_family_summary \
+             WHERE family_member_id = 'alex' AND date = ?",
+        )
+        .bind(date)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((calories, steps), (900, 1234));
+
+        let report = persist_sync_snapshot(
+            &pool,
+            "alex",
+            date,
+            tz,
+            &versions,
+            snapshot(950.0),
+            Some(900),
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.calories, 950);
+        assert_eq!(report.saturated_fat, 9.0);
     }
 
     #[tokio::test]

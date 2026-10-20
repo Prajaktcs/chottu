@@ -187,6 +187,23 @@ Manual pull of today’s nutrition/activity for every linked Google Health accou
 
 Works once the Signal client is running (`just run` requires `GEMINI_API_KEY`). The Health Coach sync path itself does not need Gemini for the pull/merge; OAuth Health tokens are what matter for `/sync`.
 
+### Backfilling past days
+
+`/sync` only rewrites today. To rebuild earlier daily summaries (for example after a nutrition sync fix), run from the repo root with the same `.env`:
+
+```sh
+just backfill-health                                  # dry run: every logged day up to yesterday
+just backfill-health --from 2026-10-01 --member praj  # narrow the range
+just backfill-health --apply                          # rewrite the listed days
+```
+
+The dry run opens the database read-only (no migrations) and prints stored vs recomputed calories, saturated fat and steps for every day `--apply` would write or skip. `--apply` writes exactly the snapshot it fetched: nutrition, activity, sleep and exercise. It never pushes anything to Google. Any failed Google request fails the day, which is retried instead of being written as zeros. These days are skipped and listed for manual review:
+
+- days with unsynced local meals, which may already be in Google, so adding them would double count
+- days where Google now reports fewer calories than stored (rechecked inside the write transaction)
+
+If corrections or deletions are pending, the run stops; run `/sync` first. Run the upgraded app once so migrations are applied, and back up the database first (`sqlite3 chotu.db ".backup chotu-before-backfill.db"`). The run is safe to repeat.
+
 ---
 
 ## `/status`

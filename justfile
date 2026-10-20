@@ -274,6 +274,11 @@ hooks:
     git config --local core.hooksPath .githooks
     echo "Installed git hooks from .githooks (pre-commit → just lint, pre-push → just test)"
 
+# Example: just backfill-health --from 2026-10-01 --member praj --apply
+# Rebuild past daily health summaries from Google Health (dry run unless --apply)
+backfill-health *args:
+    cargo run -q -p health-coach --bin backfill-health-summary -- {{args}}
+
 # Clean cargo build artifacts
 clean:
     cargo clean
