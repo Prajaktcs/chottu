@@ -96,7 +96,7 @@ async fn main() -> Result<()> {
         };
         let client = health_coach::google_health_client_for_member(member_id, &config)?;
         println!("\n{member_id}: {from} → {to}");
-        println!("  date        kcal stored→google   sat fat g stored→new");
+        println!("  date        kcal stored→google   sat fat g stored→new   steps stored→new");
         let mut date = from;
         while date <= to {
             let day = date.format("%Y-%m-%d").to_string();
@@ -119,13 +119,15 @@ async fn main() -> Result<()> {
                 .skip_reason
                 .map(|why| format!("  SKIP: {why}"))
                 .unwrap_or_default();
-            if past.stored_calories != 0 || past.calories != 0 {
+            if past.has_data || past.skip_reason.is_some() {
                 println!(
-                    "  {day}  {:>6}→{:<6}       {:>6.1}→{:<6.1}{note}",
+                    "  {day}  {:>6}→{:<6}       {:>6.1}→{:<6.1}      {:>6}→{:<6}{note}",
                     past.stored_calories,
                     past.calories,
                     past.stored_saturated_fat_g,
-                    past.saturated_fat_g
+                    past.saturated_fat_g,
+                    past.stored_steps,
+                    past.steps
                 );
             }
             if past.skip_reason.is_some() {

@@ -197,7 +197,7 @@ just backfill-health --from 2026-10-01 --member praj  # narrow the range
 just backfill-health --apply                          # rewrite the listed days
 ```
 
-The dry run opens the database read-only (no migrations) and prints stored vs recomputed calories and saturated fat per day. `--apply` writes exactly the snapshot it fetched: nutrition, activity, sleep and exercise. It never pushes anything to Google. Any failed Google request fails the day, which is retried instead of being written as zeros. These days are skipped and listed for manual review:
+The dry run opens the database read-only (no migrations) and prints stored vs recomputed calories, saturated fat and steps for every day `--apply` would write or skip. `--apply` writes exactly the snapshot it fetched: nutrition, activity, sleep and exercise. It never pushes anything to Google. Any failed Google request fails the day, which is retried instead of being written as zeros. These days are skipped and listed for manual review:
 
 - days with unsynced local meals, which may already be in Google, so adding them would double count
 - days where Google now reports fewer calories than stored (rechecked inside the write transaction)
