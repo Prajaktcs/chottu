@@ -401,6 +401,8 @@ pub struct PastDay {
     pub saturated_fat_g: f64,
     /// Why writing this day is unsafe, if it is.
     pub skip_reason: Option<&'static str>,
+    /// False when neither the stored summary nor Google has anything for the day.
+    pub has_data: bool,
 }
 
 /// Reads a past day for backfill without changing local or Google state.
@@ -417,15 +419,17 @@ pub async fn fetch_past_day(
     }
     let unsynced =
         sum_unsynced_food_log_for_day(pool, member_id, date, config.resolved_tz()).await?;
-    let (stored_calories, stored_saturated_fat_g): (i64, f64) = sqlx::query_as(
-        "SELECT COALESCE(total_calories_ingested, 0), COALESCE(saturated_fat_g, 0.0) \
+    let stored: Option<(i64, f64, f64, f64)> = sqlx::query_as(
+        "SELECT COALESCE(total_calories_ingested, 0), COALESCE(saturated_fat_g, 0.0), \
+         COALESCE(omega_3_dha_mg, 0.0), COALESCE(triglycerides_mg, 0.0) \
          FROM health_family_summary WHERE family_member_id = ? AND date = ?",
     )
     .bind(member_id)
     .bind(date)
     .fetch_optional(pool)
-    .await?
-    .unwrap_or((0, 0.0));
+    .await?;
+    let (stored_calories, stored_saturated_fat_g, stored_omega_3, stored_triglycerides) =
+        stored.unwrap_or_default();
 
     let summary = client.fetch_nutrition_summary(date).await?;
     let steps = client.fetch_steps_summary(date).await?;
@@ -444,13 +448,21 @@ pub async fn fetch_past_day(
     } else {
         None
     };
+    let has_data = stored.is_some()
+        || summary != GoogleHealthFoodSummary::default()
+        || steps != 0
+        || active_calories != 0
+        || sleep_hours.is_some_and(|h| h > 0.0)
+        || !exercises.is_empty();
     Ok(PastDay {
         versions,
         snapshot: SyncSnapshot {
             summary,
+            // Google has no DHA/triglyceride data; keep stored estimates unless
+            // write_past_day is given an estimator to refresh them.
             gemini_est: MissingSyncNutrition {
-                omega_3_dha_mg: 0.0,
-                triglycerides_mg: 0.0,
+                omega_3_dha_mg: stored_omega_3,
+                triglycerides_mg: stored_triglycerides,
             },
             steps,
             active_calories,
@@ -462,6 +474,7 @@ pub async fn fetch_past_day(
         calories,
         saturated_fat_g,
         skip_reason,
+        has_data,
     })
 }
 

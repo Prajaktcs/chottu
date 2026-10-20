@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
             }
             if past.skip_reason.is_some() {
                 skipped.push(format!("{member_id} {day}"));
-            } else if apply && past.calories != 0 {
+            } else if apply && past.has_data {
                 health_coach::write_past_day(
                     &pool,
                     gemini.as_ref(),
