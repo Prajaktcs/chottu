@@ -172,9 +172,7 @@ impl Day<'_> {
         };
         let note = skip.map(|why| format!("  SKIP: {why}")).unwrap_or_default();
         if stored_kcal != 0 || new_kcal != 0 {
-            println!(
-                "  {day}  {stored_kcal:>6}→{new_kcal:<6}       {stored_sat:>6.1}→{new_sat:<6.1}{note}"
-            );
+            println!("  {day}  nutrition totals redacted{note}");
         }
         if apply && skip.is_none() && new_kcal != 0 {
             health_coach::resync_member_for_past_date(pool, gemini, config, member_id, day).await?;
