@@ -203,7 +203,7 @@ fn meal_type_for_timestamp(ts: chrono::DateTime<chrono::Utc>) -> &'static str {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Default)]
 pub struct GoogleHealthFoodSummary {
     pub calories: f64,
     pub carbs: f64,
@@ -245,45 +245,62 @@ fn grams_to_mcg(grams: f64) -> f64 {
     grams * 1_000_000.0
 }
 
-// Structs for deserializing Google Health API v4 responses
-#[derive(Deserialize, Debug)]
-struct GoogleHealthWeightQuantity {
-    #[serde(rename = "gramsSum")]
-    grams_sum: Option<f64>,
-}
-
-#[derive(Deserialize, Debug)]
-struct GoogleHealthEnergyQuantity {
-    #[serde(rename = "kcalSum")]
-    kcal_sum: Option<f64>,
-}
-
-#[derive(Deserialize, Debug)]
-struct GoogleHealthNutrientRollup {
-    nutrient: String,
-    quantity: Option<GoogleHealthWeightQuantity>,
-}
-
-#[derive(Deserialize, Debug)]
-struct GoogleHealthNutritionLogRollup {
-    energy: Option<GoogleHealthEnergyQuantity>,
-    #[serde(rename = "totalCarbohydrate")]
-    total_carbohydrate: Option<GoogleHealthWeightQuantity>,
-    #[serde(rename = "totalFat")]
-    total_fat: Option<GoogleHealthWeightQuantity>,
-    nutrients: Option<Vec<GoogleHealthNutrientRollup>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct GoogleHealthRollupDataPoint {
-    #[serde(rename = "nutritionLog")]
-    nutrition_log: Option<GoogleHealthNutritionLogRollup>,
-}
-
-#[derive(Deserialize, Debug)]
-struct GoogleHealthDailyRollupResponse {
-    #[serde(rename = "rollupDataPoints")]
-    rollup_data_points: Option<Vec<GoogleHealthRollupDataPoint>>,
+/// Sum `dataPoints` from a Google Health nutrition-log reconcile response.
+/// Nutrient quantities arrive in grams and are converted to the local column units.
+pub fn parse_nutrition_data_points(data: &serde_json::Value) -> GoogleHealthFoodSummary {
+    let mut s = GoogleHealthFoodSummary::default();
+    let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) else {
+        return s;
+    };
+    let num = |v: &serde_json::Value, path: [&str; 2]| {
+        v.get(path[0])
+            .and_then(|q| q.get(path[1]))
+            .and_then(|n| n.as_f64())
+            .unwrap_or(0.0)
+    };
+    for point in points {
+        let Some(log) = point.get("nutritionLog") else {
+            continue;
+        };
+        s.calories += num(log, ["energy", "kcal"]);
+        s.carbs += num(log, ["totalCarbohydrate", "grams"]);
+        s.fat += num(log, ["totalFat", "grams"]);
+        let Some(nutrients) = log.get("nutrients").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for nutrient in nutrients {
+            let grams = num(nutrient, ["quantity", "grams"]);
+            match nutrient
+                .get("nutrient")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+            {
+                "PROTEIN" => s.protein += grams,
+                "SATURATED_FAT" => s.saturated_fat += grams,
+                "UNSATURATED_FAT" => s.unsaturated_fat += grams,
+                "SUGAR" => s.sugar += grams,
+                "DIETARY_FIBER" => s.fiber += grams,
+                "TRANS_FAT" => s.trans_fat += grams,
+                "CHOLESTEROL" => s.cholesterol += grams_to_mg(grams),
+                "IRON" => s.iron += grams_to_mg(grams),
+                "VITAMIN_C" => s.vitamin_c += grams_to_mg(grams),
+                "SODIUM" => s.sodium += grams_to_mg(grams),
+                "POTASSIUM" => s.potassium += grams_to_mg(grams),
+                "CALCIUM" => s.calcium += grams_to_mg(grams),
+                "MAGNESIUM" => s.magnesium += grams_to_mg(grams),
+                "ZINC" => s.zinc += grams_to_mg(grams),
+                "CAFFEINE" => s.caffeine += grams_to_mg(grams),
+                "VITAMIN_E" => s.vitamin_e += grams_to_mg(grams),
+                // Store B6/B12 mass in mg (shared vitamin_b_mg column).
+                "VITAMIN_B6" | "VITAMIN_B12" => s.vitamin_b += grams_to_mg(grams),
+                "VITAMIN_A" => s.vitamin_a += grams_to_mcg(grams),
+                "VITAMIN_D" => s.vitamin_d += grams_to_mcg(grams),
+                "VITAMIN_K" => s.vitamin_k += grams_to_mcg(grams),
+                _ => {}
+            }
+        }
+    }
+    s
 }
 
 impl GoogleHealthClient {
@@ -371,24 +388,23 @@ impl GoogleHealthClient {
         Ok(data)
     }
 
-    /// Helper to query reconcile endpoint for a given data type
+    /// Helper to query reconcile endpoint for a given data type, following
+    /// `nextPageToken` so every page's `dataPoints` are returned together.
+    /// `time_field` is the civil interval member to filter on (data types differ).
     async fn query_reconcile(
         &self,
         access_token: &str,
         data_type: &str,
+        time_field: &str,
         date: &str,
     ) -> Result<serde_json::Value, anyhow::Error> {
         let start_date = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")?;
         let end_date = start_date + chrono::Duration::days(1);
-        let start_date_str = start_date.format("%Y-%m-%d").to_string();
-        let end_date_str = end_date.format("%Y-%m-%d").to_string();
-
+        let field = format!("{}.interval.{}", data_type.replace('-', "_"), time_field);
         let filter_str = format!(
-            "{}.interval.civil_end_time >= \"{}\" AND {}.interval.civil_end_time < \"{}\"",
-            data_type.replace('-', "_"),
-            start_date_str,
-            data_type.replace('-', "_"),
-            end_date_str
+            "{field} >= \"{}\" AND {field} < \"{}\"",
+            start_date.format("%Y-%m-%d"),
+            end_date.format("%Y-%m-%d")
         );
 
         let client = Client::new();
@@ -396,140 +412,62 @@ impl GoogleHealthClient {
             "https://health.googleapis.com/v4/users/me/dataTypes/{}/dataPoints:reconcile",
             data_type
         );
-        let response = client
-            .get(&url)
-            .bearer_auth(access_token)
-            .query(&[("filter", &filter_str)])
-            .send()
-            .await?;
+        let mut points = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut query = vec![("filter", filter_str.clone())];
+            if let Some(token) = &page_token {
+                query.push(("pageToken", token.clone()));
+            }
+            let response = client
+                .get(&url)
+                .bearer_auth(access_token)
+                .query(&query)
+                .send()
+                .await?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(anyhow::anyhow!(
-                "Google Health API reconcile failed for data type '{}': status {}, body: {}",
-                data_type,
-                status,
-                body
-            ));
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!(
+                    "Google Health API reconcile failed for data type '{}': status {}, body: {}",
+                    data_type,
+                    status,
+                    body
+                ));
+            }
+
+            let mut data = response.json::<serde_json::Value>().await?;
+            if let Some(serde_json::Value::Array(page)) =
+                data.get_mut("dataPoints").map(|v| v.take())
+            {
+                points.extend(page);
+            }
+            page_token = data
+                .get("nextPageToken")
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+                .map(str::to_string);
+            if page_token.is_none() {
+                break;
+            }
         }
-
-        let data = response.json::<serde_json::Value>().await?;
-        Ok(data)
+        Ok(serde_json::json!({ "dataPoints": points }))
     }
 
     /// Fetches the nutrition summary from the Google Health API for a specific date (format: YYYY-MM-DD).
+    ///
+    /// Sums per-entry reconcile points: `dailyRollUp` only aggregates energy, carbs,
+    /// fat, PROTEIN, DIETARY_FIBER and SODIUM, silently dropping every other nutrient.
     pub async fn fetch_nutrition_summary(
         &self,
         date: &str,
     ) -> Result<GoogleHealthFoodSummary, anyhow::Error> {
         let access_token = self.access_token().await?;
-        let data_val = self
-            .query_daily_rollup(&access_token, "nutrition-log", date)
+        let data = self
+            .query_reconcile(&access_token, "nutrition-log", "civil_start_time", date)
             .await?;
-        let data: GoogleHealthDailyRollupResponse = serde_json::from_value(data_val)?;
-
-        // Map rollup data points to summary
-        let mut calories = 0.0;
-        let mut carbs = 0.0;
-        let mut fat = 0.0;
-        let mut protein = 0.0;
-        let mut cholesterol = 0.0;
-        let mut saturated_fat = 0.0;
-        let mut unsaturated_fat = 0.0;
-        let mut iron = 0.0;
-        let mut vitamin_b = 0.0;
-        let mut vitamin_c = 0.0;
-        let mut sugar = 0.0;
-        let mut fiber = 0.0;
-        let mut sodium = 0.0;
-        let mut potassium = 0.0;
-        let mut calcium = 0.0;
-        let mut magnesium = 0.0;
-        let mut zinc = 0.0;
-        let mut vitamin_a = 0.0;
-        let mut vitamin_d = 0.0;
-        let mut vitamin_e = 0.0;
-        let mut vitamin_k = 0.0;
-        let mut caffeine = 0.0;
-        let mut trans_fat = 0.0;
-
-        if let Some(points) = data.rollup_data_points {
-            if let Some(first_point) = points.first() {
-                if let Some(log) = &first_point.nutrition_log {
-                    if let Some(energy) = &log.energy {
-                        calories = energy.kcal_sum.unwrap_or(0.0);
-                    }
-                    if let Some(carbohydrate) = &log.total_carbohydrate {
-                        carbs = carbohydrate.grams_sum.unwrap_or(0.0);
-                    }
-                    if let Some(total_fat) = &log.total_fat {
-                        fat = total_fat.grams_sum.unwrap_or(0.0);
-                    }
-                    if let Some(nutrients) = &log.nutrients {
-                        for nutrient_rollup in nutrients {
-                            // Google Health always reports nutrient mass in grams.
-                            // Convert into the units used by health_family_summary / /food.
-                            let grams = nutrient_rollup
-                                .quantity
-                                .as_ref()
-                                .and_then(|q| q.grams_sum)
-                                .unwrap_or(0.0);
-                            match nutrient_rollup.nutrient.as_str() {
-                                "PROTEIN" => protein = grams,
-                                "SATURATED_FAT" => saturated_fat = grams,
-                                "UNSATURATED_FAT" => unsaturated_fat = grams,
-                                "SUGAR" => sugar = grams,
-                                "DIETARY_FIBER" => fiber = grams,
-                                "TRANS_FAT" => trans_fat = grams,
-                                "CHOLESTEROL" => cholesterol = grams_to_mg(grams),
-                                "IRON" => iron = grams_to_mg(grams),
-                                "VITAMIN_C" => vitamin_c = grams_to_mg(grams),
-                                "SODIUM" => sodium = grams_to_mg(grams),
-                                "POTASSIUM" => potassium = grams_to_mg(grams),
-                                "CALCIUM" => calcium = grams_to_mg(grams),
-                                "MAGNESIUM" => magnesium = grams_to_mg(grams),
-                                "ZINC" => zinc = grams_to_mg(grams),
-                                "CAFFEINE" => caffeine = grams_to_mg(grams),
-                                "VITAMIN_E" => vitamin_e = grams_to_mg(grams),
-                                // Store B6/B12 mass in mg (shared vitamin_b_mg column).
-                                "VITAMIN_B6" | "VITAMIN_B12" => vitamin_b += grams_to_mg(grams),
-                                "VITAMIN_A" => vitamin_a = grams_to_mcg(grams),
-                                "VITAMIN_D" => vitamin_d = grams_to_mcg(grams),
-                                "VITAMIN_K" => vitamin_k = grams_to_mcg(grams),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(GoogleHealthFoodSummary {
-            calories,
-            carbs,
-            fat,
-            protein,
-            cholesterol,
-            saturated_fat,
-            unsaturated_fat,
-            iron,
-            vitamin_b,
-            vitamin_c,
-            sugar,
-            fiber,
-            sodium,
-            potassium,
-            calcium,
-            magnesium,
-            zinc,
-            vitamin_a,
-            vitamin_d,
-            vitamin_e,
-            vitamin_k,
-            caffeine,
-            trans_fat,
-        })
+        Ok(parse_nutrition_data_points(&data))
     }
 
     /// Fetches the steps count from the Google Health API for a specific date (format: YYYY-MM-DD).
@@ -584,7 +522,9 @@ impl GoogleHealthClient {
     /// Fetches sleep duration in hours from the Google Health API for a specific date (format: YYYY-MM-DD).
     pub async fn fetch_sleep_summary(&self, date: &str) -> Result<f64, anyhow::Error> {
         let access_token = self.access_token().await?;
-        let data = self.query_reconcile(&access_token, "sleep", date).await?;
+        let data = self
+            .query_reconcile(&access_token, "sleep", "civil_end_time", date)
+            .await?;
 
         let mut total_duration_secs = 0.0;
         if let Some(points) = data.get("dataPoints").and_then(|v| v.as_array()) {
@@ -625,7 +565,7 @@ impl GoogleHealthClient {
     ) -> Result<Vec<ExerciseSession>, anyhow::Error> {
         let access_token = self.access_token().await?;
         let data = self
-            .query_reconcile(&access_token, "exercise", date)
+            .query_reconcile(&access_token, "exercise", "civil_end_time", date)
             .await?;
         Ok(parse_exercise_data_points(&data))
     }
@@ -1342,134 +1282,61 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_google_health_response() {
-        let raw_json = r#"{
-            "rollupDataPoints": [
+    fn test_parse_nutrition_data_points_sums_every_nutrient_across_entries() {
+        // dailyRollUp only aggregates PROTEIN/DIETARY_FIBER/SODIUM, so per-entry
+        // nutrients such as SATURATED_FAT must be summed from reconcile points.
+        let data = serde_json::json!({
+            "dataPoints": [
                 {
                     "nutritionLog": {
-                        "energy": {
-                            "kcalSum": 2150.5
-                        },
-                        "totalCarbohydrate": {
-                            "gramsSum": 245.0
-                        },
-                        "totalFat": {
-                            "gramsSum": 72.3
-                        },
+                        "energy": { "kcal": 650.0 },
+                        "totalCarbohydrate": { "grams": 85.0 },
+                        "totalFat": { "grams": 30.0 },
                         "nutrients": [
-                            {
-                                "nutrient": "PROTEIN",
-                                "quantity": {
-                                    "gramsSum": 88.0
-                                }
-                            }
+                            { "nutrient": "PROTEIN", "quantity": { "grams": 8.0 } },
+                            { "nutrient": "SATURATED_FAT", "quantity": { "grams": 18.0 } },
+                            { "nutrient": "SUGAR", "quantity": { "grams": 45.0 } },
+                            { "nutrient": "CHOLESTEROL", "quantity": { "grams": 0.075 } },
+                            { "nutrient": "VITAMIN_A", "quantity": { "grams": 0.00021 } }
                         ]
                     }
-                }
+                },
+                {
+                    "nutritionLog": {
+                        "energy": { "kcal": 250.0 },
+                        "totalCarbohydrate": { "grams": 32.0 },
+                        "totalFat": { "grams": 7.5 },
+                        "nutrients": [
+                            { "nutrient": "PROTEIN", "quantity": { "grams": 15.5 } },
+                            { "nutrient": "SATURATED_FAT", "quantity": { "grams": 2.6 } },
+                            { "nutrient": "SODIUM", "quantity": { "grams": 0.125 } },
+                            { "nutrient": "VITAMIN_B6", "quantity": { "grams": 0.0004 } },
+                            { "nutrient": "VITAMIN_B12", "quantity": { "grams": 0.0002 } }
+                        ]
+                    }
+                },
+                { "exercise": {} }
             ]
-        }"#;
+        });
 
-        let parsed: Result<GoogleHealthDailyRollupResponse, _> = serde_json::from_str(raw_json);
-        assert!(parsed.is_ok());
-        let res = parsed.unwrap();
-        let points = res.rollup_data_points.unwrap();
-        assert_eq!(points.len(), 1);
-        let log = points[0].nutrition_log.as_ref().unwrap();
-        assert_eq!(log.energy.as_ref().unwrap().kcal_sum, Some(2150.5));
-        assert_eq!(
-            log.total_carbohydrate.as_ref().unwrap().grams_sum,
-            Some(245.0)
-        );
-        assert_eq!(log.total_fat.as_ref().unwrap().grams_sum, Some(72.3));
-
-        let p = log
-            .nutrients
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|n| n.nutrient == "PROTEIN")
-            .unwrap();
-        assert_eq!(p.quantity.as_ref().unwrap().grams_sum, Some(88.0));
+        let s = parse_nutrition_data_points(&data);
+        assert_eq!(s.calories, 900.0);
+        assert_eq!(s.carbs, 117.0);
+        assert_eq!(s.fat, 37.5);
+        assert_eq!(s.protein, 23.5);
+        assert!((s.saturated_fat - 20.6).abs() < 1e-9);
+        assert_eq!(s.sugar, 45.0);
+        assert!((s.cholesterol - 75.0).abs() < 1e-9);
+        assert!((s.sodium - 125.0).abs() < 1e-9);
+        assert!((s.vitamin_a - 210.0).abs() < 1e-6);
+        assert!((s.vitamin_b - 0.6).abs() < 1e-9);
     }
 
     #[test]
-    fn test_nutrient_unit_conversion_from_grams() {
-        // Docs example: 74 mg sodium is logged as 0.074 grams.
-        assert!((grams_to_mg(0.074) - 74.0).abs() < f64::EPSILON);
-        assert!((grams_to_mg(0.018) - 18.0).abs() < f64::EPSILON); // iron
-                                                                   // Vitamin A ~900 mcg RDA ≈ 0.0009 g
-        assert!((grams_to_mcg(0.0009) - 900.0).abs() < f64::EPSILON);
-        // Macro fats stay in grams (no conversion helper needed)
-        assert!((grams_to_mg(1.0) - 1000.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn test_parse_nutrition_summary_converts_micros_from_grams() {
-        let raw_json = r#"{
-            "rollupDataPoints": [
-                {
-                    "nutritionLog": {
-                        "energy": { "kcalSum": 500.0 },
-                        "totalCarbohydrate": { "gramsSum": 40.0 },
-                        "totalFat": { "gramsSum": 20.0 },
-                        "nutrients": [
-                            { "nutrient": "PROTEIN", "quantity": { "gramsSum": 30.0 } },
-                            { "nutrient": "SODIUM", "quantity": { "gramsSum": 0.074 } },
-                            { "nutrient": "IRON", "quantity": { "gramsSum": 0.008 } },
-                            { "nutrient": "CHOLESTEROL", "quantity": { "gramsSum": 0.2 } },
-                            { "nutrient": "VITAMIN_A", "quantity": { "gramsSum": 0.0005 } },
-                            { "nutrient": "VITAMIN_D", "quantity": { "gramsSum": 0.00001 } },
-                            { "nutrient": "SATURATED_FAT", "quantity": { "gramsSum": 5.0 } },
-                            { "nutrient": "SUGAR", "quantity": { "gramsSum": 12.0 } }
-                        ]
-                    }
-                }
-            ]
-        }"#;
-        let data: GoogleHealthDailyRollupResponse = serde_json::from_str(raw_json).unwrap();
-        let log = data
-            .rollup_data_points
-            .unwrap()
-            .into_iter()
-            .next()
-            .unwrap()
-            .nutrition_log
-            .unwrap();
-
-        let mut protein = 0.0;
-        let mut sodium = 0.0;
-        let mut iron = 0.0;
-        let mut cholesterol = 0.0;
-        let mut vitamin_a = 0.0;
-        let mut vitamin_d = 0.0;
-        let mut saturated_fat = 0.0;
-        let mut sugar = 0.0;
-        for nutrient_rollup in log.nutrients.unwrap() {
-            let grams = nutrient_rollup
-                .quantity
-                .as_ref()
-                .and_then(|q| q.grams_sum)
-                .unwrap_or(0.0);
-            match nutrient_rollup.nutrient.as_str() {
-                "PROTEIN" => protein = grams,
-                "SODIUM" => sodium = grams_to_mg(grams),
-                "IRON" => iron = grams_to_mg(grams),
-                "CHOLESTEROL" => cholesterol = grams_to_mg(grams),
-                "VITAMIN_A" => vitamin_a = grams_to_mcg(grams),
-                "VITAMIN_D" => vitamin_d = grams_to_mcg(grams),
-                "SATURATED_FAT" => saturated_fat = grams,
-                "SUGAR" => sugar = grams,
-                _ => {}
-            }
-        }
-        assert_eq!(protein, 30.0);
-        assert!((sodium - 74.0).abs() < f64::EPSILON);
-        assert!((iron - 8.0).abs() < f64::EPSILON);
-        assert!((cholesterol - 200.0).abs() < f64::EPSILON);
-        assert!((vitamin_a - 500.0).abs() < f64::EPSILON);
-        assert!((vitamin_d - 10.0).abs() < f64::EPSILON);
-        assert_eq!(saturated_fat, 5.0);
-        assert_eq!(sugar, 12.0);
+    fn test_parse_nutrition_data_points_empty_day_is_zero() {
+        let s = parse_nutrition_data_points(&serde_json::json!({}));
+        assert_eq!(s.calories, 0.0);
+        assert_eq!(s.saturated_fat, 0.0);
     }
 
     #[test]
