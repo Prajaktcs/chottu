@@ -494,7 +494,7 @@ pub async fn generate_and_store_weekly_plan(
                 e
             );
             let raw = llm
-                .generate_prompt_fast(
+                .generate_prompt(
                     &(PLAN_SYSTEM_PROMPT.to_string()
                         + " Reply with JSON only: {\"theme\":\"...\",\"days\":[{\"weekday\":\"Monday\",\"kind\":\"strength\",\"notes\":\"...\",\"exercises\":[{\"name\":\"...\",\"sets\":3,\"reps\":\"8-10\"}]}, ... 7 days]}"),
                     &user_prompt,
@@ -563,7 +563,7 @@ async fn week_averages(
                 AVG(protein_grams) as avg_protein, \
                 AVG(step_count) as avg_steps, \
                 AVG(active_calories_burned) as avg_active, \
-                AVG(sleep_hours) as avg_sleep \
+                AVG(NULLIF(sleep_hours, 0)) as avg_sleep \
          FROM health_family_summary \
          WHERE family_member_id = ? AND date >= ? AND date <= ?",
     )
@@ -951,6 +951,33 @@ mod tests {
             .collect();
         let kept = normalize_exercises(PlanDayKind::Strength, exercises);
         assert_eq!(kept.len(), MAX_EXERCISES_PER_DAY);
+    }
+
+    #[tokio::test]
+    async fn week_averages_ignore_missing_sleep_sentinel() {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        for (day, sleep) in [
+            ("2026-08-03", 8.0),
+            ("2026-08-04", 8.0),
+            ("2026-08-05", 0.0),
+            ("2026-08-06", 8.0),
+            ("2026-08-07", 8.0),
+            ("2026-08-08", 0.0),
+            ("2026-08-09", 8.0),
+        ] {
+            sqlx::query(
+                "INSERT INTO health_family_summary (family_member_id, date, sleep_hours) VALUES ('alex', ?, ?)",
+            )
+            .bind(day)
+            .bind(sleep)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let metrics = week_averages(&pool, "alex", "2026-08-03", "2026-08-09")
+            .await
+            .unwrap();
+        assert_eq!(metrics.sleep_hours, 8.0);
     }
 
     #[test]
