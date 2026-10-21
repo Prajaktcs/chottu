@@ -1274,10 +1274,22 @@ processed_meat, fried, spicy, nightshades, caffeine, shellfish, eggs, soy, citru
 // Gemini Client
 // -------------------------------------------------------------
 
+/// Gemini model for every Gemini call. A macro so the endpoint URL can be
+/// built with `concat!` from the same literal.
+macro_rules! gemini_model {
+    () => {
+        "gemini-3.8-flash"
+    };
+}
+const GEMINI_MODEL: &str = gemini_model!();
+
 /// Gemini generateContent endpoint. The API key is sent in the `x-goog-api-key`
 /// request header so it never appears in URLs or request logs.
-const GEMINI_GENERATE_CONTENT_URL: &str =
-    "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent";
+const GEMINI_GENERATE_CONTENT_URL: &str = concat!(
+    "https://generativelanguage.googleapis.com/v1beta/models/",
+    gemini_model!(),
+    ":generateContent"
+);
 
 #[derive(Debug, Clone)]
 pub struct GeminiClient {
@@ -1603,11 +1615,10 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             serde_json::json!(food_description)
         );
 
-        let extractor = ExtractorBuilder::<NutritionEstimation>::new(
-            self.client.completion("gemini-3.6-flash"),
-        )
-        .append_preamble(&system_prompt)
-        .build();
+        let extractor =
+            ExtractorBuilder::<NutritionEstimation>::new(self.client.completion(GEMINI_MODEL))
+                .append_preamble(&system_prompt)
+                .build();
 
         let response = match extractor.extract(&user_prompt).await {
             Ok(response) => response.output,
@@ -1680,11 +1691,10 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             "correction": correction,
         })
         .to_string();
-        let extractor = ExtractorBuilder::<FoodCorrectionAnalysis>::new(
-            self.client.completion("gemini-3.6-flash"),
-        )
-        .append_preamble(&system_prompt)
-        .build();
+        let extractor =
+            ExtractorBuilder::<FoodCorrectionAnalysis>::new(self.client.completion(GEMINI_MODEL))
+                .append_preamble(&system_prompt)
+                .build();
         let mut analysis = match extractor.extract(&user_prompt).await {
             Ok(response) => response.output,
             Err(gemini_error) => {
@@ -1732,11 +1742,10 @@ For UNKNOWN, still return nutrition zeros and explain in reasoning."
             calories, protein, carbs, fat
         );
 
-        let extractor = ExtractorBuilder::<MissingSyncNutrition>::new(
-            self.client.completion("gemini-3.6-flash"),
-        )
-        .append_preamble(system_prompt)
-        .build();
+        let extractor =
+            ExtractorBuilder::<MissingSyncNutrition>::new(self.client.completion(GEMINI_MODEL))
+                .append_preamble(system_prompt)
+                .build();
 
         let response = extractor
             .extract(&user_prompt)
@@ -2467,7 +2476,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
+                &format!("{gemini_base}/v1beta/models/{GEMINI_MODEL}:generateContent"),
                 &format!("{router_base}/api/v1/chat/completions"),
             )
             .await
@@ -2477,8 +2486,9 @@ mod tests {
         assert_eq!(analysis.barcode.as_deref(), Some("737628064502"));
         assert_eq!(analysis.nutrition.total_calories, 200);
         let (gemini_headers, gemini_payload) = gemini_server.await.unwrap();
-        assert!(gemini_headers
-            .starts_with("POST /v1beta/models/gemini-3.6-flash:generateContent HTTP/1.1"));
+        assert!(gemini_headers.starts_with(&format!(
+            "POST /v1beta/models/{GEMINI_MODEL}:generateContent HTTP/1.1"
+        )));
         assert!(gemini_headers
             .to_ascii_lowercase()
             .contains("x-goog-api-key: gemini-test"));
@@ -2518,7 +2528,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
+                &format!("{gemini_base}/v1beta/models/{GEMINI_MODEL}:generateContent"),
                 "http://127.0.0.1:1/api/v1/chat/completions",
             )
             .await
@@ -2540,7 +2550,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
+                &format!("{gemini_base}/v1beta/models/{GEMINI_MODEL}:generateContent"),
                 &format!("{router_base}/api/v1/chat/completions"),
             )
             .await;
@@ -2566,7 +2576,7 @@ mod tests {
                 b"photo",
                 "image/jpeg",
                 "",
-                &format!("{gemini_base}/v1beta/models/gemini-3.6-flash:generateContent"),
+                &format!("{gemini_base}/v1beta/models/{GEMINI_MODEL}:generateContent"),
                 "http://127.0.0.1:1/api/v1/chat/completions",
             )
             .await;
