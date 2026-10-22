@@ -1,11 +1,13 @@
 //! Weekly training plan generation and SQLite persistence.
 
 use anyhow::{bail, Context, Result};
-use chotu_common::{AppConfig, ChotuLlm, FitnessGoals, NutritionGoals};
+use chotu_common::{AppConfig, ChotuLlm, FitnessEquipment, FitnessGoals, NutritionGoals};
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
+
+use crate::strength_log::{set_log_dates, training_history, TrainingHistory};
 
 const PLAN_SYSTEM_PROMPT: &str = "\
 You are Chotu's household fitness coach. Build ONE week of training for a family member.\
@@ -23,7 +25,19 @@ Rotate muscle groups so the same group is not trained hard on consecutive days.\
 Use reps like \"8-10\", \"12 each side\" or \"45s\"; put load or effort cues (e.g. \"RPE 7\") in the day notes.\
 If last week's completed sessions are under 60% of planned, plan fewer or shorter sessions.\
 If last week's planned sessions were all completed, progress slightly (one more set or a harder variation).\
-If average sleep is under 6 hours, keep intensity moderate.";
+If average sleep is under 6 hours, keep intensity moderate.\
+Follow the training phase given: start from basic lifts and expand only as the phase allows.\
+Keep lifts from the logged history that still fit the phase, using their exact names, so loads can progress week to week.\
+Do not prescribe specific weights; weight targets come from the member's set log.";
+
+/// What `equipment: gym` means for this household (GoodLife membership).
+const GYM_EQUIPMENT: &str = "Gym access: full commercial gym (GoodLife) — barbells, squat racks, \
+benches, dumbbells to 100+ lb, cable stations, Smith machine, selectorized machines (leg press, \
+chest press, lat pulldown, seated row, leg curl/extension, shoulder press), treadmills, bikes, \
+rowers, ellipticals, stair climbers.";
+
+/// Activity label for days with `/log` sets, so they count as strength sessions.
+pub(crate) const SET_LOG_ACTIVITY: &str = "Strength training";
 
 /// Most exercises kept per day; longer model lists are truncated.
 const MAX_EXERCISES_PER_DAY: usize = 8;
@@ -83,7 +97,7 @@ pub struct PlanExercise {
 }
 
 impl PlanExercise {
-    fn render(&self) -> String {
+    pub(crate) fn render(&self) -> String {
         let reps = self.reps.trim();
         match (self.sets, reps.is_empty()) {
             (0 | 1, true) => self.name.trim().to_string(),
@@ -282,13 +296,14 @@ pub fn render_plan_markdown(week_start: &str, plan: &WeeklyFitnessPlan) -> Strin
                 note
             ));
         }
-        push_exercise_lines(&mut out, day);
+        push_exercise_lines(&mut out, day, &[]);
     }
     out
 }
 
 /// "📌 Today" block for `/plan`, including the day's exercises.
-pub fn render_today_session(day: &PlanDay) -> String {
+/// `targets` are per-exercise suffixes (e.g. " @ 180 lb, aim 12/12/11"), aligned by index.
+pub fn render_today_session(day: &PlanDay, targets: &[String]) -> String {
     let notes = day.notes.trim();
     let mut out = String::from("\n📌 *Today:* ");
     if notes.is_empty() {
@@ -297,13 +312,14 @@ pub fn render_today_session(day: &PlanDay) -> String {
         out.push_str(&format!("{} — {}", day.kind.as_str(), notes));
     }
     out.push('\n');
-    push_exercise_lines(&mut out, day);
+    push_exercise_lines(&mut out, day, targets);
     out
 }
 
-fn push_exercise_lines(out: &mut String, day: &PlanDay) {
-    for exercise in &day.exercises {
-        out.push_str(&format!("    ◦ {}\n", exercise.render()));
+fn push_exercise_lines(out: &mut String, day: &PlanDay, targets: &[String]) {
+    for (i, exercise) in day.exercises.iter().enumerate() {
+        let target = targets.get(i).map(String::as_str).unwrap_or_default();
+        out.push_str(&format!("    ◦ {}{}\n", exercise.render(), target));
     }
 }
 
@@ -327,6 +343,7 @@ pub fn session_for_date_from_stored(stored: &StoredWeeklyPlan, date: NaiveDate) 
 }
 
 /// Build Ollama user prompt from config + recent averages/exercises.
+#[allow(clippy::too_many_arguments)]
 pub fn build_plan_user_prompt(
     member_name: &str,
     fitness: &FitnessGoals,
@@ -335,6 +352,7 @@ pub fn build_plan_user_prompt(
     metrics: RecentMetrics,
     last_week_adherence: Option<(i32, i32)>,
     recent_exercises: &[(String, String)],
+    training: &TrainingHistory,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Member: {}", member_name));
@@ -371,6 +389,9 @@ pub fn build_plan_user_prompt(
     }
     if let Some(eq) = fitness.equipment {
         lines.push(format!("Equipment: {}", eq.as_str()));
+        if matches!(eq, FitnessEquipment::Gym | FitnessEquipment::Mixed) {
+            lines.push(GYM_EQUIPMENT.to_string());
+        }
     }
     if !fitness.constraints.is_empty() {
         lines.push("Constraints:".to_string());
@@ -422,6 +443,17 @@ pub fn build_plan_user_prompt(
             matched, planned
         ));
     }
+    lines.push(format!(
+        "Training phase (weeks of logged lifting so far: {}): {}",
+        training.weeks_logged,
+        training.phase().prompt_guidance()
+    ));
+    if !training.recent_lifts.is_empty() {
+        lines.push("Logged lifts (latest session each):".to_string());
+        for lift in &training.recent_lifts {
+            lines.push(format!("  - {}", lift));
+        }
+    }
     if recent_exercises.is_empty() {
         lines.push("Recent exercises: none logged".to_string());
     } else {
@@ -472,6 +504,7 @@ pub async fn generate_and_store_weekly_plan(
         .await
         .context("Failed to load recent exercises for weekly plan")?;
     let last_week_adherence = last_week_adherence(pool, member_id, &hist_start, &hist_end).await?;
+    let training = training_history(pool, member_id, start).await?;
 
     let user_prompt = build_plan_user_prompt(
         &member.name,
@@ -481,6 +514,7 @@ pub async fn generate_and_store_weekly_plan(
         metrics,
         last_week_adherence,
         &recent,
+        &training,
     );
 
     let plan = match llm
@@ -532,10 +566,16 @@ async fn last_week_adherence(
         crate::sync::exercise_entries_for_range(pool, member_id, prev_week_start, prev_week_end)
             .await
             .context("Failed to load last week's exercises for plan adherence")?;
-    let labels: Vec<(String, String)> = entries
+    let mut labels: Vec<(String, String)> = entries
         .iter()
         .map(|e| (e.date.clone(), e.activity_label()))
         .collect();
+    labels.extend(
+        set_log_dates(pool, member_id, prev_week_start, prev_week_end)
+            .await?
+            .into_iter()
+            .map(|date| (date, SET_LOG_ACTIVITY.to_string())),
+    );
     Ok(Some(plan_session_adherence(
         prev_week_start,
         &plan,
@@ -927,7 +967,8 @@ mod tests {
         assert!(md.contains("◦ Bench press — 3×8-10"));
         assert!(md.contains("◦ Bike — 30 min easy"));
 
-        let today = render_today_session(&plan.days[0]);
+        let today = render_today_session(&plan.days[0], &[" @ 135 lb".into()]);
+        assert!(today.contains("◦ Bench press — 3×8-10 @ 135 lb"));
         assert!(today.contains("strength — upper, RPE 7"));
         assert!(today.contains("◦ Plank — 3×45s"));
     }
@@ -1187,8 +1228,15 @@ mod tests {
             },
             Some((2, 4)),
             &[("2026-08-01".into(), "Weights 40m".into())],
+            &TrainingHistory {
+                weeks_logged: 5,
+                recent_lifts: vec!["Leg press (2026-08-01): 180 lb × 12/11/10".into()],
+            },
         );
         assert!(prompt.contains("beach body"));
+        assert!(prompt.contains("GoodLife"));
+        assert!(prompt.contains("weeks of logged lifting so far: 5): Build"));
+        assert!(prompt.contains("  - Leg press (2026-08-01): 180 lb × 12/11/10"));
         assert!(prompt.contains("no hard runs"));
         assert!(prompt.contains("Weights 40m"));
         assert!(prompt.contains("sleep_hours: 5.5"));
@@ -1202,8 +1250,11 @@ mod tests {
             RecentMetrics::default(),
             None,
             &[],
+            &TrainingHistory::default(),
         );
         assert!(!bare.contains("sleep_hours"));
+        assert!(bare.contains("Foundation"));
+        assert!(!bare.contains("Logged lifts"));
         assert!(!bare.contains("Last week"));
     }
 }

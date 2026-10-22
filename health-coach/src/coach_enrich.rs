@@ -8,8 +8,9 @@ use crate::coaching::FitnessCoachContext;
 use crate::fitness_plan::{
     count_strength_sessions, load_weekly_plan, parse_plan_json, plan_cardio_minutes_on_cardio_days,
     plan_session_adherence, session_for_date, sum_cardio_minutes, week_start_monday,
-    WeeklyFitnessPlan,
+    WeeklyFitnessPlan, SET_LOG_ACTIVITY,
 };
+use crate::strength_log::set_log_dates;
 use crate::sync::{exercise_entries_for_range, exercises_for_day};
 
 /// Options for [`enrich_coach_context`].
@@ -267,10 +268,17 @@ pub async fn plan_week_progress_line(
     let week_ex = exercise_entries_for_range(pool, member_id, week_start, &week_end)
         .await
         .ok()?;
-    let labels: Vec<(String, String)> = week_ex
+    let mut labels: Vec<(String, String)> = week_ex
         .iter()
         .map(|e| (e.date.clone(), e.activity_label()))
         .collect();
+    labels.extend(
+        set_log_dates(pool, member_id, week_start, &week_end)
+            .await
+            .ok()?
+            .into_iter()
+            .map(|date| (date, SET_LOG_ACTIVITY.to_string())),
+    );
     let (matched, planned) = plan_session_adherence(week_start, &plan, as_of, &labels);
     let week_cardio = sum_cardio_minutes(
         week_ex
