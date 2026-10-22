@@ -1,6 +1,6 @@
 # Health commands
 
-Nutrition logging, Google Health sync, daily status, trends, and weekly training plans.
+Nutrition logging, Google Health sync, daily status, trends, weekly training plans, and gym set logging.
 
 Linked personal DMs only see **that member’s** health/fitness. Household / unlinked chats can see family-wide reports where applicable. Linked DMs cannot mutate another member’s food (use a household chat or unlinked setup for that).
 
@@ -285,8 +285,23 @@ The plan uses data already synced from Google Health: the previous 7 days'
 workouts and step/active-calorie/sleep averages, plus how many of last week's
 planned sessions were completed. Low adherence shrinks the week; full adherence
 progresses it slightly; average sleep under 6h keeps intensity moderate. Google
-Health only reports workout type and duration, so progress is scored per
-session, not per exercise.
+Health only reports workout type and duration, so loads come from `/log`
+instead (below). A day with logged sets also counts as a completed strength
+session.
+
+Plans follow a training phase based on how many earlier weeks have logged sets:
+
+| Weeks logged | Phase | Programming |
+| :--- | :--- | :--- |
+| 0–3 | Foundation | Full-body days, machines + basic compounds, same lifts every week, 2–3 × 8–12 |
+| 4–11 | Build | Keep the main lifts, add free-weight variations and 1–2 accessories |
+| 12+ | Expand | Upper/lower split, barbell main lifts at 5–8 reps, then accessories |
+
+`equipment: gym` (or `mixed`) is described to the model as a full GoodLife gym.
+The prompt also carries each lift's latest logged session, and the model is told
+to reuse those exact names so progression carries across weeks. The model never
+prescribes loads. The 📌 Today block shows targets from your log, for example
+`Leg press — 3×8-12 @ 190 lb, aim 8/8/8 (+10 lb)`.
 
 Without goals:
 
@@ -294,3 +309,72 @@ Without goals:
 ⚠️ No fitness_goals for praj in config.yaml yet.
 Add intent / target_date / sessions_per_week, then try /plan again.
 ```
+
+---
+
+## `/log` — gym workout
+
+Linked personal DM only (household chats are told to use the DM). Weights are in
+lb. No model call is involved.
+
+`/log` starts today's workout, or resumes it if one is open, and lists today's
+planned lifts with targets:
+
+```text
+/log
+▶️ Workout started — Monday strength: full body
+ 1. Leg press — 3×8-12 @ 180 lb, aim 12/12/11
+ 2. Chest press — 3×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+ 3. Plank — 3×45s
+
+Now: Leg press
+Send `180x12` per set · `x11` same weight · `next` or `#3` to switch · `undo` · `done`
+```
+
+While the workout is open, plain messages in the DM log sets:
+
+| Message | Effect |
+| :--- | :--- |
+| `180x12` | One set: 180 lb × 12 to the current lift (`180 x 12`, `180×12` also work) |
+| `180x10x3` | Three sets of 10 at 180 lb |
+| `x11` or `11` | Same weight as the previous set of this lift |
+| `bwx12` | Bodyweight set |
+| `180x12 x11 x10` | Several sets in one message |
+| `bench 135x8` | Log to a named lift: a planned one (`bench` matches "Bench press") or an extra |
+| `next` · `#3` | Move to the next / third planned lift |
+| `undo` | Remove the last logged set |
+| `done` | Finish and show next-time targets |
+
+After a lift's planned sets are logged, the next unfinished lift is shown. `/log
+<message>` works the same way and starts a workout if needed (e.g. catching up
+with `/log bench 135x8x3`).
+
+```text
+x10
+✓ Leg press set 3: 180 lb × 10
+→ Next: 2. Chest press — 3×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+…
+done
+🏁 Workout logged: 9 sets across 3 exercises.
+• Leg press: 180 lb × 12/11/10 → next 180 lb, aim 12/12/11
+• Chest press: 90 lb × 12/12/12 → next 95 lb, aim 8/8/8
+```
+
+Anything else (food text, questions, photos, quoted replies, and evening
+reflection answers) goes to the normal handlers. Commands like `/food` work
+mid-workout. A workout closes on `done`, after 3 hours without workout messages, or
+when the local day changes. Logged sets are kept either way.
+
+**Progression** (double progression, per lift, using the planned rep range):
+
+- Every working set at the top of the range adds load and restarts at the bottom
+  of the range: +10 lb for squats, deadlifts, leg press, hip thrusts and RDLs;
+  +5 lb for everything else.
+- Otherwise the load holds and the aim is one more rep per set.
+- Two sessions in a row with no set reaching the bottom of the range at the same
+  load cause a deload to 90% (rounded to 5 lb).
+- Bodyweight lifts add reps; at the top of the range, Chotu suggests a harder variation.
+- Timed or distance work (`45s`, `30 min`) gets no target.
+
+Lifts are matched across weeks by name, ignoring case and punctuation
+("Pull-ups" = "pullups").

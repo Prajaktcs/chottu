@@ -7,6 +7,7 @@ mod condition_trends;
 pub mod conditions;
 mod fitness_plan;
 mod food_corrections;
+mod strength_log;
 mod sync;
 mod trends;
 
@@ -30,6 +31,9 @@ pub use fitness_plan::{
 pub use food_corrections::{
     adjust_food_totals, delete_food_logs_for_day, food_log_revision, recover_legacy_food_operation,
     revise_food_log, sync_corrected_food_log,
+};
+pub use strength_log::{
+    exercise_target_suffixes, log_command_reply, workout_message_reply, TrainingPhase,
 };
 pub use sync::{
     credentials_configured, exercise_entries_for_day, exercise_entries_for_range,

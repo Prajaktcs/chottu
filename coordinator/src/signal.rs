@@ -56,6 +56,7 @@ pub enum Command {
     Networth,
     Monthly(String),
     Budget(String),
+    Log(String),
 }
 
 const HELP_TEXT: &str = "\
@@ -65,6 +66,7 @@ These commands are supported:
 /correctfood [meal_id] <correction> — update a meal; replying to its confirmation selects it.
 /status — show today's status report.
 /plan [new] — weekly training plan.
+/log — start today's workout; then send sets like 135x8, `done` to finish.
 /brief — morning brief: calendar, tasks, bills, nutrition.
 /cal [today|tomorrow|week] — calendar agenda.
 /trends [days] — nutrition trends.
@@ -126,6 +128,7 @@ fn parse_command(input: &str) -> Option<Command> {
         "networth" => Some(Command::Networth),
         "monthly" => Some(Command::Monthly(args)),
         "budget" => Some(Command::Budget(args)),
+        "log" => Some(Command::Log(args)),
         _ => None,
     }
 }
@@ -855,6 +858,41 @@ async fn handle_inbound(
         states.read().await.get(&chat_id),
         Some(ConversationState::WaitingForReflection { .. })
     );
+    // An open /log workout claims set-shaped DM text ("180x12", "done") before meal
+    // handling; anything else falls through. Reflection answers are never claimed.
+    if let CallerScope::LinkedDm { member_id } = &scope {
+        if allow_unquoted_correction
+            && inbound.attachments.is_empty()
+            && inbound.quote_timestamp.is_none()
+        {
+            let now = shared_config.now_in_tz();
+            match health_coach::workout_message_reply(
+                &pool,
+                member_id,
+                now.with_timezone(&chrono::Utc),
+                now.date_naive(),
+                inbound.text.as_deref().unwrap_or_default(),
+            )
+            .await
+            {
+                Ok(Some(reply)) => {
+                    send_signal(&bot, &chat_id, reply).await?;
+                    return Ok(());
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Workout set logging failed: {error:?}");
+                    send_signal(
+                        &bot,
+                        &chat_id,
+                        "Couldn't save that to your workout. Please resend it.",
+                    )
+                    .await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
     match food_steering::handle(
         &bot,
         &inbound,
@@ -954,6 +992,27 @@ async fn handle_command(
         }
         Command::Plan(args) => {
             handle_plan(&bot, &chat_id, args, &pool, &config, &llm).await?;
+        }
+        Command::Log(args) => {
+            let reply = match scope.member_id() {
+                None => Ok("Use /log in your linked personal DM to log your workout.".to_string()),
+                Some(member_id) => {
+                    let now = config.now_in_tz();
+                    health_coach::log_command_reply(
+                        &pool,
+                        member_id,
+                        now.with_timezone(&chrono::Utc),
+                        now.date_naive(),
+                        &args,
+                    )
+                    .await
+                }
+            };
+            let reply = reply.unwrap_or_else(|error| {
+                eprintln!("Workout log command failed: {error:?}");
+                "Couldn't update your workout log. Please retry.".to_string()
+            });
+            send_signal(&bot, &chat_id, reply).await?;
         }
         Command::Brief => {
             handle_brief(&bot, &chat_id, &pool, &config).await?;
@@ -3792,7 +3851,7 @@ async fn handle_plan(
             let mut msg = stored.plan_md.clone();
             let today = config.now_in_tz().date_naive();
             if let Some(session) = health_coach::session_for_date_from_stored(&stored, today) {
-                msg.push_str(&health_coach::render_today_session(&session));
+                msg.push_str(&today_session_with_targets(pool, &member_id, today, &session).await);
             }
             if let Some(progress) = health_coach::plan_week_progress_line(
                 pool,
@@ -3833,7 +3892,9 @@ async fn handle_plan(
                 if let Some(session) =
                     health_coach::session_for_date(&stored.week_start, &plan, today)
                 {
-                    msg.push_str(&health_coach::render_today_session(session));
+                    msg.push_str(
+                        &today_session_with_targets(pool, &member_id, today, session).await,
+                    );
                 }
             }
             if let Some(progress) = health_coach::plan_week_progress_line(
@@ -3857,6 +3918,22 @@ async fn handle_plan(
         }
     }
     Ok(())
+}
+
+/// "📌 Today" block with progression targets from the member's set log.
+async fn today_session_with_targets(
+    pool: &SqlitePool,
+    member_id: &str,
+    today: chrono::NaiveDate,
+    session: &health_coach::PlanDay,
+) -> String {
+    let targets = health_coach::exercise_target_suffixes(pool, member_id, today, session)
+        .await
+        .unwrap_or_else(|error| {
+            eprintln!("Workout targets unavailable: {error:?}");
+            Vec::new()
+        });
+    health_coach::render_today_session(session, &targets)
 }
 
 async fn handle_cal(
@@ -6939,6 +7016,11 @@ mod tests {
     fn parse_command_reads_leading_slash_case_insensitively() {
         assert!(matches!(parse_command("/HELP"), Some(Command::Help)));
         assert_eq!(parse_command("/TAGS"), Some(Command::Tags(String::new())));
+        assert_eq!(parse_command("/log"), Some(Command::Log(String::new())));
+        assert_eq!(
+            parse_command("/log bench 135x8"),
+            Some(Command::Log("bench 135x8".into()))
+        );
         assert_eq!(
             parse_command("/watch add skin dairy"),
             Some(Command::Watch("add skin dairy".into()))
