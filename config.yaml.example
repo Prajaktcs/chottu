@@ -89,6 +89,11 @@ email_classifier_prompt_path: "prompts/email_classifier_system_prompt.txt"
 # Set to false to stop the Streamer from connecting to IMAP or pulling email.
 email_sync_enabled: true
 
+# Optional: HTTP API for the Chotu app. Off when omitted. Loopback only; expose it
+# with `tailscale serve --bg --https=8787 http://127.0.0.1:8787` (docs/app-api.md).
+# api:
+#   bind: 127.0.0.1:8787
+
 # Optional: two core values that shape evening /reflect prompts (alongside health logs).
 # Prefer exactly two anchors; nest courage/humility as tools. Integrity = alignment sensor.
 # core_values:

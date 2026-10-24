@@ -6,7 +6,7 @@ This document is the runtime map for **Project Chotu** plus the Rust standards f
 
 ## Runtime topology
 
-`just run` starts the **coordinator** binary as a supervisor. It opens SQLite (`DATABASE_PATH`, default `chotu.db`), loads `config.yaml`, builds a local Ollama client, then `tokio::spawn`s four long-lived tasks:
+`just run` starts the **coordinator** binary as a supervisor. It opens SQLite (`DATABASE_PATH`, default `chotu.db`), loads `config.yaml`, builds a local Ollama client, then `tokio::spawn`s four long-lived tasks. When `api.bind` is set, it also serves the app's HTTP API on loopback behind `tailscale serve` ([`docs/app-api.md`](docs/app-api.md)):
 
 | Task | Crate | Owns |
 | :--- | :--- | :--- |

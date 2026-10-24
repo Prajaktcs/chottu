@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::Path;
 
 use crate::schedule::{resolve_timezone_name, resolve_tz, AgentSchedules, DEFAULT_TIMEZONE};
@@ -614,6 +615,30 @@ pub struct SpendBudgets {
     pub categories: std::collections::HashMap<String, f64>,
 }
 
+/// HTTP API for the app (`coordinator/src/api.rs`). Plain HTTP on loopback only;
+/// `tailscale serve` terminates HTTPS in front of it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ApiConfig {
+    /// Listen address, e.g. `127.0.0.1:8787`. Must be a loopback address.
+    pub bind: SocketAddr,
+}
+
+impl ApiConfig {
+    /// Rejects any non-loopback bind (`0.0.0.0`, LAN, Tailscale `100.x`): the only
+    /// way in must be through `tailscale serve`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.bind.ip().is_loopback() {
+            Ok(())
+        } else {
+            Err(format!(
+                "api.bind {} is not a loopback address. Bind to 127.0.0.1 or ::1 and expose it with `tailscale serve`.",
+                self.bind
+            ))
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub family: FamilySection,
@@ -634,6 +659,9 @@ pub struct AppConfig {
     /// Proactive send/sync times (`HH:MM` in `timezone`). Blank/omitted jobs are not scheduled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedules: Option<AgentSchedules>,
+    /// HTTP API for the app. Off when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<ApiConfig>,
 }
 
 impl Default for AppConfig {
@@ -660,6 +688,7 @@ impl Default for AppConfig {
             email_sync_enabled: true,
             timezone: Some(DEFAULT_TIMEZONE.to_string()),
             schedules: None,
+            api: None,
         }
     }
 }
@@ -977,6 +1006,10 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
             eprintln!("Config warning: {}", w);
         }
     }
+    if let Some(api) = config.api.as_ref() {
+        api.validate()
+            .map_err(|e| format!("Configuration file {:?}: {e}", path_ref))?;
+    }
     let tz_name = config.resolved_timezone_name();
     println!(
         "Successfully loaded configuration from {:?} (timezone {})",
@@ -1207,6 +1240,47 @@ schedules:
         assert!(s.portfolio().is_none());
         assert!(s.reflection().is_none());
         assert_eq!(s.health_evening_sync().unwrap().minute, 45);
+    }
+
+    fn load_with_api_bind(bind: &str) -> Result<AppConfig, String> {
+        let yaml = format!(
+            "family:\n  members:\n    - id: alex\n      name: Alex\n      role: adult\napi:\n  bind: \"{bind}\"\n"
+        );
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", yaml).unwrap();
+        load_config(tmp.path())
+    }
+
+    #[test]
+    fn api_is_off_when_unset() {
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(
+            tmp,
+            "family:\n  members:\n    - id: alex\n      name: Alex\n      role: adult\n"
+        )
+        .unwrap();
+        assert!(load_config(tmp.path()).unwrap().api.is_none());
+    }
+
+    #[test]
+    fn api_bind_accepts_loopback() {
+        for bind in ["127.0.0.1:8787", "[::1]:8787"] {
+            let loaded = load_with_api_bind(bind).unwrap_or_else(|e| panic!("{bind}: {e}"));
+            assert_eq!(loaded.api.unwrap().bind, bind.parse().unwrap());
+        }
+    }
+
+    #[test]
+    fn api_bind_rejects_non_loopback() {
+        for bind in [
+            "0.0.0.0:8787",
+            "[::]:8787",
+            "192.168.1.20:8787",
+            "100.101.102.103:8787",
+        ] {
+            let err = load_with_api_bind(bind).expect_err(bind);
+            assert!(err.contains("not a loopback address"), "{bind}: {err}");
+        }
     }
 
     #[test]

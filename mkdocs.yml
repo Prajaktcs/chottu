@@ -17,6 +17,7 @@ nav:
   - Operations:
       - Services & credentials: services-and-credentials.md
       - Setup commands: commands/setup.md
+      - App API: app-api.md
       - Health commands: commands/health.md
       - Day loop: commands/day-loop.md
       - Memory: commands/memory.md
