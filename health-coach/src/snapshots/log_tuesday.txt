@@ -1,0 +1,29 @@
+> /log
+▶️ Workout started — Tuesday rest
+No lifts planned today — log any lift by name, e.g. `bench 135x8`.
+Send `180x12` per set · `x11` same weight · `next` or `#3` to switch · `undo` · `done`
+
+> x8
+Which lift? Send it with the set, e.g. `bench 135x8`.
+
+> next
+No lifts planned today — log any lift by name, e.g. `bench 135x8`.
+
+> bench 135x8
+✓ Bench set 1: 135 lb × 8
+
+> x8
+✓ Bench set 2: 135 lb × 8
+
+> undo
+↩️ Removed Bench 135 lb × 8
+
+> undo
+↩️ Removed Bench 135 lb × 8
+
+> undo
+Nothing to undo in this workout.
+
+> done
+Workout closed — nothing was logged.
+

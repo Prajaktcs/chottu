@@ -1,0 +1,73 @@
+> 180x12
+<not claimed>
+
+> /log done
+No workout in progress. Send /log to start one.
+
+> /log hello there
+Usage: `/log` starts today's workout. Then send sets like `135x8` (lb × reps), `135x8x3` (3 sets), `x8` (same weight), `bwx12` (bodyweight). `#2` or `next` switches exercise, `bench 135x8` logs a lift by name, `undo` removes the last set, `done` finishes.
+
+> /log x10
+No weight yet for Leg press — send it once like `135x8` (or `bwx8` for bodyweight).
+
+> /log
+▶️ Workout resumed — Monday strength: full body
+ 1. Leg press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+ 2. Chest press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+
+Now: Leg press
+Send `180x12` per set · `x11` same weight · `next` or `#3` to switch · `undo` · `done`
+
+> 180x12
+✓ Leg press set 1: 180 lb × 12
+
+> x12
+✓ Leg press set 2: 180 lb × 12
+→ Next: 2. Chest press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+
+> #5
+Pick an exercise from #1 to #2.
+
+> #1
+Now: 1. Leg press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+
+> next
+Now: 2. Chest press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7
+
+> next
+That was the last planned lift. Log extras like `curl 30x12`, or send `done`.
+
+> 90x10
+✓ Chest press set 1: 90 lb × 10
+
+> undo
+↩️ Removed Chest press 90 lb × 10
+
+> 90x10x2
+✓ Chest press sets 1–2: 90 lb × 10/10
+All planned lifts logged 💪 Send `done` to finish.
+
+> curl 30x12
+✓ Curl set 1: 30 lb × 12
+
+> /log
+▶️ Workout resumed — Monday strength: full body
+ 1. Leg press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7  ✓ 180 lb × 12/12
+ 2. Chest press — 2×8-12 · first time: pick a weight you can lift 12 times at RPE 7  ✓ 90 lb × 10/10
+ + Curl  ✓ 30 lb × 12
+
+Now: Curl
+Send `180x12` per set · `x11` same weight · `next` or `#3` to switch · `undo` · `done`
+
+> done
+🏁 Workout logged: 5 sets across 3 exercises.
+• Leg press: 180 lb × 12/12 → next 190 lb, aim 8/8
+• Chest press: 90 lb × 10/10 → next 90 lb, aim 11/11
+• Curl: 30 lb × 12
+
+> undo
+<not claimed>
+
+> /log undo
+No workout in progress. Send /log to start one.
+

@@ -1156,7 +1156,7 @@ async fn finish_reply(
 mod tests {
     use super::*;
     use crate::fitness_plan::{save_weekly_plan, WeeklyFitnessPlan};
-    use chrono::TimeZone;
+    use chrono::{Datelike, TimeZone};
 
     fn set(load: Load, reps: u32, count: u32) -> SetInput {
         SetInput { load, reps, count }
@@ -1317,8 +1317,7 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 10, 19, hour, minute, 0).unwrap()
     }
 
-    async fn pool_with_plan() -> SqlitePool {
-        let pool = chotu_common::init_db(":memory:").await.unwrap();
+    fn test_plan() -> WeeklyFitnessPlan {
         let plan = WeeklyFitnessPlan {
             theme: "Base".into(),
             days: vec![crate::fitness_plan::PlanDay {
@@ -1339,8 +1338,12 @@ mod tests {
                 ],
             }],
         };
-        let plan = crate::fitness_plan::normalize_weekly_plan(plan).unwrap();
-        save_weekly_plan(&pool, "alex", "2026-10-19", &plan)
+        crate::fitness_plan::normalize_weekly_plan(plan).unwrap()
+    }
+
+    async fn pool_with_plan() -> SqlitePool {
+        let pool = chotu_common::init_db(":memory:").await.unwrap();
+        save_weekly_plan(&pool, "alex", "2026-10-19", &test_plan())
             .await
             .unwrap();
         pool
@@ -1466,6 +1469,108 @@ mod tests {
             .await
             .unwrap()
             .contains("No workout in progress"));
+    }
+
+    /// Exact Signal reply text for a scripted conversation. `/`-prefixed steps go
+    /// through `/log`, the rest through plain DM handling. Captured before the
+    /// typed-core split so formatter changes show up as diffs.
+    async fn transcript(pool: &SqlitePool, day: NaiveDate, hour: u32, steps: &[&str]) -> String {
+        let mut out = String::new();
+        for (minute, step) in steps.iter().enumerate() {
+            let now = Utc
+                .with_ymd_and_hms(day.year(), day.month(), day.day(), hour, minute as u32, 0)
+                .unwrap();
+            let reply = match step.strip_prefix("/log") {
+                Some(args) => Some(
+                    log_command_reply(pool, "alex", now, day, args.trim())
+                        .await
+                        .unwrap(),
+                ),
+                None => workout_message_reply(pool, "alex", now, day, step)
+                    .await
+                    .unwrap(),
+            };
+            out.push_str(&format!(
+                "> {step}\n{}\n\n",
+                reply.as_deref().unwrap_or("<not claimed>")
+            ));
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn log_reply_snapshots() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let first = transcript(
+            &pool,
+            monday,
+            17,
+            &[
+                "180x12",
+                "/log done",
+                "/log hello there",
+                "/log x10",
+                "/log",
+                "180x12",
+                "x12",
+                "#5",
+                "#1",
+                "next",
+                "next",
+                "90x10",
+                "undo",
+                "90x10x2",
+                "curl 30x12",
+                "/log",
+                "done",
+                "undo",
+                "/log undo",
+            ],
+        )
+        .await;
+        check_snapshot("log_monday", &first).await;
+
+        // Next week: targets come from Monday's log; Tuesday has no lifts planned.
+        let next_monday = monday + Duration::days(7);
+        save_weekly_plan(&pool, "alex", "2026-10-26", &test_plan())
+            .await
+            .unwrap();
+        let second = transcript(&pool, next_monday, 17, &["/log", "x8", "#2", "done"]).await;
+        check_snapshot("log_next_monday", &second).await;
+
+        let tuesday = next_monday + Duration::days(1);
+        let third = transcript(
+            &pool,
+            tuesday,
+            9,
+            &[
+                "/log",
+                "x8",
+                "next",
+                "bench 135x8",
+                "x8",
+                "undo",
+                "undo",
+                "undo",
+                "done",
+            ],
+        )
+        .await;
+        check_snapshot("log_tuesday", &third).await;
+    }
+
+    /// Compares against `snapshots/<name>.txt`; `UPDATE_SNAPSHOTS=1` rewrites it.
+    async fn check_snapshot(name: &str, actual: &str) {
+        let path = format!("{}/src/snapshots/{name}.txt", env!("CARGO_MANIFEST_DIR"));
+        if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
+            tokio::fs::write(&path, actual).await.unwrap();
+            return;
+        }
+        let expected = tokio::fs::read_to_string(&path)
+            .await
+            .unwrap_or_else(|e| panic!("{path}: {e} (run with UPDATE_SNAPSHOTS=1)"));
+        assert_eq!(actual, expected, "snapshot {name} changed");
     }
 
     #[tokio::test]
