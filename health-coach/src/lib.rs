@@ -34,8 +34,9 @@ pub use food_corrections::{
 };
 pub use strength_log::{
     close_workout, delete_set, exercise_target_suffixes, log_command_reply, log_sets,
-    select_exercise, start_workout, workout_message_reply, workout_state, Advance, DeletedSet,
-    ExerciseSummary, Load, LoggedSet, SetInput, SetRecord, SetsLogged, Target, TrainingPhase,
+    parse_performed_at, resolve_performed_at, select_exercise, start_workout,
+    workout_message_reply, workout_state, Advance, DeletedSet, ExerciseSummary, Load, LoggedSet,
+    PerformedAt, PerformedAtError, SetInput, SetRecord, SetsLogged, Target, TrainingPhase,
     WorkoutError, WorkoutStart, WorkoutState,
 };
 pub use sync::{
