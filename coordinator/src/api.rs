@@ -47,6 +47,11 @@ impl ApiServer {
         api.validate(&config.family.members)
             .map_err(anyhow::Error::msg)?;
         let auth = DeviceAuth::from_env(api, &config.family.members)?;
+        let listener = TcpListener::bind(api.bind)
+            .await
+            .with_context(|| format!("Failed to bind API server to {}", api.bind))?;
+        // Only after the bind: holding the port proves no other coordinator is
+        // serving, so the claims left in flight are truly abandoned.
         let abandoned = idempotency::release_abandoned(&pool)
             .await
             .context("Failed to release abandoned API write requests")?;
@@ -55,9 +60,6 @@ impl ApiServer {
                 "API: released {abandoned} write request id(s) left in flight at last shutdown."
             );
         }
-        let listener = TcpListener::bind(api.bind)
-            .await
-            .with_context(|| format!("Failed to bind API server to {}", api.bind))?;
         println!(
             "API server listening on http://{} (expose with `tailscale serve`)",
             api.bind
@@ -596,6 +598,35 @@ mod tests {
             .err()
             .expect("must refuse");
         assert!(err.to_string().contains("not a loopback address"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn failed_second_start_keeps_the_running_servers_in_flight_claims() {
+        let (_dir, pool) = test_pool().await;
+        sqlx::query(
+            "INSERT INTO api_write_requests (member_id, request_id, request, created_at) \
+             VALUES ('alex', 'in-flight', 'POST /v1/x', '2026-10-24T12:00:00Z')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // The running coordinator holds the port.
+        let running = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api = ApiConfig {
+            bind: running.local_addr().unwrap(),
+            devices: vec![],
+        };
+
+        let err = ApiServer::start(&api, &AppConfig::default(), pool.clone())
+            .await
+            .err()
+            .expect("port is taken");
+        assert!(err.to_string().contains("Failed to bind"), "{err}");
+        let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM api_write_requests")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(claims, 1);
     }
 
     #[tokio::test]
