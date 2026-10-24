@@ -34,6 +34,7 @@ rig-core = { version = "0.44", features = ["reqwest"] }
 rig-agent = "0.44"
 schemars = "1"
 dotenvy = "0.15"
+axum = "0.8.9"
 
 
 

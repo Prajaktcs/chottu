@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use chotu_common::ChotuLlm;
 
+mod api;
 mod brief;
 mod reflection;
 mod scheduled_delivery;
@@ -22,6 +23,12 @@ async fn main() -> Result<()> {
         "Agent timezone: {} (IANA tz database; instants in SQLite stay UTC)",
         config.resolved_timezone_name()
     );
+
+    // Bind before spawning agents so a bad address or busy port fails startup.
+    let mut api_server = match config.api.as_ref() {
+        Some(api_config) => Some(api::ApiServer::start(api_config).await?),
+        None => None,
+    };
 
     // Run non-blocking startup OAuth checks only after configuration and storage are valid.
     let email_sync_enabled = config.email_sync_enabled;
@@ -114,22 +121,41 @@ async fn main() -> Result<()> {
     });
 
     // Wait for the shutdown signal or any of the tasks to exit
-    tokio::select! {
+    let api_exited = async {
+        match api_server.as_mut() {
+            Some(server) => server.exited().await,
+            None => std::future::pending().await,
+        }
+    };
+    let api_stopped = tokio::select! {
         res = streamer_task => {
             println!("Streamer task exited: {:?}", res);
+            false
         }
         res = janitor_task => {
             println!("Janitor task exited: {:?}", res);
+            false
         }
         res = health_coach_task => {
             println!("Health Coach task exited: {:?}", res);
+            false
         }
         res = coordinator_task => {
             println!("Coordinator task exited: {:?}", res);
+            false
+        }
+        res = api_exited => {
+            println!("API server exited: {:?}", res);
+            true
         }
         _ = tokio::signal::ctrl_c() => {
             println!("\n[Ctrl-C] Shutdown signal received. Exiting Chotu gracefully...");
+            false
         }
+    };
+
+    if let Some(server) = api_server.filter(|_| !api_stopped) {
+        server.shutdown().await;
     }
 
     println!("Graceful shutdown complete.");
