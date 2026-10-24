@@ -33,7 +33,10 @@ pub use food_corrections::{
     revise_food_log, sync_corrected_food_log,
 };
 pub use strength_log::{
-    exercise_target_suffixes, log_command_reply, workout_message_reply, TrainingPhase,
+    close_workout, delete_set, exercise_target_suffixes, log_command_reply, log_sets,
+    select_exercise, start_workout, workout_message_reply, workout_state, Advance, DeletedSet,
+    ExerciseSummary, Load, LoggedSet, SetInput, SetRecord, SetsLogged, Target, TrainingPhase,
+    WorkoutError, WorkoutStart, WorkoutState,
 };
 pub use sync::{
     credentials_configured, exercise_entries_for_day, exercise_entries_for_range,

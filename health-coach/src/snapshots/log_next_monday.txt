@@ -1,0 +1,18 @@
+> /log
+▶️ Workout started — Monday strength: full body
+ 1. Leg press — 2×8-12 @ 190 lb, aim 8/8 (+10 lb)
+ 2. Chest press — 2×8-12 @ 90 lb, aim 11/11
+
+Now: Leg press
+Send `180x12` per set · `x11` same weight · `next` or `#3` to switch · `undo` · `done`
+
+> x8
+✓ Leg press set 1: 180 lb × 8
+
+> #2
+Now: 2. Chest press — 2×8-12 @ 90 lb, aim 11/11
+
+> done
+🏁 Workout logged: 1 sets across 1 exercises.
+• Leg press: 180 lb × 8 → next 180 lb, aim 9/9
+

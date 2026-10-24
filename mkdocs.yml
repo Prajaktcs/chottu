@@ -25,3 +25,4 @@ nav:
   - Product notes:
       - Condition tracking: condition-tracking-spec.md
       - Relationship graph: relationship-graph-spec.md
+      - App technical design: app-technical-design.md

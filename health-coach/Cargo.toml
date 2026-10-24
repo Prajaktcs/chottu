@@ -16,3 +16,4 @@ dotenvy = { workspace = true }
 uuid = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
+thiserror = { workspace = true }
