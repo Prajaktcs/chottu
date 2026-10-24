@@ -70,7 +70,7 @@ The first endpoints, in the order they ship:
 | --- | --- | --- | --- |
 | GET | `/v1/me` | member lookup from token | 1 |
 | GET | `/v1/workout` | open session, current exercise, today's sets, next target | 1 |
-| POST | `/v1/workout/sets` | `log_set` (weight\_lb, reps, exercise) | 1 |
+| POST | `/v1/workout/sets` | `log_sets` (exercise, weight, unit, reps, performed\_at) | 1 |
 | POST | `/v1/workout/done` | close session | 1 |
 | DELETE | `/v1/workout/sets/{id}` | undo a mistyped set | 1 |
 | GET | `/v1/tasks` | open + snoozed tasks in scope | 2 |

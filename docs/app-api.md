@@ -52,6 +52,10 @@ The coordinator can serve an HTTP API for the Chotu app. It is off unless `api.b
 | --- | --- | --- | --- |
 | GET | `/v1/health` | none | `status`, `server_version` and `min_app_version`. Holds no household data. |
 | GET | `/v1/me` | device token; `X-Chotu-Member` optional | The device, the chosen profile (or `null`), and the profiles it may use. |
+| GET | `/v1/workout` | device token + `X-Chotu-Member` | The member's open workout today, or `null`. See [Workout](#workout). |
+| POST | `/v1/workout/sets` | device token + `X-Chotu-Member` + `Idempotency-Key` | Logs one set. |
+| POST | `/v1/workout/done` | device token + `X-Chotu-Member` + `Idempotency-Key` | Closes today's workout and summarizes it. |
+| DELETE | `/v1/workout/sets/{id}` | device token + `X-Chotu-Member` + `Idempotency-Key` | Removes one set from the open workout. |
 
 `/v1/me` for a shared iPad that picked Jordan:
 
@@ -168,6 +172,106 @@ Idempotency-Key: 3f2b9c4e-8a1d-4c55-9a8e-2b7f0c1d9e6a
 | The same id on a different method or path | `422` |
 
 Server side, every write handler extracts `Idempotency` and wraps its write in `Idempotency::run` (`coordinator/src/api/idempotency.rs`). Responses are stored in `api_write_requests`, keyed by `(member_id, request_id)`. Two concurrent attempts race on that primary key, and only the winner applies. Ids still in flight when the coordinator stopped are released at the next startup.
+
+## Workout
+
+The workout endpoints share one workout per member with Signal's `/log`. A workout started in Signal shows up in `GET /v1/workout`, and a set logged in the app shows up in Signal's `/log` status. Both go through the same `health_coach` functions, so "today" is the household timezone's day for both.
+
+Weights in responses are always pounds (`weight_lb`). `null` means bodyweight. Errors are JSON: `{"error": "..."}`.
+
+### `GET /v1/workout`
+
+Returns the open workout for today, or `{"workout": null}` when none is open. A workout idle for 3 hours, or left open from an earlier day, is closed on read.
+
+```json
+{
+  "workout": {
+    "session_id": "6c1d4f0e-2b9a-4f7e-9d1c-0a5e3b7c2f18",
+    "current_exercise": "Bench press",
+    "plan_day": {"weekday": "Tuesday", "kind": "strength", "notes": "Push"},
+    "exercises": [
+      {
+        "name": "Bench press",
+        "sets": 3,
+        "reps": "8-10",
+        "target": {"weight_lb": 135.0, "reps": [9, 9, 8], "note": null}
+      }
+    ],
+    "sets": [
+      {"id": "b0a7e5c2-1f3d-4e8a-9b6c-7d2e4f1a3c59", "exercise": "Bench press", "weight_lb": 135.0, "reps": 8}
+    ]
+  }
+}
+```
+
+- `plan_day` is `null` without a weekly plan covering today. `exercises` is empty on rest days and without a plan.
+- `target` is the next prescription for a planned lift, or `null`.
+- `sets` are oldest first, including lifts outside the plan.
+
+### `POST /v1/workout/sets`
+
+Logs one set and starts today's workout if none is open.
+
+```json
+{"exercise": "bench press", "weight": 60, "unit": "kg", "reps": 8, "performed_at": "2026-10-24T18:05:00-04:00"}
+```
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `exercise` | yes | A planned lift (matched loosely, so `bench` finds `Bench press`) or any other lift. |
+| `weight` | yes, may be `null` | The load in `unit`. `null` is bodyweight. |
+| `unit` | yes | `lb` or `kg`. A `kg` weight is converted to pounds before it is stored. |
+| `reps` | yes | 1–100. |
+| `performed_at` | no | When the set was done, RFC 3339 **with an offset**. Defaults to server time. |
+
+`performed_at` lets a set queued offline land when it was done:
+
+- Within 5 minutes of server time, the set counts as live and joins the open workout, as a Signal set would.
+- Earlier, it joins that day's latest workout in the household timezone, even one already closed. If that day has none, a closed one is created.
+- More than 5 minutes in the future or more than 7 days old is refused with `422`.
+
+The response is `201` with the stored set and the workout it joined. For an earlier set, that can be a closed workout from that day.
+
+```json
+{
+  "set": {"id": "b0a7e5c2-1f3d-4e8a-9b6c-7d2e4f1a3c59", "exercise": "Bench press", "weight_lb": 132.277357308, "reps": 8},
+  "workout": {"session_id": "6c1d4f0e-2b9a-4f7e-9d1c-0a5e3b7c2f18", "current_exercise": "Bench press", "plan_day": null, "exercises": [], "sets": ["..."]}
+}
+```
+
+`weight_lb` is the exact conversion, unrounded. Signal shows it to one decimal (`132.3 lb`).
+
+### `POST /v1/workout/done`
+
+Closes today's workout. No body. Returns `200` with what was done per exercise and the next target for planned lifts:
+
+```json
+{
+  "exercises": [
+    {
+      "name": "Bench press",
+      "sets": [{"weight_lb": 135.0, "reps": 9}, {"weight_lb": 135.0, "reps": 8}],
+      "next": {"weight_lb": 135.0, "reps": [10, 9, 9], "note": null}
+    }
+  ]
+}
+```
+
+### `DELETE /v1/workout/sets/{id}`
+
+Removes one set from the member's open workout, for example a mistyped one. No body. Returns `200` with the removed set and the updated workout, in the same shape as `POST /v1/workout/sets`. That set's lift becomes the current exercise.
+
+### Workout errors
+
+| Request | Status |
+| --- | --- |
+| Malformed JSON | `400` |
+| A body without `Content-Type: application/json` | `415` |
+| A missing field, a wrong type, or an unknown `unit` | `422` |
+| `reps` or the weight out of range, or a blank `exercise` | `422` |
+| `performed_at` without an offset, more than 5 minutes ahead, or more than 7 days old | `422` |
+| `POST /v1/workout/done` with no open workout | `409` |
+| `DELETE` of a set that is not in the member's open workout, including another member's set | `404` |
 
 ## Request logs
 

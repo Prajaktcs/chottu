@@ -2,9 +2,6 @@
 //! in the `Idempotency-Key` header. A repeat from the same member returns the
 //! stored response instead of applying the write again (see `docs/app-api.md`).
 
-// Used by the first write routes (#116); only tests call it until then.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::{ApiError, Caller};
 use axum::body::{to_bytes, Body};
 use axum::extract::{FromRef, FromRequestParts};
