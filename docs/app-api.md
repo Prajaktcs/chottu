@@ -51,17 +51,77 @@ The coordinator can serve an HTTP API for the Chotu app. It is off unless `api.b
 | Method | Path | Auth | Returns |
 | --- | --- | --- | --- |
 | GET | `/v1/health` | none | `{"status":"ok"}`. Holds no household data. |
+| GET | `/v1/me` | device token; `X-Chotu-Member` optional | The device, the chosen profile (or `null`), and the profiles it may use. |
+
+`/v1/me` for a shared iPad that picked Jordan:
+
+```json
+{
+  "device": "kitchen_ipad",
+  "member": {"id": "jordan", "name": "Jordan"},
+  "profiles": [{"id": "alex", "name": "Alex"}, {"id": "jordan", "name": "Jordan"}]
+}
+```
+
+Without `X-Chotu-Member`, `member` is `null`. The app calls it that way to fill its profile picker.
+
+## Devices and profiles
+
+Each app install is a **device** with its own bearer token. A device lists the household members (profiles) it may act as. The app's profile picker chooses one of them, and the app sends it on every request.
+
+1. Mint a token on the Mac mini:
+
+   ```sh
+   just api-token alex_phone
+   ```
+
+   It prints the token once, followed by a line like `API_TOKEN_ALEX_PHONE=<sha256 hex>`. Device names use ASCII letters, digits and `_`.
+
+2. Add that line to `.env`. Only the hash is stored; the raw token lives only on the device.
+
+3. List the device in `config.yaml`:
+
+   ```yaml
+   api:
+     bind: 127.0.0.1:8787
+     devices:
+       - name: alex_phone
+         members: [alex]
+       - name: kitchen_ipad
+         members: [alex, jordan]
+   ```
+
+   Every member must be a `family.members[].id`. Startup fails on an unknown member, an empty list, a duplicate name, or a malformed hash.
+
+4. Restart Chotu, then enter the token in the app.
+
+Requests send:
+
+```text
+Authorization: Bearer <token>
+X-Chotu-Member: alex
+```
+
+| Request | Status |
+| --- | --- |
+| No token, or a token that matches no device | `401` |
+| `X-Chotu-Member` names a member the device may not use | `403` |
+| A member-data route without `X-Chotu-Member` | `400` |
+
+Every authenticated request acts for exactly one member, the same way a linked Signal DM does. The app never acts for the household group.
+
+**Revoke a device:** remove its `API_TOKEN_<DEVICE>` line from `.env` and restart. A configured device with no token line logs a warning at startup and cannot sign in. To rotate, mint a new token and replace the line.
 
 ## Request logs
 
 Every request logs one line:
 
 ```text
-api_request method=GET route=/v1/health status=200 duration_ms=0 member_id=- tailscale_user="alex@example.com"
+api_request method=GET route=/v1/me status=200 duration_ms=0 device=kitchen_ipad member_id=jordan tailscale_user="alex@example.com"
 ```
 
 - `route` is the route pattern, not the raw path. Requests that match no route log `<unmatched>`.
-- `member_id` is `-` until device-token auth lands.
+- `device` and `member_id` are `-` when the request is not authenticated or names no profile.
 - `tailscale_user` is the `Tailscale-User-Login` header, or `-` if it is missing. It is logged only and does not affect authorization.
 - Tokens and request bodies are never logged.
 
