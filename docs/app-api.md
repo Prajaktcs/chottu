@@ -75,9 +75,9 @@ Each app install is a **device** with its own bearer token. A device lists the h
    just api-token alex_phone
    ```
 
-   It prints the token once, followed by a line like `API_TOKEN_ALEX_PHONE=<sha256 hex>`. Device names use ASCII letters, digits and `_`.
+   It prints the token once, followed by a line like `API_TOKEN_ALEX_PHONE='$argon2id$v=19$...'`. The token looks like `alex_phone.<64 hex chars>`: the device name, then 256 random bits. Device names use ASCII letters, digits and `_`.
 
-2. Add that line to `.env`. Only the hash is stored; the raw token lives only on the device.
+2. Add that line to `.env`, single quotes included (the hash contains `$`). Only the Argon2id hash is stored, using OWASP's recommended parameters (19 MiB, 2 passes). The raw token lives only on the device.
 
 3. List the device in `config.yaml`:
 
@@ -91,7 +91,7 @@ Each app install is a **device** with its own bearer token. A device lists the h
          members: [alex, jordan]
    ```
 
-   Every member must be a `family.members[].id`. Startup fails on an unknown member, an empty list, a duplicate name, or a malformed hash.
+   Every member must be a `family.members[].id`. Startup fails on an unknown member, an empty list, a duplicate name, or a hash that is not an Argon2id PHC string.
 
 4. Restart Chotu, then enter the token in the app.
 
@@ -121,7 +121,8 @@ api_request method=GET route=/v1/me status=200 duration_ms=0 device=kitchen_ipad
 ```
 
 - `route` is the route pattern, not the raw path. Requests that match no route log `<unmatched>`.
-- `device` and `member_id` are `-` when the request is not authenticated or names no profile.
+- `device` is `-` when the token is missing or matches no device. A `403` still logs the device that asked.
+- `member_id` is `-` when the request names no profile or its profile was rejected.
 - `tailscale_user` is the `Tailscale-User-Login` header, or `-` if it is missing. It is logged only and does not affect authorization.
 - Tokens and request bodies are never logged.
 

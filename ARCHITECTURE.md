@@ -60,7 +60,7 @@ Health Coach scheduled sync still runs if Gemini is missing (omega-3 / triglycer
 - The operator sets each allowed direct sender ACI as `family.members[].signal_aci` before startup. Direct messages require an exact member ACI; groups require the exact `SIGNAL_GROUP_ID` regardless of sender. There is no open bootstrap or runtime identity mutation.
 - Linked personal DMs see **only that member’s** health, training plan, coach tips, trends, reflection health/persistence, and (for `/brief`) calendar/tasks/nutrition slice. Food, task, and per-member OAuth mutations are self-only; task lists also include unassigned tasks. OAuth mutation is forbidden in groups.
 - The optional `SIGNAL_GROUP_ID` household group is the family-wide surface. Proactive fan-out: morning brief, evening reflection, portfolio overview (times from `config.yaml` `schedules`; blank = off), budget 80%/100% alerts, research reports — to configured member DMs plus the configured group.
-- The app API authenticates each **device** with its own bearer token (only its SHA-256 hash is in `.env` as `API_TOKEN_<DEVICE>`). The request names a profile in `X-Chotu-Member`, which must be one of that device's `api.devices[].members`. It resolves to the same `CallerScope::LinkedDm` as a linked DM, never the household group. Revoke a token by removing its `.env` line and restarting.
+- The app API authenticates each **device** with its own bearer token (only its salted Argon2id hash is in `.env` as `API_TOKEN_<DEVICE>`). The request names a profile in `X-Chotu-Member`, which must be one of that device's `api.devices[].members`. It resolves to the same `CallerScope::LinkedDm` as a linked DM, never the household group. Revoke a token by removing its `.env` line and restarting.
 - The receive loop drains notifications into per-conversation queues. One worker serializes each conversation (preserving reflection/task state order), while a global semaphore bounds concurrent handlers so one slow model/API call cannot block other chats.
 
 ---
@@ -90,6 +90,8 @@ Health Coach scheduled sync still runs if Gemini is missing (omega-3 / triglycer
   1. Flagged explicitly in an architectural review.
   2. Wrapped in a completely safe, idiomatic Rust API boundary in `chotu-common`.
   3. Documented with a `// SAFETY:` comment explaining why the invariants cannot be violated.
+- **Secrets never reach logs or git**: never write a token, API key, OAuth refresh token, password, or token hash to logs, error messages, panics, or `Debug` output. Never commit one in code, tests, fixtures, docs, commit messages, or PR text; use obviously fake values in examples and tests. Log the env key name or the device/member id instead. Real secrets live only in the gitignored `.env`.
+- **Hash stored credentials with Argon2id**: store only a salted Argon2id hash (the `argon2` crate's OWASP defaults), never the raw value or a fast hash like SHA-256. Verify it on `spawn_blocking`, since it is deliberately CPU- and memory-hard.
 
 ---
 

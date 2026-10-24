@@ -12,7 +12,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Json, Router};
 use chotu_common::api_token::{
-    api_token_env_key, hash_api_token, parse_token_hash, token_hashes_match, TokenHash,
+    api_token_env_key, hash_api_token, mint_api_token, parse_token_hash, token_device,
+    verify_api_token, TokenHash,
 };
 use chotu_common::{ApiConfig, AppConfig, FamilyMember};
 use serde::Serialize;
@@ -103,7 +104,7 @@ struct Profile {
     name: String,
 }
 
-#[derive(Debug)]
+/// No `Debug`: it holds a token hash.
 struct Device {
     name: String,
     token_hash: TokenHash,
@@ -111,9 +112,12 @@ struct Device {
 }
 
 /// Configured devices with their token hashes. Built once at startup.
-#[derive(Debug)]
+/// No `Debug`: it holds token hashes.
 struct DeviceAuth {
     devices: Vec<Arc<Device>>,
+    /// Verified against when a token names no known device, so an unknown
+    /// device costs the same Argon2 work as a wrong secret.
+    decoy: TokenHash,
 }
 
 impl DeviceAuth {
@@ -137,11 +141,18 @@ impl DeviceAuth {
             };
             devices.push((device.name.clone(), hash, device.members.clone()));
         }
-        Ok(Self::new(devices, members))
+        Self::new(devices, members)
     }
 
     /// `devices` are `(name, token hash, member ids)`, already validated against `members`.
-    fn new(devices: Vec<(String, TokenHash, Vec<String>)>, members: &[FamilyMember]) -> Self {
+    fn new(
+        devices: Vec<(String, TokenHash, Vec<String>)>,
+        members: &[FamilyMember],
+    ) -> Result<Self> {
+        let decoy = mint_api_token("decoy")
+            .and_then(|token| hash_api_token(&token))
+            .and_then(|hash| parse_token_hash(&hash))
+            .map_err(anyhow::Error::msg)?;
         let devices = devices
             .into_iter()
             .map(|(name, token_hash, member_ids)| {
@@ -160,12 +171,12 @@ impl DeviceAuth {
                 })
             })
             .collect();
-        Self { devices }
+        Ok(Self { devices, decoy })
     }
 
-    /// Bearer token → device (else 401); `X-Chotu-Member`, when sent, must be
-    /// one of that device's profiles (else 403).
-    fn authenticate(&self, headers: &HeaderMap) -> Result<Session, ApiError> {
+    /// Bearer token → device; 401 when missing or not matching its device's hash.
+    /// Argon2 verification runs on the blocking pool.
+    async fn device(&self, headers: &HeaderMap) -> Result<Arc<Device>, ApiError> {
         let token = headers
             .get(AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -174,35 +185,42 @@ impl DeviceAuth {
                 scheme.eq_ignore_ascii_case("bearer").then(|| token.trim())
             })
             .filter(|token| !token.is_empty())
-            .ok_or(ApiError::Unauthorized)?;
-        let presented = hash_api_token(token);
-        let device = self
-            .devices
-            .iter()
-            .find(|device| token_hashes_match(&device.token_hash, &presented))
-            .ok_or(ApiError::Unauthorized)?;
+            .ok_or(ApiError::Unauthorized)?
+            .to_string();
+        let device = token_device(&token).and_then(|name| {
+            self.devices
+                .iter()
+                .find(|device| device.name.eq_ignore_ascii_case(name))
+                .cloned()
+        });
+        let hash = device
+            .as_ref()
+            .map_or_else(|| self.decoy.clone(), |device| device.token_hash.clone());
+        let verified = tokio::task::spawn_blocking(move || verify_api_token(&token, &hash))
+            .await
+            .unwrap_or(false);
+        device.filter(|_| verified).ok_or(ApiError::Unauthorized)
+    }
+}
 
-        let member_id = match headers.get(CHOTU_MEMBER) {
-            None => None,
-            Some(value) => {
-                let requested = value.to_str().map_err(|_| ApiError::Forbidden)?.trim();
-                let profile = device
-                    .profiles
-                    .iter()
-                    .find(|p| p.id.eq_ignore_ascii_case(requested))
-                    .ok_or(ApiError::Forbidden)?;
-                Some(profile.id.clone())
-            }
+impl Device {
+    /// `X-Chotu-Member`, when sent, must be one of this device's profiles (else 403).
+    /// Returns the canonical member id.
+    fn member(&self, headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+        let Some(value) = headers.get(CHOTU_MEMBER) else {
+            return Ok(None);
         };
-        Ok(Session {
-            device: Arc::clone(device),
-            member_id,
-        })
+        let requested = value.to_str().map_err(|_| ApiError::Forbidden)?.trim();
+        self.profiles
+            .iter()
+            .find(|p| p.id.eq_ignore_ascii_case(requested))
+            .map(|p| Some(p.id.clone()))
+            .ok_or(ApiError::Forbidden)
     }
 }
 
 /// An authenticated device, plus the profile it chose for this request (if any).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct Session {
     device: Arc<Device>,
     member_id: Option<String>,
@@ -268,17 +286,25 @@ async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let session = match auth.authenticate(request.headers()) {
-        Ok(session) => session,
+    let device = match auth.device(request.headers()).await {
+        Ok(device) => device,
         Err(err) => return err.into_response(),
     };
-    let logged = LoggedCaller {
-        device: session.device.name.clone(),
-        member_id: session.member_id.clone(),
+    // The device is known from here on, so even a 403 logs which device asked.
+    let (member_id, mut response) = match device.member(request.headers()) {
+        Ok(member_id) => {
+            request.extensions_mut().insert(Session {
+                device: Arc::clone(&device),
+                member_id: member_id.clone(),
+            });
+            (member_id, next.run(request).await)
+        }
+        Err(err) => (None, err.into_response()),
     };
-    request.extensions_mut().insert(session);
-    let mut response = next.run(request).await;
-    response.extensions_mut().insert(logged);
+    response.extensions_mut().insert(LoggedCaller {
+        device: device.name.clone(),
+        member_id,
+    });
     response
 }
 
@@ -355,8 +381,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    const ALEX_PHONE: &str = "alex-phone-token";
-    const KITCHEN_IPAD: &str = "kitchen-ipad-token";
+    const ALEX_PHONE: &str = "alex_phone.alex-secret";
+    const KITCHEN_IPAD: &str = "kitchen_ipad.kitchen-secret";
 
     fn member(id: &str, name: &str) -> FamilyMember {
         let mut member = AppConfig::default().family.members.remove(0);
@@ -367,21 +393,25 @@ mod tests {
 
     fn test_auth() -> Arc<DeviceAuth> {
         let members = [member("alex", "Alex"), member("jordan", "Jordan")];
-        Arc::new(DeviceAuth::new(
-            vec![
-                (
-                    "alex_phone".to_string(),
-                    hash_api_token(ALEX_PHONE),
-                    vec!["alex".to_string()],
-                ),
-                (
-                    "kitchen_ipad".to_string(),
-                    hash_api_token(KITCHEN_IPAD),
-                    vec!["alex".to_string(), "jordan".to_string()],
-                ),
-            ],
-            &members,
-        ))
+        let hash = |token: &str| parse_token_hash(&hash_api_token(token).unwrap()).unwrap();
+        Arc::new(
+            DeviceAuth::new(
+                vec![
+                    (
+                        "alex_phone".to_string(),
+                        hash(ALEX_PHONE),
+                        vec!["alex".to_string()],
+                    ),
+                    (
+                        "kitchen_ipad".to_string(),
+                        hash(KITCHEN_IPAD),
+                        vec!["alex".to_string(), "jordan".to_string()],
+                    ),
+                ],
+                &members,
+            )
+            .unwrap(),
+        )
     }
 
     /// Stand-in for a member-data route: echoes the scope the handler received.
@@ -470,7 +500,14 @@ mod tests {
         let (server, base) = serve_test_app().await;
         let client = reqwest::Client::new();
 
-        for token in [None, Some(""), Some("wrong-token")] {
+        for token in [
+            None,
+            Some(""),
+            Some("wrong-token"),
+            Some("alex_phone.wrong-secret"),
+            Some("ghost_device.alex-secret"),
+            Some(KITCHEN_IPAD.replace("kitchen_ipad", "alex_phone").as_str()),
+        ] {
             let response = request(
                 &client,
                 reqwest::Method::GET,

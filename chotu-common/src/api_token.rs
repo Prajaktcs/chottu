@@ -1,15 +1,21 @@
 //! Device bearer tokens for the app API.
 //!
-//! Each device gets one random 256-bit token. Only its SHA-256 hash is stored,
-//! as `API_TOKEN_<DEVICE>` in `.env`; the raw token is shown once by
+//! Each device gets one token, `<device>.<64 hex chars>` (256 random bits).
+//! Only its Argon2id hash (a PHC string, OWASP-recommended parameters) is
+//! stored, as `API_TOKEN_<DEVICE>` in `.env`; the raw token is shown once by
 //! `just api-token <device>` and lives only on the device.
 
-use sha2::{Digest, Sha256};
+use argon2::password_hash::phc::PasswordHash;
+use argon2::password_hash::{PasswordHasher, PasswordVerifier};
+use argon2::Argon2;
 
-/// SHA-256 of a raw token.
-pub type TokenHash = [u8; 32];
+/// A parsed Argon2id PHC string.
+pub type TokenHash = PasswordHash;
 
-const TOKEN_BYTES: usize = 32;
+const SECRET_BYTES: usize = 32;
+
+/// Separates the device name from the secret. Never valid in a device name.
+const SEPARATOR: char = '.';
 
 /// Env key holding a device's token hash, e.g. device "praj_phone" → "API_TOKEN_PRAJ_PHONE".
 pub fn api_token_env_key(device: &str) -> String {
@@ -31,43 +37,47 @@ pub fn validate_device_name(device: &str) -> Result<(), String> {
     }
 }
 
-/// A new random token, hex-encoded (64 characters).
-pub fn mint_api_token() -> Result<String, getrandom::Error> {
-    let mut bytes = [0u8; TOKEN_BYTES];
-    getrandom::fill(&mut bytes)?;
-    Ok(to_hex(&bytes))
+/// A new random token for `device`: `<device>.<64 hex chars>`.
+pub fn mint_api_token(device: &str) -> Result<String, String> {
+    validate_device_name(device)?;
+    let mut bytes = [0u8; SECRET_BYTES];
+    getrandom::fill(&mut bytes).map_err(|e| format!("failed to read OS randomness: {e}"))?;
+    let secret: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("{device}{SEPARATOR}{secret}"))
 }
 
-pub fn hash_api_token(token: &str) -> TokenHash {
-    Sha256::digest(token.as_bytes()).into()
+/// The device a presented token claims to be. Says nothing about whether it is valid.
+pub fn token_device(token: &str) -> Option<&str> {
+    token
+        .split_once(SEPARATOR)
+        .map(|(device, _)| device)
+        .filter(|device| validate_device_name(device).is_ok())
 }
 
-pub fn token_hash_hex(hash: &TokenHash) -> String {
-    to_hex(hash)
+/// Argon2id hash of a token, as the PHC string stored in `.env`. Salted at random.
+pub fn hash_api_token(token: &str) -> Result<String, String> {
+    let hash: PasswordHash = Argon2::default()
+        .hash_password(token.as_bytes())
+        .map_err(|e| format!("failed to hash token: {e}"))?;
+    Ok(hash.to_string())
 }
 
-/// Parses the 64-hex-character value stored in `API_TOKEN_<DEVICE>`.
-pub fn parse_token_hash(hex: &str) -> Result<TokenHash, String> {
-    let hex = hex.trim();
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("expected a 64-character hex SHA-256 hash".to_string());
-    }
-    let mut hash = [0u8; 32];
-    for (i, byte) in hash.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
-            .map_err(|_| "expected a 64-character hex SHA-256 hash".to_string())?;
+/// Parses the PHC string stored in `API_TOKEN_<DEVICE>`. Only Argon2id is accepted.
+pub fn parse_token_hash(stored: &str) -> Result<TokenHash, String> {
+    let hash = PasswordHash::new(stored.trim())
+        .map_err(|_| "expected an Argon2id PHC string from `just api-token`".to_string())?;
+    if hash.algorithm.as_str() != "argon2id" || hash.hash.is_none() {
+        return Err("expected an Argon2id PHC string from `just api-token`".to_string());
     }
     Ok(hash)
 }
 
-/// Compares two hashes without an early exit, so timing does not reveal how many bytes match.
-pub fn token_hashes_match(a: &TokenHash, b: &TokenHash) -> bool {
-    let diff = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
-    std::hint::black_box(diff) == 0
-}
-
-fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+/// True when `token` matches `hash`. Uses the parameters stored in the hash and
+/// compares in constant time. CPU- and memory-hard: call off the async executor.
+pub fn verify_api_token(token: &str, hash: &TokenHash) -> bool {
+    Argon2::default()
+        .verify_password(token.as_bytes(), hash)
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -75,20 +85,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minted_token_round_trips_through_stored_hash() {
-        let token = mint_api_token().unwrap();
-        assert_eq!(token.len(), 64);
-        assert_ne!(token, mint_api_token().unwrap());
+    fn minted_token_verifies_against_its_stored_hash_only() {
+        let token = mint_api_token("alex_phone").unwrap();
+        assert!(token.starts_with("alex_phone."));
+        assert_eq!(token.len(), "alex_phone.".len() + 64);
+        assert_ne!(token, mint_api_token("alex_phone").unwrap());
+        assert_eq!(token_device(&token), Some("alex_phone"));
 
-        let stored = token_hash_hex(&hash_api_token(&token));
+        let stored = hash_api_token(&token).unwrap();
+        assert!(stored.starts_with("$argon2id$v=19$"), "{stored}");
+        assert_ne!(stored, hash_api_token(&token).unwrap(), "salt is random");
+
         let parsed = parse_token_hash(&stored).unwrap();
-        assert!(token_hashes_match(&parsed, &hash_api_token(&token)));
-        assert!(!token_hashes_match(&parsed, &hash_api_token("other")));
+        assert!(verify_api_token(&token, &parsed));
+        assert!(!verify_api_token("alex_phone.other", &parsed));
     }
 
     #[test]
-    fn rejects_malformed_stored_hash() {
-        for bad in ["", "abc", &"g".repeat(64), &"a".repeat(63), &"é".repeat(32)] {
+    fn rejects_stored_values_that_are_not_argon2id() {
+        let sha256_hex = "a".repeat(64);
+        let argon2i =
+            "$argon2i$v=19$m=16,t=2,p=1$c29tZXNhbHQ$9sTbSlTio3Biev89thdrlKKiCaYsjjYVJxGAL3swxpQ";
+        for bad in ["", "abc", sha256_hex.as_str(), argon2i] {
             assert!(parse_token_hash(bad).is_err(), "{bad:?}");
         }
     }
@@ -99,6 +117,9 @@ mod tests {
         assert_eq!(api_token_env_key("praj_phone"), "API_TOKEN_PRAJ_PHONE");
         for bad in ["", "praj-phone", "praj phone", "ipad.1"] {
             assert!(validate_device_name(bad).is_err(), "{bad:?}");
+            assert!(mint_api_token(bad).is_err(), "{bad:?}");
         }
+        assert_eq!(token_device("no-separator"), None);
+        assert_eq!(token_device("bad-name.secret"), None);
     }
 }
