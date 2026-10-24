@@ -20,6 +20,7 @@ use chotu_common::api_token::{
 use chotu_common::{ApiConfig, AppConfig, FamilyMember};
 use serde::Serialize;
 use sqlx::SqlitePool;
+use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -34,6 +35,16 @@ const TAILSCALE_USER_LOGIN: &str = "Tailscale-User-Login";
 
 /// The profile the app's picker chose, as a `family.members[].id`.
 const CHOTU_MEMBER: &str = "X-Chotu-Member";
+
+/// The app's own version, e.g. `1.4.2`, sent on every request.
+const CHOTU_APP_VERSION: &str = "X-Chotu-App-Version";
+
+/// Oldest app version this server supports. Bump it only when the server drops
+/// or changes something an older app relies on (see `docs/app-api.md`).
+const MIN_APP_VERSION: AppVersion = AppVersion(0, 1, 0);
+
+/// Crate version plus the git commit it was built from, e.g. `0.1.0+87dd739`.
+const SERVER_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("CHOTU_GIT_SHA"));
 
 pub struct ApiServer {
     task: JoinHandle<Result<()>>,
@@ -101,14 +112,56 @@ fn router(auth: Arc<DeviceAuth>, pool: SqlitePool) -> Router {
     with_auth(auth, pool, Router::new().route("/v1/me", get(me)))
 }
 
-/// Mounts `protected` behind device-token auth, next to the open health check.
-/// Handlers reach the database with `State<SqlitePool>`.
+/// Mounts `protected` behind the app version check and device-token auth, next
+/// to the open health check. The version check runs first, so an outdated app
+/// is told to update even before its token is checked. Handlers reach the
+/// database with `State<SqlitePool>`.
 fn with_auth(auth: Arc<DeviceAuth>, pool: SqlitePool, protected: Router<SqlitePool>) -> Router {
+    let protected = protected
+        .route_layer(middleware::from_fn_with_state(auth, authenticate))
+        .route_layer(middleware::from_fn(check_app_version));
     Router::new()
         .route("/v1/health", get(health))
-        .merge(protected.route_layer(middleware::from_fn_with_state(auth, authenticate)))
+        .merge(protected)
         .layer(middleware::from_fn(log_request))
         .with_state(pool)
+}
+
+/// A `major.minor.patch` app version. Ordered numerically, so `0.10.0 > 0.9.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct AppVersion(u32, u32, u32);
+
+impl AppVersion {
+    /// Parses `1.4.2`. A pre-release or build suffix (`1.4.2-beta`, `1.4.2+7`)
+    /// is ignored; anything else that is not three numbers is rejected.
+    fn parse(value: &str) -> Option<Self> {
+        let core = value.trim().split(['-', '+']).next()?;
+        let mut parts = core.split('.').map(|part| part.parse::<u32>().ok());
+        let version = Self(parts.next()??, parts.next()??, parts.next()??);
+        parts.next().is_none().then_some(version)
+    }
+}
+
+impl fmt::Display for AppVersion {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+/// `426` when `X-Chotu-App-Version` is below `MIN_APP_VERSION`, `400` when it
+/// is not a version. A request without the header passes: the app always
+/// sends it, and curl or scripts need not.
+async fn check_app_version(request: Request, next: Next) -> Response {
+    if let Some(value) = request.headers().get(CHOTU_APP_VERSION) {
+        match value.to_str().ok().and_then(AppVersion::parse) {
+            None => return ApiError::InvalidAppVersion.into_response(),
+            Some(version) if version < MIN_APP_VERSION => {
+                return ApiError::UpgradeRequired.into_response()
+            }
+            Some(_) => {}
+        }
+    }
+    next.run(request).await
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -267,11 +320,16 @@ pub(crate) enum ApiError {
     RequestIdReused,
     RequestInProgress,
     Internal,
+    InvalidAppVersion,
+    UpgradeRequired,
 }
 
 #[derive(Serialize)]
 struct ErrorBody {
     error: &'static str,
+    /// Set on `426`, so the app can show which version it needs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_app_version: Option<String>,
 }
 
 impl IntoResponse for ApiError {
@@ -293,8 +351,19 @@ impl IntoResponse for ApiError {
                 "a request with this Idempotency-Key is still in progress",
             ),
             Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
+            Self::InvalidAppVersion => (
+                StatusCode::BAD_REQUEST,
+                "X-Chotu-App-Version must be major.minor.patch",
+            ),
+            Self::UpgradeRequired => (StatusCode::UPGRADE_REQUIRED, "app update required"),
         };
-        let mut response = (status, Json(ErrorBody { error })).into_response();
+        let min_app_version =
+            (status == StatusCode::UPGRADE_REQUIRED).then(|| MIN_APP_VERSION.to_string());
+        let body = ErrorBody {
+            error,
+            min_app_version,
+        };
+        let mut response = (status, Json(body)).into_response();
         if status == StatusCode::UNAUTHORIZED {
             response
                 .headers_mut()
@@ -341,11 +410,19 @@ async fn authenticate(
 #[derive(Serialize)]
 struct Health {
     status: &'static str,
+    server_version: &'static str,
+    min_app_version: String,
 }
 
-/// Unauthenticated connection check for the app. Carries no household data.
+/// Unauthenticated connection and compatibility check for the app. Carries no
+/// household data, and skips the version check so an outdated app can still
+/// learn the minimum it needs.
 async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
+    Json(Health {
+        status: "ok",
+        server_version: SERVER_VERSION,
+        min_app_version: MIN_APP_VERSION.to_string(),
+    })
 }
 
 #[derive(Serialize)]
@@ -473,6 +550,7 @@ mod tests {
                     member_id,
                     now,
                     now.date_naive(),
+                    health_coach::PerformedAt::new(now),
                     Some("bench press"),
                     &[set],
                 )
@@ -612,7 +690,18 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), 200);
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body, serde_json::json!({ "status": "ok" }));
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "status": "ok",
+                "server_version": SERVER_VERSION,
+                "min_app_version": "0.1.0",
+            })
+        );
+        assert!(
+            SERVER_VERSION.starts_with(concat!(env!("CARGO_PKG_VERSION"), "+")),
+            "{SERVER_VERSION}"
+        );
 
         let missing = client
             .get(format!("http://{addr}/v1/nope"))
@@ -921,6 +1010,76 @@ mod tests {
         assert_eq!((applied.0, applied.2.as_str()), (200, "applied"));
         let replayed = write(&client, &url, ALEX_PHONE, "alex", Some("retry-me")).await;
         assert_eq!(replayed, applied);
+
+        server.shutdown().await;
+    }
+
+    #[test]
+    fn parses_and_orders_app_versions() {
+        assert_eq!(AppVersion::parse("1.4.2"), Some(AppVersion(1, 4, 2)));
+        assert_eq!(
+            AppVersion::parse(" 1.4.2-beta.1 "),
+            Some(AppVersion(1, 4, 2))
+        );
+        assert_eq!(AppVersion::parse("1.4.2+7"), Some(AppVersion(1, 4, 2)));
+        for bad in [
+            "", "1", "1.4", "1.4.2.0", "v1.4.2", "1.x.2", "1..2", "-1.0.0",
+        ] {
+            assert_eq!(AppVersion::parse(bad), None, "{bad:?}");
+        }
+        assert!(AppVersion(0, 10, 0) > AppVersion(0, 9, 9));
+        assert!(AppVersion(1, 0, 0) > AppVersion(0, 99, 99));
+        assert_eq!(MIN_APP_VERSION.to_string(), "0.1.0");
+    }
+
+    #[tokio::test]
+    async fn app_below_min_version_gets_426() {
+        let (server, base) = serve_test_app().await;
+        let client = reqwest::Client::new();
+        let me = |version: Option<&str>, token: Option<&str>| {
+            let mut builder = request(
+                &client,
+                reqwest::Method::GET,
+                format!("{base}/v1/me"),
+                token,
+                None,
+            );
+            if let Some(version) = version {
+                builder = builder.header(CHOTU_APP_VERSION, version);
+            }
+            builder.send()
+        };
+
+        // Checked before the token, so an outdated app is told to update
+        // whatever state its credentials are in.
+        for token in [Some(ALEX_PHONE), None] {
+            let response = me(Some("0.0.9"), token).await.unwrap();
+            assert_eq!(response.status(), 426, "{token:?}");
+            let body: serde_json::Value = response.json().await.unwrap();
+            assert_eq!(
+                body,
+                json!({ "error": "app update required", "min_app_version": "0.1.0" })
+            );
+        }
+
+        for version in [Some("0.1.0"), Some("0.1.1-beta"), Some("2.0.0"), None] {
+            let response = me(version, Some(ALEX_PHONE)).await.unwrap();
+            assert_eq!(response.status(), 200, "{version:?}");
+        }
+
+        for version in ["", "latest", "1.2"] {
+            let response = me(Some(version), Some(ALEX_PHONE)).await.unwrap();
+            assert_eq!(response.status(), 400, "{version:?}");
+        }
+
+        // Health stays reachable so an outdated app can read the minimum.
+        let health = client
+            .get(format!("{base}/v1/health"))
+            .header(CHOTU_APP_VERSION, "0.0.1")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(health.status(), 200);
 
         server.shutdown().await;
     }

@@ -33,10 +33,10 @@ The coordinator can serve an HTTP API for the Chotu app. It is off unless `api.b
 
    `--bg` keeps the setting across reboots. Check it with `tailscale serve status`. Remove it with `tailscale serve --https=8787 off`.
 
-4. From a phone on the tailnet, open `https://<mini>.<tailnet>.ts.net:8787/v1/health`. The response is:
+4. From a phone on the tailnet, open `https://<mini>.<tailnet>.ts.net:8787/v1/health`. The response looks like:
 
    ```json
-   {"status":"ok"}
+   {"status":"ok","server_version":"0.1.0+87dd739","min_app_version":"0.1.0"}
    ```
 
    `<mini>.<tailnet>.ts.net` is the mini's MagicDNS name. `tailscale status` shows it. The app uses this same URL as its server address.
@@ -50,7 +50,7 @@ The coordinator can serve an HTTP API for the Chotu app. It is off unless `api.b
 
 | Method | Path | Auth | Returns |
 | --- | --- | --- | --- |
-| GET | `/v1/health` | none | `{"status":"ok"}`. Holds no household data. |
+| GET | `/v1/health` | none | `status`, `server_version` and `min_app_version`. Holds no household data. |
 | GET | `/v1/me` | device token; `X-Chotu-Member` optional | The device, the chosen profile (or `null`), and the profiles it may use. |
 
 `/v1/me` for a shared iPad that picked Jordan:
@@ -64,6 +64,38 @@ The coordinator can serve an HTTP API for the Chotu app. It is off unless `api.b
 ```
 
 Without `X-Chotu-Member`, `member` is `null`. The app calls it that way to fill its profile picker.
+
+## Versions
+
+`/v1/health` reports two versions:
+
+- `server_version` is the coordinator crate version plus the git commit it was built from, such as `0.1.0+87dd739`. The commit is `unknown` when the build had no git checkout.
+- `min_app_version` is the oldest app the server supports. It is the `MIN_APP_VERSION` constant in `coordinator/src/api.rs`.
+
+The app sends its own version on every request:
+
+```text
+X-Chotu-App-Version: 1.4.2
+```
+
+The version is `major.minor.patch`, compared numerically. A pre-release or build suffix (`1.4.2-beta`, `1.4.2+7`) is ignored.
+
+| `X-Chotu-App-Version` | Result |
+| --- | --- |
+| Below `min_app_version` | `426`, with `{"error":"app update required","min_app_version":"0.1.0"}` |
+| At or above `min_app_version` | The normal response |
+| Not `major.minor.patch` | `400` |
+| Missing | The normal response. The app always sends it; curl and scripts need not. |
+
+The version is checked before the device token, so an outdated app is told to update even if its token is wrong. `/v1/health` skips the check. An outdated app can always read the minimum it needs.
+
+### API compatibility rule
+
+Sideloaded app builds lag the server, so the server must keep serving older apps:
+
+- **Within `/v1`, changes are additive only.** New endpoints and new optional fields are fine. Removing or renaming a field, changing its type or meaning, or making a request field required is a breaking change.
+- **A breaking change goes under `/v2`,** or it bumps `MIN_APP_VERSION` to the first app release that handles it. Apps below the new minimum then get `426` and an update prompt instead of a broken screen.
+- Bump `MIN_APP_VERSION` only when the server drops something an older app needs.
 
 ## Devices and profiles
 
@@ -100,10 +132,12 @@ Requests send:
 ```text
 Authorization: Bearer <token>
 X-Chotu-Member: alex
+X-Chotu-App-Version: 1.4.2
 ```
 
 | Request | Status |
 | --- | --- |
+| `X-Chotu-App-Version` below `min_app_version` | `426` |
 | No token, or a token that matches no device | `401` |
 | `X-Chotu-Member` names a member the device may not use | `403` |
 | A member-data route without `X-Chotu-Member` | `400` |
