@@ -4,6 +4,7 @@ use chotu_common::ChotuLlm;
 mod brief;
 mod reflection;
 mod scheduled_delivery;
+mod scope;
 mod signal;
 mod watchlist;
 

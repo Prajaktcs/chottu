@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 use tokio::sync::{mpsc, RwLock, Semaphore};
 
 use crate::scheduled_delivery::{self, DeliveryOutcome, ScheduledJob};
+use crate::scope::{oauth_member_target, resolve_task_target, CallerScope};
 use chotu_common::{
     answer_memory_query, assign_food_tags, build_calendar_client, clear_budget_override,
     complete_all_open_tasks, compose_calendar_agenda, compute_budget_progress,
@@ -133,30 +134,6 @@ fn parse_command(input: &str) -> Option<Command> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CallerScope {
-    LinkedDm { member_id: String },
-    HouseholdGroup,
-}
-
-impl CallerScope {
-    fn member_id(&self) -> Option<&str> {
-        match self {
-            Self::LinkedDm { member_id } => Some(member_id),
-            Self::HouseholdGroup => None,
-        }
-    }
-
-    fn allows_task_assignee(&self, assigned_to: Option<&str>) -> bool {
-        match self {
-            Self::LinkedDm { member_id } => {
-                assigned_to.is_none_or(|assignee| member_id.eq_ignore_ascii_case(assignee))
-            }
-            Self::HouseholdGroup => true,
-        }
-    }
-}
-
 fn caller_scope(config: &AppConfig, chat_id: &ChatId, sender_aci: &str) -> Option<CallerScope> {
     if !is_signal_conversation_allowed(config, sender_aci, chat_id.group_id()) {
         return None;
@@ -171,50 +148,12 @@ fn caller_scope(config: &AppConfig, chat_id: &ChatId, sender_aci: &str) -> Optio
     }
 }
 
-fn oauth_member_target(scope: &CallerScope, requested: &str) -> Result<String, &'static str> {
-    match scope {
-        CallerScope::HouseholdGroup => {
-            Err("OAuth setup is only available in an authorized direct conversation.")
-        }
-        CallerScope::LinkedDm { member_id }
-            if requested.trim().is_empty() || member_id.eq_ignore_ascii_case(requested.trim()) =>
-        {
-            Ok(member_id.clone())
-        }
-        CallerScope::LinkedDm { .. } => {
-            Err("OAuth setup in a direct conversation can only target your own member account.")
-        }
-    }
-}
-
 fn private_health_member_id<'a>(config: &'a AppConfig, chat_id: &ChatId) -> Option<&'a str> {
     match chat_id {
         SignalRecipient::Direct { aci } => {
             member_for_signal_aci(config, aci).map(|m| m.id.as_str())
         }
         SignalRecipient::Group { .. } => None,
-    }
-}
-
-fn resolve_task_target(
-    scope: &CallerScope,
-    requested: Option<String>,
-    config: &AppConfig,
-) -> Result<Option<String>, &'static str> {
-    match scope {
-        CallerScope::LinkedDm { member_id } => match requested {
-            Some(target) if !scope.allows_task_assignee(Some(&target)) => {
-                Err("Tasks in a direct conversation can only be added or assigned to you.")
-            }
-            _ => Ok(Some(member_id.clone())),
-        },
-        CallerScope::HouseholdGroup => Ok(requested.or_else(|| {
-            config
-                .family
-                .members
-                .first()
-                .map(|member| member.id.clone())
-        })),
     }
 }
 
@@ -7089,38 +7028,6 @@ mod tests {
     }
 
     #[test]
-    fn linked_dm_task_targets_are_self_only() {
-        let mut config = AppConfig::default();
-        config.family.members[0].signal_aci = Some("aci-alex".to_string());
-        let dm = CallerScope::LinkedDm {
-            member_id: "alex".to_string(),
-        };
-        let group = CallerScope::HouseholdGroup;
-
-        assert_eq!(
-            resolve_task_target(&dm, None, &config).unwrap().as_deref(),
-            Some("alex")
-        );
-        assert_eq!(
-            resolve_task_target(&dm, Some("ALEX".to_string()), &config)
-                .unwrap()
-                .as_deref(),
-            Some("alex")
-        );
-        assert!(resolve_task_target(&dm, Some("jordan".to_string()), &config).is_err());
-        assert!(dm.allows_task_assignee(None));
-        assert!(dm.allows_task_assignee(Some("alex")));
-        assert!(!dm.allows_task_assignee(Some("jordan")));
-        assert!(group.allows_task_assignee(Some("jordan")));
-        assert_eq!(
-            resolve_task_target(&group, Some("jordan".to_string()), &config)
-                .unwrap()
-                .as_deref(),
-            Some("jordan")
-        );
-    }
-
-    #[test]
     fn due_reminders_prefer_assignee_dm_and_fallback_to_group() {
         let mut config = AppConfig::default();
         config.family.members[0].signal_aci = Some("aci-alex".to_string());
@@ -7203,17 +7110,6 @@ mod tests {
             vec!["routable"]
         );
         assert_eq!(pending_unroutable.0, 20);
-    }
-
-    #[test]
-    fn oauth_target_policy_is_dm_self_only() {
-        let dm = CallerScope::LinkedDm {
-            member_id: "alex".to_string(),
-        };
-        assert_eq!(oauth_member_target(&dm, "").unwrap(), "alex");
-        assert_eq!(oauth_member_target(&dm, "ALEX").unwrap(), "alex");
-        assert!(oauth_member_target(&dm, "jordan").is_err());
-        assert!(oauth_member_target(&CallerScope::HouseholdGroup, "alex").is_err());
     }
 
     #[test]
