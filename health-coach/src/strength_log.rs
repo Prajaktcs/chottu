@@ -6,7 +6,7 @@
 //! normal message handlers.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, FixedOffset, NaiveDate, TimeZone, Utc};
 use sqlx::SqlitePool;
 use std::collections::{BTreeSet, HashMap};
 
@@ -17,6 +17,13 @@ use crate::fitness_plan::{
 
 /// Idle time after which an open workout is closed automatically.
 const SESSION_IDLE_HOURS: i64 = 3;
+/// A set within this many minutes of server time is live: it opens or continues
+/// the current workout exactly like a Signal message.
+const LIVE_SET_MINUTES: i64 = 5;
+/// Client timestamps may run this far ahead of the server (clock skew).
+const MAX_PERFORMED_AT_FUTURE_MINUTES: i64 = 5;
+/// Queued sets older than this are refused rather than rewriting old history.
+const MAX_PERFORMED_AT_AGE_DAYS: i64 = 7;
 const MAX_REPS: u32 = 100;
 const MAX_WEIGHT_LB: f64 = 1500.0;
 const MAX_SETS_PER_TOKEN: u32 = 10;
@@ -586,6 +593,58 @@ pub enum WorkoutError {
 
 type WorkoutResult<T> = std::result::Result<T, WorkoutError>;
 
+/// A client-supplied set timestamp that cannot be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PerformedAtError {
+    #[error("performed_at must be an RFC 3339 timestamp with an offset")]
+    Invalid,
+    #[error("performed_at is more than {MAX_PERFORMED_AT_FUTURE_MINUTES} minutes in the future")]
+    InFuture,
+    #[error("performed_at is more than {MAX_PERFORMED_AT_AGE_DAYS} days old")]
+    TooOld,
+}
+
+/// When a set was done: the instant, and its civil day in the household timezone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PerformedAt {
+    pub at: DateTime<Utc>,
+    pub date: NaiveDate,
+}
+
+impl PerformedAt {
+    /// `at` on its civil day in `at`'s own timezone (pass a household-tz time).
+    pub fn new<Z: TimeZone>(at: DateTime<Z>) -> Self {
+        Self {
+            date: at.date_naive(),
+            at: at.with_timezone(&Utc),
+        }
+    }
+}
+
+/// Parse an RFC 3339 timestamp; the offset (`Z` or `±hh:mm`) is required.
+pub fn parse_performed_at(raw: &str) -> Result<DateTime<FixedOffset>, PerformedAtError> {
+    DateTime::parse_from_rfc3339(raw.trim()).map_err(|_| PerformedAtError::Invalid)
+}
+
+/// A client's `performed_at` checked against the server clock `now` (household tz).
+/// `None` means server time. Refuses more than 5 minutes ahead or 7 days old.
+pub fn resolve_performed_at<Z: TimeZone>(
+    performed_at: Option<DateTime<FixedOffset>>,
+    now: DateTime<Z>,
+) -> Result<PerformedAt, PerformedAtError> {
+    let Some(at) = performed_at else {
+        return Ok(PerformedAt::new(now));
+    };
+    let at = at.with_timezone(&now.timezone());
+    if at.clone() - now.clone() > Duration::minutes(MAX_PERFORMED_AT_FUTURE_MINUTES) {
+        return Err(PerformedAtError::InFuture);
+    }
+    if now - at.clone() > Duration::days(MAX_PERFORMED_AT_AGE_DAYS) {
+        return Err(PerformedAtError::TooOld);
+    }
+    Ok(PerformedAt::new(at))
+}
+
 fn db(action: &'static str) -> impl FnOnce(sqlx::Error) -> WorkoutError {
     move |source| WorkoutError::Database { action, source }
 }
@@ -788,12 +847,18 @@ pub async fn select_exercise(
 }
 
 /// Log sets to `exercise` (a planned lift by name, or any lift), else the current
-/// one, starting a workout if needed. Moves on once a planned lift's sets are done.
+/// one. Moves on once a planned lift's sets are done.
+///
+/// `now`/`today` are the server clock; `performed` is when the sets were done.
+/// A live set (within 5 minutes of `now`, today) opens or continues the current
+/// workout. An earlier one joins the latest workout on its own day, even a closed
+/// one, or a new closed workout; it never moves the live workout's clock back.
 pub async fn log_sets(
     pool: &SqlitePool,
     member_id: &str,
     now: DateTime<Utc>,
     today: NaiveDate,
+    performed: PerformedAt,
     exercise: Option<&str>,
     inputs: &[SetInput],
 ) -> WorkoutResult<SetsLogged> {
@@ -806,8 +871,14 @@ pub async fn log_sets(
     for input in inputs {
         input.validate()?;
     }
-    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
-    let session = open_or_start(pool, member_id, now, today, &exercises).await?;
+    let date = performed.date;
+    let live = date == today && (now - performed.at).abs() <= Duration::minutes(LIVE_SET_MINUTES);
+    let (day, exercises) = todays_plan_exercises(pool, member_id, date).await?;
+    let session = if live {
+        open_or_start(pool, member_id, now, today, &exercises).await?
+    } else {
+        session_for_day(pool, member_id, now, today, performed, &exercises).await?
+    };
     let (name, plan_index) = match exercise {
         Some(query) => match match_plan_exercise(&exercises, query) {
             Some(i) => (exercises[i].name.clone(), Some(i)),
@@ -828,7 +899,7 @@ pub async fn log_sets(
     // Resolve `x8` against the previous set; fall back to the last session's load.
     let mut previous = match sets.iter().rev().find(|s| s.exercise_key == key) {
         Some(set) => Some(set.weight_lb),
-        None => exercise_history(pool, member_id, &key, today, 1)
+        None => exercise_history(pool, member_id, &key, date, 1)
             .await?
             .first()
             .map(|sets| working_sets(sets).0),
@@ -849,6 +920,8 @@ pub async fn log_sets(
         ));
     }
 
+    // Same UTC text format as the column default, so old and new rows sort together.
+    let created_at = performed.at.format("%Y-%m-%d %H:%M:%S").to_string();
     let mut logged = Vec::with_capacity(records.len());
     let mut tx = pool.begin().await.map_err(db("Failed to begin set log"))?;
     for (weight, reps) in records {
@@ -861,17 +934,19 @@ pub async fn log_sets(
         };
         sqlx::query(
             "INSERT INTO fitness_set_log \
-             (id, session_id, family_member_id, date, exercise_key, exercise_name, weight_lb, reps) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, session_id, family_member_id, date, exercise_key, exercise_name, weight_lb, reps, \
+              created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&set.id)
         .bind(&session.id)
         .bind(member_id)
-        .bind(today.format("%Y-%m-%d").to_string())
+        .bind(date.format("%Y-%m-%d").to_string())
         .bind(&set.exercise_key)
         .bind(&set.exercise_name)
         .bind(set.weight_lb)
         .bind(set.reps as i64)
+        .bind(&created_at)
         .execute(&mut *tx)
         .await
         .map_err(db("Failed to save set"))?;
@@ -898,17 +973,21 @@ pub async fn log_sets(
         }
         _ => (name.clone(), Advance::Stay),
     };
-    touch_session(pool, &session.id, now, Some(&current)).await?;
-    let state = build_state(
-        pool,
-        member_id,
-        today,
-        session.id,
-        Some(current),
-        day,
-        exercises,
-    )
-    .await?;
+    let (current, advance) = if live {
+        touch_session(pool, &session.id, now, Some(&current)).await?;
+        (Some(current), advance)
+    } else {
+        // A set older than the workout's last activity keeps the newer selection.
+        let kept =
+            touch_session_no_earlier(pool, &session.id, performed.at, Some(&current)).await?;
+        let advance = if kept.as_deref() == Some(current.as_str()) {
+            advance
+        } else {
+            Advance::Stay
+        };
+        (kept, advance)
+    };
+    let state = build_state(pool, member_id, date, session.id, current, day, exercises).await?;
     Ok(SetsLogged {
         state,
         exercise: name,
@@ -1056,6 +1135,72 @@ async fn open_or_start(
         .ok_or(WorkoutError::NoOpenWorkout)
 }
 
+/// The latest workout on `performed.date` (open or closed), else a new closed one.
+/// A stale open workout is closed first, as for live logging. Find-or-create runs
+/// under SQLite's write lock so concurrent uploads for one day share a workout.
+async fn session_for_day(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+    performed: PerformedAt,
+    exercises: &[PlanExercise],
+) -> WorkoutResult<WorkoutSession> {
+    active_session(pool, member_id, now, today).await?;
+    let date = performed.date.format("%Y-%m-%d").to_string();
+    // IMMEDIATE takes the write lock before the lookup; a deferred read-then-write
+    // transaction could still let two callers both miss and insert.
+    let mut tx = pool
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(db("Failed to begin workout lookup"))?;
+    if let Some(session) = latest_session_on(&mut *tx, member_id, &date).await? {
+        tx.commit()
+            .await
+            .map_err(db("Failed to commit workout lookup"))?;
+        return Ok(session);
+    }
+    let at = performed.at.to_rfc3339();
+    sqlx::query(
+        "INSERT INTO fitness_workout_sessions \
+         (id, family_member_id, date, current_exercise, started_at, last_activity_at, closed_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(member_id)
+    .bind(&date)
+    .bind(exercises.first().map(|e| e.name.as_str()))
+    .bind(&at)
+    .bind(&at)
+    .bind(&at)
+    .execute(&mut *tx)
+    .await
+    .map_err(db("Failed to record past workout"))?;
+    let session = latest_session_on(&mut *tx, member_id, &date)
+        .await?
+        .ok_or(WorkoutError::NoOpenWorkout)?;
+    tx.commit()
+        .await
+        .map_err(db("Failed to commit past workout"))?;
+    Ok(session)
+}
+
+async fn latest_session_on(
+    executor: impl sqlx::SqliteExecutor<'_>,
+    member_id: &str,
+    date: &str,
+) -> WorkoutResult<Option<WorkoutSession>> {
+    sqlx::query_as::<_, WorkoutSession>(
+        "SELECT id, date, current_exercise, last_activity_at FROM fitness_workout_sessions \
+         WHERE family_member_id = ? AND date = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    )
+    .bind(member_id)
+    .bind(date)
+    .fetch_optional(executor)
+    .await
+    .map_err(db("Failed to load workout for day"))
+}
+
 async fn close_session(
     pool: &SqlitePool,
     session_id: &str,
@@ -1086,6 +1231,31 @@ async fn touch_session(
     .await
     .map_err(db("Failed to update workout"))?;
     Ok(())
+}
+
+/// Like `touch_session`, but only activity at or after `last_activity_at` moves the
+/// clock or the selected lift, so a backdated set never makes a live workout go
+/// idle sooner or replaces a newer selection. Returns the selected lift after.
+async fn touch_session_no_earlier(
+    pool: &SqlitePool,
+    session_id: &str,
+    at: DateTime<Utc>,
+    current_exercise: Option<&str>,
+) -> WorkoutResult<Option<String>> {
+    // SET expressions see the row's old values, so both compare to the old clock.
+    let (current,): (Option<String>,) = sqlx::query_as(
+        "UPDATE fitness_workout_sessions \
+         SET current_exercise = CASE WHEN ?1 >= last_activity_at THEN ?2 ELSE current_exercise END, \
+             last_activity_at = MAX(last_activity_at, ?1) \
+         WHERE id = ?3 RETURNING current_exercise",
+    )
+    .bind(at.to_rfc3339())
+    .bind(current_exercise)
+    .bind(session_id)
+    .fetch_one(pool)
+    .await
+    .map_err(db("Failed to update workout"))?;
+    Ok(current)
 }
 
 async fn session_sets(pool: &SqlitePool, session_id: &str) -> WorkoutResult<Vec<LoggedSet>> {
@@ -1338,7 +1508,11 @@ async fn apply_input(
             Ok(format!("Now: {}", exercise_line(&state, target)))
         }
         WorkoutInput::Sets { exercise, sets } => {
-            match log_sets(pool, member_id, now, today, exercise.as_deref(), &sets).await {
+            let performed = PerformedAt {
+                at: now,
+                date: today,
+            };
+            match log_sets(pool, member_id, now, today, performed, exercise.as_deref(), &sets).await {
                 Ok(logged) => Ok(logged_text(&logged)),
                 Err(WorkoutError::NoCurrentExercise) => {
                     Ok("Which lift? Send it with the set, e.g. `bench 135x8`.".into())
@@ -1475,6 +1649,13 @@ mod tests {
         SetInput { load, reps, count }
     }
 
+    /// A Signal-style set: performed at server time.
+    fn live(now: DateTime<Utc>, today: NaiveDate) -> PerformedAt {
+        PerformedAt {
+            at: now,
+            date: today,
+        }
+    }
     #[test]
     fn set_tokens_parse() {
         assert_eq!(
@@ -1921,6 +2102,7 @@ mod tests {
             "alex",
             at(17, 2),
             monday,
+            live(at(17, 2), monday),
             None,
             &[set(Load::Weight(180.0), 12, 2)],
         )
@@ -1950,6 +2132,7 @@ mod tests {
             "alex",
             at(17, 4),
             monday,
+            live(at(17, 4), monday),
             None,
             &[set(Load::Same, 10, 1)],
         )
@@ -2001,6 +2184,7 @@ mod tests {
             "sam",
             at(9, 0),
             monday,
+            live(at(9, 0), monday),
             Some("bench"),
             &[set(Load::Weight(95.0), 8, 1)],
         )
@@ -2034,7 +2218,16 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    log_sets(&pool, "alex", at(9, 0), monday, exercise, &sets).await,
+                    log_sets(
+                        &pool,
+                        "alex",
+                        at(9, 0),
+                        monday,
+                        live(at(9, 0), monday),
+                        exercise,
+                        &sets
+                    )
+                    .await,
                     Err(WorkoutError::InvalidSet(_))
                 ),
                 "{exercise:?} {sets:?}"
@@ -2053,6 +2246,7 @@ mod tests {
                 "alex",
                 at(9, 1),
                 monday,
+                live(at(9, 1), monday),
                 Some("curl"),
                 &[set(Load::Same, 8, 1)]
             )
@@ -2069,5 +2263,272 @@ mod tests {
             .await
             .unwrap();
         assert!(reply.contains("No weight yet for Leg press"), "{reply}");
+    }
+
+    // ─── App timestamps (performed_at) ──────────────────────────────────────
+
+    /// Household clock for app-timestamp tests (EDT, UTC-4, in October).
+    fn toronto(day: u32, hour: u32, minute: u32) -> DateTime<chrono_tz::Tz> {
+        chrono_tz::America::Toronto
+            .with_ymd_and_hms(2026, 10, day, hour, minute, 0)
+            .unwrap()
+    }
+
+    /// Log one app set: `performed_at` resolved against household `now`.
+    async fn app_set(
+        pool: &SqlitePool,
+        now: DateTime<chrono_tz::Tz>,
+        performed_at: &str,
+    ) -> SetsLogged {
+        let performed =
+            resolve_performed_at(Some(parse_performed_at(performed_at).unwrap()), now).unwrap();
+        log_sets(
+            pool,
+            "alex",
+            now.with_timezone(&Utc),
+            now.date_naive(),
+            performed,
+            Some("leg press"),
+            &[set(Load::Weight(180.0), 10, 1)],
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn stored_set(pool: &SqlitePool, id: &str) -> (String, String, String) {
+        sqlx::query_as("SELECT date, created_at, session_id FROM fitness_set_log WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn live_set(pool: &SqlitePool, now: DateTime<chrono_tz::Tz>) -> SetsLogged {
+        let performed = resolve_performed_at(None, now).unwrap();
+        log_sets(
+            pool,
+            "alex",
+            now.with_timezone(&Utc),
+            now.date_naive(),
+            performed,
+            Some("leg press"),
+            &[set(Load::Weight(180.0), 10, 1)],
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn set_from_two_hours_ago_joins_that_days_idle_closed_workout() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let first = live_set(&pool, toronto(19, 15, 0)).await;
+        let session = first.state.session_id.clone();
+
+        // 18:30: idle > 3h, so the workout is closed.
+        let now = toronto(19, 18, 30);
+        assert_eq!(
+            workout_state(&pool, "alex", now.with_timezone(&Utc), monday)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let late = app_set(&pool, now, "2026-10-19T16:30:00-04:00").await;
+        assert_eq!(late.state.session_id, session, "joins the closed workout");
+        assert_eq!(late.first_number, 2);
+        assert_eq!(
+            stored_set(&pool, &late.logged[0].id).await,
+            (
+                "2026-10-19".into(),
+                "2026-10-19 20:30:00".into(),
+                session.clone()
+            )
+        );
+        assert_eq!(
+            workout_state(&pool, "alex", now.with_timezone(&Utc), monday)
+                .await
+                .unwrap(),
+            None,
+            "a backdated set does not reopen the workout"
+        );
+
+        // A live set still starts a new workout, as Signal always has.
+        let fresh = live_set(&pool, toronto(19, 18, 31)).await;
+        assert_ne!(fresh.state.session_id, session);
+        assert_eq!(fresh.first_number, 1);
+    }
+
+    #[tokio::test]
+    async fn backdated_sets_without_a_workout_share_a_new_closed_one() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let now = toronto(19, 20, 0);
+        let a = app_set(&pool, now, "2026-10-19T18:00:00-04:00").await;
+        let b = app_set(&pool, now, "2026-10-19T18:03:00-04:00").await;
+        assert_eq!(a.state.session_id, b.state.session_id);
+        assert_eq!(b.first_number, 2);
+        assert_eq!(
+            workout_state(&pool, "alex", now.with_timezone(&Utc), monday)
+                .await
+                .unwrap(),
+            None,
+            "the past workout is created closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn backdated_set_joins_open_workout_without_rewinding_its_clock() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let first = live_set(&pool, toronto(19, 17, 0)).await;
+        let late = app_set(&pool, toronto(19, 17, 0), "2026-10-19T16:50:00-04:00").await;
+        assert_eq!(late.state.session_id, first.state.session_id);
+        // Idle is still measured from 17:00, not 16:50.
+        let open = workout_state(
+            &pool,
+            "alex",
+            toronto(19, 19, 59).with_timezone(&Utc),
+            monday,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            open.map(|s| s.session_id),
+            Some(first.state.session_id.clone())
+        );
+    }
+
+    #[tokio::test]
+    async fn set_sent_after_midnight_lands_on_the_earlier_day() {
+        let pool = pool_with_plan().await;
+        let first = live_set(&pool, toronto(19, 23, 30)).await;
+        // 23:50 EDT on Monday, sent as UTC (already Tuesday there) at 00:10 Tuesday.
+        let late = app_set(&pool, toronto(20, 0, 10), "2026-10-20T03:50:00Z").await;
+        assert_eq!(late.state.session_id, first.state.session_id);
+        assert_eq!(late.first_number, 2);
+        let (date, created_at, _) = stored_set(&pool, &late.logged[0].id).await;
+        assert_eq!(date, "2026-10-19");
+        assert_eq!(created_at, "2026-10-20 03:50:00");
+    }
+
+    #[tokio::test]
+    async fn backdated_set_keeps_the_newer_live_selection() {
+        let pool = pool_with_plan().await;
+        let now = toronto(19, 17, 0);
+        let utc = now.with_timezone(&Utc);
+        let monday = now.date_naive();
+        let squat = log_sets(
+            &pool,
+            "alex",
+            utc,
+            monday,
+            live(utc, monday),
+            Some("squat"),
+            &[set(Load::Weight(135.0), 8, 1)],
+        )
+        .await
+        .unwrap();
+        let performed = resolve_performed_at(
+            Some(parse_performed_at("2026-10-19T16:30:00-04:00").unwrap()),
+            now,
+        )
+        .unwrap();
+        let bench = log_sets(
+            &pool,
+            "alex",
+            utc,
+            monday,
+            performed,
+            Some("bench"),
+            &[set(Load::Weight(95.0), 8, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(bench.state.session_id, squat.state.session_id);
+        assert_eq!(bench.state.current_exercise.as_deref(), Some("Squat"));
+        assert_eq!(bench.advance, Advance::Stay);
+
+        // The next bare Signal set still goes to the live selection.
+        let next = toronto(19, 17, 1).with_timezone(&Utc);
+        let bare = log_sets(
+            &pool,
+            "alex",
+            next,
+            monday,
+            live(next, monday),
+            None,
+            &[set(Load::Weight(100.0), 8, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(bare.exercise, "Squat");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_backdated_uploads_share_one_workout() {
+        // A file database: shared-cache `:memory:` locks differently from production.
+        let path = std::env::temp_dir().join(format!("chotu-sets-{}.db", uuid::Uuid::new_v4()));
+        let pool = chotu_common::init_db(path.to_str().unwrap()).await.unwrap();
+        save_weekly_plan(&pool, "alex", "2026-10-19", &test_plan())
+            .await
+            .unwrap();
+        let now = toronto(19, 20, 0);
+        let uploads = (0..32u32).map(|i| {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                let raw = format!("2026-10-19T18:{i:02}:00-04:00");
+                app_set(&pool, now, &raw).await.state.session_id
+            })
+        });
+        let mut sessions = BTreeSet::new();
+        for upload in uploads.collect::<Vec<_>>() {
+            sessions.insert(upload.await.unwrap());
+        }
+        let (workouts, sets): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM fitness_workout_sessions WHERE date = '2026-10-19'), \
+                    (SELECT COUNT(DISTINCT session_id) FROM fitness_set_log)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+        }
+        assert_eq!(sessions.len(), 1, "every upload reports the same workout");
+        assert_eq!((workouts, sets), (1, 1));
+    }
+
+    #[test]
+    fn performed_at_validation() {
+        let now = toronto(19, 12, 0);
+        let parse = |raw: &str| parse_performed_at(raw).unwrap();
+        assert_eq!(
+            resolve_performed_at(None, now),
+            Ok(PerformedAt::new(now)),
+            "missing means server time"
+        );
+        assert_eq!(
+            resolve_performed_at(Some(parse("2026-10-19T12:05:00-04:00")), now),
+            Ok(PerformedAt::new(toronto(19, 12, 5))),
+            "5 minutes ahead is clock skew"
+        );
+        assert_eq!(
+            resolve_performed_at(Some(parse("2026-10-19T12:05:01-04:00")), now),
+            Err(PerformedAtError::InFuture)
+        );
+        assert!(resolve_performed_at(Some(parse("2026-10-12T12:00:00-04:00")), now).is_ok());
+        assert_eq!(
+            resolve_performed_at(Some(parse("2026-10-12T11:59:00-04:00")), now),
+            Err(PerformedAtError::TooOld)
+        );
+        for raw in ["2026-10-19T12:00:00", "2026-10-19", "yesterday", ""] {
+            assert_eq!(
+                parse_performed_at(raw),
+                Err(PerformedAtError::Invalid),
+                "{raw}"
+            );
+        }
     }
 }
