@@ -37,7 +37,7 @@ pub use strength_log::{
     parse_performed_at, resolve_performed_at, select_exercise, start_workout,
     workout_message_reply, workout_state, Advance, DeletedSet, ExerciseSummary, Load, LoggedSet,
     PerformedAt, PerformedAtError, SetInput, SetRecord, SetsLogged, Target, TrainingPhase,
-    WorkoutError, WorkoutStart, WorkoutState,
+    WeightUnit, WorkoutError, WorkoutStart, WorkoutState,
 };
 pub use sync::{
     credentials_configured, exercise_entries_for_day, exercise_entries_for_range,

@@ -50,6 +50,25 @@ pub enum Load {
     Same,
 }
 
+/// Unit a weight was entered in. Sets are stored in pounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightUnit {
+    Lb,
+    Kg,
+}
+
+const LB_PER_KG: f64 = 2.204_622_621_8;
+
+impl WeightUnit {
+    /// `weight` in this unit, in pounds.
+    pub fn to_lb(self, weight: f64) -> f64 {
+        match self {
+            Self::Lb => weight,
+            Self::Kg => weight * LB_PER_KG,
+        }
+    }
+}
+
 /// `count` identical sets of `reps` at `load`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SetInput {
@@ -1638,6 +1657,14 @@ mod tests {
             date: today,
         }
     }
+
+    #[test]
+    fn weights_convert_to_pounds() {
+        assert_eq!(WeightUnit::Lb.to_lb(135.0), 135.0);
+        assert!((WeightUnit::Kg.to_lb(100.0) - 220.462_262_18).abs() < 1e-9);
+        assert!((WeightUnit::Kg.to_lb(20.0) / LB_PER_KG - 20.0).abs() < 1e-12);
+    }
+
     #[test]
     fn set_tokens_parse() {
         assert_eq!(

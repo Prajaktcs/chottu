@@ -2,22 +2,24 @@
 //! terminates HTTPS in front of it and is the only way in (see `docs/app-api.md`).
 
 mod idempotency;
+mod workout;
 
 use crate::scope::CallerScope;
 use anyhow::{anyhow, Context, Result};
-use axum::extract::{FromRequestParts, MatchedPath, Request, State};
+use axum::extract::{FromRef, FromRequestParts, MatchedPath, Request, State};
 use axum::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use chotu_common::api_token::{
     api_token_env_key, hash_api_token, mint_api_token, parse_token_hash, token_device,
     verify_api_token, TokenHash,
 };
 use chotu_common::{ApiConfig, AppConfig, FamilyMember};
+use chrono_tz::Tz;
 use serde::Serialize;
 use sqlx::SqlitePool;
 use std::fmt;
@@ -73,7 +75,11 @@ impl ApiServer {
             "API server listening on http://{} (expose with `tailscale serve`)",
             api.bind
         );
-        Ok(Self::spawn(listener, router(Arc::new(auth), pool)))
+        let state = ApiState {
+            pool,
+            tz: config.resolved_tz(),
+        };
+        Ok(Self::spawn(listener, router(Arc::new(auth), state)))
     }
 
     fn spawn(listener: TcpListener, app: Router) -> Self {
@@ -108,15 +114,40 @@ impl ApiServer {
     }
 }
 
-fn router(auth: Arc<DeviceAuth>, pool: SqlitePool) -> Router {
-    with_auth(auth, pool, Router::new().route("/v1/me", get(me)))
+/// Router state. Handlers take the parts they need, e.g. `State<SqlitePool>`.
+#[derive(Clone)]
+struct ApiState {
+    pool: SqlitePool,
+    /// Household timezone (`config.now_in_tz`), so the API and Signal agree on "today".
+    tz: Tz,
+}
+
+impl FromRef<ApiState> for SqlitePool {
+    fn from_ref(state: &ApiState) -> Self {
+        state.pool.clone()
+    }
+}
+
+impl FromRef<ApiState> for Tz {
+    fn from_ref(state: &ApiState) -> Self {
+        state.tz
+    }
+}
+
+fn router(auth: Arc<DeviceAuth>, state: ApiState) -> Router {
+    let protected = Router::new()
+        .route("/v1/me", get(me))
+        .route("/v1/workout", get(workout::get_workout))
+        .route("/v1/workout/sets", post(workout::log_set))
+        .route("/v1/workout/sets/{id}", delete(workout::delete_set))
+        .route("/v1/workout/done", post(workout::finish_workout));
+    with_auth(auth, state, protected)
 }
 
 /// Mounts `protected` behind the app version check and device-token auth, next
 /// to the open health check. The version check runs first, so an outdated app
-/// is told to update even before its token is checked. Handlers reach the
-/// database with `State<SqlitePool>`.
-fn with_auth(auth: Arc<DeviceAuth>, pool: SqlitePool, protected: Router<SqlitePool>) -> Router {
+/// is told to update even before its token is checked.
+fn with_auth(auth: Arc<DeviceAuth>, state: ApiState, protected: Router<ApiState>) -> Router {
     let protected = protected
         .route_layer(middleware::from_fn_with_state(auth, authenticate))
         .route_layer(middleware::from_fn(check_app_version));
@@ -124,7 +155,7 @@ fn with_auth(auth: Arc<DeviceAuth>, pool: SqlitePool, protected: Router<SqlitePo
         .route("/v1/health", get(health))
         .merge(protected)
         .layer(middleware::from_fn(log_request))
-        .with_state(pool)
+        .with_state(state)
 }
 
 /// A `major.minor.patch` app version. Ordered numerically, so `0.10.0 > 0.9.0`.
@@ -294,7 +325,6 @@ struct Session {
 
 /// The member a request acts for. Always `LinkedDm`: the app never speaks
 /// for the household group. Rejects with 400 when no profile was chosen.
-#[cfg_attr(not(test), allow(dead_code))] // Used by the first member-data routes.
 pub(crate) struct Caller(pub CallerScope);
 
 impl<S: Send + Sync> FromRequestParts<S> for Caller {
@@ -314,7 +344,6 @@ impl<S: Send + Sync> FromRequestParts<S> for Caller {
 pub(crate) enum ApiError {
     Unauthorized,
     Forbidden,
-    #[cfg_attr(not(test), allow(dead_code))] // Only `Caller` rejects with it.
     MemberRequired,
     RequestIdRequired,
     RequestIdReused,
@@ -322,11 +351,13 @@ pub(crate) enum ApiError {
     Internal,
     InvalidAppVersion,
     UpgradeRequired,
+    /// A request the handler refused, with a message for the client.
+    Rejected(StatusCode, String),
 }
 
 #[derive(Serialize)]
-struct ErrorBody {
-    error: &'static str,
+struct ErrorBody<'a> {
+    error: &'a str,
     /// Set on `426`, so the app can show which version it needs.
     #[serde(skip_serializing_if = "Option::is_none")]
     min_app_version: Option<String>,
@@ -334,7 +365,7 @@ struct ErrorBody {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, error) = match self {
+        let (status, error) = match &self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "missing or invalid device token"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "member not allowed for this device"),
             Self::MemberRequired => (StatusCode::BAD_REQUEST, "X-Chotu-Member header required"),
@@ -356,6 +387,7 @@ impl IntoResponse for ApiError {
                 "X-Chotu-App-Version must be major.minor.patch",
             ),
             Self::UpgradeRequired => (StatusCode::UPGRADE_REQUIRED, "app update required"),
+            Self::Rejected(status, message) => (*status, message.as_str()),
         };
         let min_app_version =
             (status == StatusCode::UPGRADE_REQUIRED).then(|| MIN_APP_VERSION.to_string());
@@ -491,8 +523,8 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    const ALEX_PHONE: &str = "alex_phone.alex-secret";
-    const KITCHEN_IPAD: &str = "kitchen_ipad.kitchen-secret";
+    pub(super) const ALEX_PHONE: &str = "alex_phone.alex-secret";
+    pub(super) const KITCHEN_IPAD: &str = "kitchen_ipad.kitchen-secret";
 
     fn member(id: &str, name: &str) -> FamilyMember {
         let mut member = AppConfig::default().family.members.remove(0);
@@ -501,7 +533,7 @@ mod tests {
         member
     }
 
-    fn test_auth() -> Arc<DeviceAuth> {
+    pub(super) fn test_auth() -> Arc<DeviceAuth> {
         let members = [member("alex", "Alex"), member("jordan", "Jordan")];
         let hash = |token: &str| parse_token_hash(&hash_api_token(token).unwrap()).unwrap();
         Arc::new(
@@ -585,7 +617,7 @@ mod tests {
         SqlitePool::connect_lazy("sqlite::memory:").unwrap()
     }
 
-    async fn test_pool() -> (tempfile::TempDir, SqlitePool) {
+    pub(super) async fn test_pool() -> (tempfile::TempDir, SqlitePool) {
         let dir = tempfile::tempdir().unwrap();
         let pool = chotu_common::init_db(dir.path().join("api.sqlite").to_str().unwrap())
             .await
@@ -605,11 +637,12 @@ mod tests {
             .route("/v1/test/flaky", post(flaky_write));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = ApiServer::spawn(listener, with_auth(test_auth(), pool, protected));
+        let state = ApiState { pool, tz: Tz::UTC };
+        let server = ApiServer::spawn(listener, with_auth(test_auth(), state, protected));
         (server, format!("http://{addr}"))
     }
 
-    async fn set_count(pool: &SqlitePool, member_id: &str) -> i64 {
+    pub(super) async fn set_count(pool: &SqlitePool, member_id: &str) -> i64 {
         sqlx::query_scalar("SELECT COUNT(*) FROM fitness_set_log WHERE family_member_id = ?")
             .bind(member_id)
             .fetch_one(pool)
@@ -646,7 +679,7 @@ mod tests {
         (status, content_type, response.text().await.unwrap())
     }
 
-    fn request(
+    pub(super) fn request(
         client: &reqwest::Client,
         method: reqwest::Method,
         url: String,
@@ -680,7 +713,11 @@ mod tests {
     async fn serves_health_and_shuts_down_gracefully() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = ApiServer::spawn(listener, router(test_auth(), unused_pool()));
+        let state = ApiState {
+            pool: unused_pool(),
+            tz: Tz::UTC,
+        };
+        let server = ApiServer::spawn(listener, router(test_auth(), state));
 
         let client = reqwest::Client::new();
         let response = client
