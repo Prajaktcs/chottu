@@ -34,19 +34,21 @@ switches exercise, `bench 135x8` logs a lift by name, `undo` removes the last se
 
 // ─── Input grammar ──────────────────────────────────────────────────────────
 
+/// Load for a set as entered.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Load {
+pub enum Load {
     Weight(f64),
     Bodyweight,
     /// `x8` or bare `8`: same load as the previous set of this exercise.
     Same,
 }
 
+/// `count` identical sets of `reps` at `load`.
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct SetInput {
-    load: Load,
-    reps: u32,
-    count: u32,
+pub struct SetInput {
+    pub load: Load,
+    pub reps: u32,
+    pub count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -552,6 +554,438 @@ pub async fn set_log_dates(
     Ok(rows.into_iter().map(|(d,)| d).collect())
 }
 
+// ─── Typed core ─────────────────────────────────────────────────────────────
+
+/// Failures from the workout core. Everything before `Database` is a caller
+/// mistake a client can explain; `Database` and `Plan` are storage faults.
+#[derive(Debug, thiserror::Error)]
+pub enum WorkoutError {
+    #[error("no workout in progress")]
+    NoOpenWorkout,
+    #[error("no lifts planned today")]
+    NoPlannedLifts,
+    #[error("exercise index {index} is outside today's {count} planned lifts")]
+    ExerciseOutOfRange { index: usize, count: usize },
+    #[error("no exercise selected; name the lift with the set")]
+    NoCurrentExercise,
+    #[error("no weight yet for {exercise}")]
+    UnknownLoad { exercise: String },
+    #[error("invalid set: {0}")]
+    InvalidSet(&'static str),
+    #[error("set not found in the open workout")]
+    SetNotFound,
+    #[error("{action}: {source}")]
+    Database {
+        action: &'static str,
+        #[source]
+        source: sqlx::Error,
+    },
+    #[error("failed to load today's plan: {0}")]
+    Plan(#[source] Box<dyn std::error::Error + Send + Sync>),
+}
+
+type WorkoutResult<T> = std::result::Result<T, WorkoutError>;
+
+fn db(action: &'static str) -> impl FnOnce(sqlx::Error) -> WorkoutError {
+    move |source| WorkoutError::Database { action, source }
+}
+
+/// One stored set in a workout.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoggedSet {
+    pub id: String,
+    pub exercise_key: String,
+    pub exercise_name: String,
+    /// `None` is bodyweight.
+    pub weight_lb: Option<f64>,
+    pub reps: u32,
+}
+
+type SetRow = (String, String, String, Option<f64>, i64);
+
+impl LoggedSet {
+    fn from_row((id, exercise_key, exercise_name, weight_lb, reps): SetRow) -> Self {
+        Self {
+            id,
+            exercise_key,
+            exercise_name,
+            weight_lb,
+            reps: reps as u32,
+        }
+    }
+
+    fn record(&self) -> SetRecord {
+        (self.weight_lb, self.reps)
+    }
+}
+
+/// The member's open workout for today.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkoutState {
+    pub session_id: String,
+    pub current_exercise: Option<String>,
+    /// Today's plan day when a weekly plan covers it (rest days included).
+    pub plan_day: Option<PlanDay>,
+    /// Today's planned lifts; empty on rest days or without a plan.
+    pub exercises: Vec<PlanExercise>,
+    /// Next target per planned lift from earlier days, aligned with `exercises`.
+    pub targets: Vec<Option<Target>>,
+    /// Sets logged in this workout, oldest first.
+    pub sets: Vec<LoggedSet>,
+}
+
+impl WorkoutState {
+    fn current_index(&self) -> Option<usize> {
+        self.current_exercise
+            .as_deref()
+            .and_then(|name| match_plan_exercise(&self.exercises, name))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkoutStart {
+    pub state: WorkoutState,
+    /// `true` when today's workout was already open.
+    pub resumed: bool,
+}
+
+/// Where the workout moved after logging sets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Advance {
+    /// Still on the same exercise (planned sets left, or not a planned lift).
+    Stay,
+    /// Planned sets done; moved to this planned lift index.
+    Next(usize),
+    /// Every planned lift has its planned sets.
+    AllPlannedDone,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetsLogged {
+    pub state: WorkoutState,
+    pub exercise: String,
+    /// The sets just stored, in order.
+    pub logged: Vec<LoggedSet>,
+    /// 1-based number of the first new set within this exercise today.
+    pub first_number: usize,
+    pub advance: Advance,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeletedSet {
+    pub set: LoggedSet,
+    pub state: WorkoutState,
+}
+
+/// One exercise in a closed workout, with the target for its next session.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExerciseSummary {
+    pub name: String,
+    pub sets: Vec<SetRecord>,
+    /// Only for planned lifts with a rep range.
+    pub next: Option<Target>,
+}
+
+impl SetInput {
+    fn validate(&self) -> WorkoutResult<()> {
+        if !(1..=MAX_REPS).contains(&self.reps) {
+            return Err(WorkoutError::InvalidSet("reps out of range"));
+        }
+        if !(1..=MAX_SETS_PER_TOKEN).contains(&self.count) {
+            return Err(WorkoutError::InvalidSet("set count out of range"));
+        }
+        if let Load::Weight(w) = self.load {
+            if !(w > 0.0 && w <= MAX_WEIGHT_LB) {
+                return Err(WorkoutError::InvalidSet("weight out of range"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Today's open workout, or `None` (a stale one is closed first).
+pub async fn workout_state(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+) -> WorkoutResult<Option<WorkoutState>> {
+    let Some(session) = active_session(pool, member_id, now, today).await? else {
+        return Ok(None);
+    };
+    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
+    build_state(
+        pool,
+        member_id,
+        today,
+        session.id,
+        session.current_exercise,
+        day,
+        exercises,
+    )
+    .await
+    .map(Some)
+}
+
+/// Resume today's workout, or start one on the first planned lift.
+pub async fn start_workout(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+) -> WorkoutResult<WorkoutStart> {
+    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
+    let existing = active_session(pool, member_id, now, today).await?;
+    let resumed = existing.is_some();
+    let session = match existing {
+        Some(s) => s,
+        None => open_or_start(pool, member_id, now, today, &exercises).await?,
+    };
+    let state = build_state(
+        pool,
+        member_id,
+        today,
+        session.id,
+        session.current_exercise,
+        day,
+        exercises,
+    )
+    .await?;
+    Ok(WorkoutStart { state, resumed })
+}
+
+/// Make the planned lift at `index` (0-based) current, starting a workout if needed.
+pub async fn select_exercise(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+    index: usize,
+) -> WorkoutResult<WorkoutState> {
+    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
+    if exercises.is_empty() {
+        return Err(WorkoutError::NoPlannedLifts);
+    }
+    if index >= exercises.len() {
+        return Err(WorkoutError::ExerciseOutOfRange {
+            index,
+            count: exercises.len(),
+        });
+    }
+    let session = open_or_start(pool, member_id, now, today, &exercises).await?;
+    let name = exercises[index].name.clone();
+    touch_session(pool, &session.id, now, Some(&name)).await?;
+    build_state(
+        pool,
+        member_id,
+        today,
+        session.id,
+        Some(name),
+        day,
+        exercises,
+    )
+    .await
+}
+
+/// Log sets to `exercise` (a planned lift by name, or any lift), else the current
+/// one, starting a workout if needed. Moves on once a planned lift's sets are done.
+pub async fn log_sets(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+    exercise: Option<&str>,
+    inputs: &[SetInput],
+) -> WorkoutResult<SetsLogged> {
+    if inputs.is_empty() {
+        return Err(WorkoutError::InvalidSet("no sets"));
+    }
+    if exercise.is_some_and(|q| exercise_key(q).is_empty()) {
+        return Err(WorkoutError::InvalidSet("empty exercise name"));
+    }
+    for input in inputs {
+        input.validate()?;
+    }
+    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
+    let session = open_or_start(pool, member_id, now, today, &exercises).await?;
+    let (name, plan_index) = match exercise {
+        Some(query) => match match_plan_exercise(&exercises, query) {
+            Some(i) => (exercises[i].name.clone(), Some(i)),
+            None => (capitalize(query), None),
+        },
+        None => match session.current_exercise.clone() {
+            Some(name) => {
+                let index = match_plan_exercise(&exercises, &name);
+                (name, index)
+            }
+            None => return Err(WorkoutError::NoCurrentExercise),
+        },
+    };
+    let key = exercise_key(&name);
+    let mut sets = session_sets(pool, &session.id).await?;
+    let earlier = sets.iter().filter(|s| s.exercise_key == key).count();
+
+    // Resolve `x8` against the previous set; fall back to the last session's load.
+    let mut previous = match sets.iter().rev().find(|s| s.exercise_key == key) {
+        Some(set) => Some(set.weight_lb),
+        None => exercise_history(pool, member_id, &key, today, 1)
+            .await?
+            .first()
+            .map(|sets| working_sets(sets).0),
+    };
+    let mut records: Vec<SetRecord> = Vec::new();
+    for input in inputs {
+        let weight = match input.load {
+            Load::Weight(w) => Some(w),
+            Load::Bodyweight => None,
+            Load::Same => previous.ok_or_else(|| WorkoutError::UnknownLoad {
+                exercise: name.clone(),
+            })?,
+        };
+        previous = Some(weight);
+        records.extend(std::iter::repeat_n(
+            (weight, input.reps),
+            input.count as usize,
+        ));
+    }
+
+    let mut logged = Vec::with_capacity(records.len());
+    let mut tx = pool.begin().await.map_err(db("Failed to begin set log"))?;
+    for (weight, reps) in records {
+        let set = LoggedSet {
+            id: uuid::Uuid::new_v4().to_string(),
+            exercise_key: key.clone(),
+            exercise_name: name.clone(),
+            weight_lb: weight,
+            reps,
+        };
+        sqlx::query(
+            "INSERT INTO fitness_set_log \
+             (id, session_id, family_member_id, date, exercise_key, exercise_name, weight_lb, reps) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&set.id)
+        .bind(&session.id)
+        .bind(member_id)
+        .bind(today.format("%Y-%m-%d").to_string())
+        .bind(&set.exercise_key)
+        .bind(&set.exercise_name)
+        .bind(set.weight_lb)
+        .bind(set.reps as i64)
+        .execute(&mut *tx)
+        .await
+        .map_err(db("Failed to save set"))?;
+        logged.push(set);
+    }
+    tx.commit().await.map_err(db("Failed to commit set log"))?;
+    sets.extend(logged.iter().cloned());
+
+    // Planned sets done: move to the next plan lift that still needs sets.
+    let planned_sets = |i: usize| exercises[i].sets.max(1) as usize;
+    let (current, advance) = match plan_index {
+        Some(index) if earlier + logged.len() >= planned_sets(index) => {
+            let incomplete = |i: usize| {
+                let key = exercise_key(&exercises[i].name);
+                sets.iter().filter(|s| s.exercise_key == key).count() < planned_sets(i)
+            };
+            match (index + 1..exercises.len())
+                .chain(0..index)
+                .find(|i| incomplete(*i))
+            {
+                Some(i) => (exercises[i].name.clone(), Advance::Next(i)),
+                None => (name.clone(), Advance::AllPlannedDone),
+            }
+        }
+        _ => (name.clone(), Advance::Stay),
+    };
+    touch_session(pool, &session.id, now, Some(&current)).await?;
+    let state = build_state(
+        pool,
+        member_id,
+        today,
+        session.id,
+        Some(current),
+        day,
+        exercises,
+    )
+    .await?;
+    Ok(SetsLogged {
+        state,
+        exercise: name,
+        logged,
+        first_number: earlier + 1,
+        advance,
+    })
+}
+
+/// Delete one set from the member's own open workout; it becomes the current lift.
+pub async fn delete_set(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+    set_id: &str,
+) -> WorkoutResult<DeletedSet> {
+    let session = active_session(pool, member_id, now, today)
+        .await?
+        .ok_or(WorkoutError::NoOpenWorkout)?;
+    let row: Option<SetRow> = sqlx::query_as(
+        "DELETE FROM fitness_set_log WHERE id = ? AND session_id = ? AND family_member_id = ? \
+         RETURNING id, exercise_key, exercise_name, weight_lb, reps",
+    )
+    .bind(set_id)
+    .bind(&session.id)
+    .bind(member_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(db("Failed to delete set"))?;
+    let set = row
+        .map(LoggedSet::from_row)
+        .ok_or(WorkoutError::SetNotFound)?;
+    touch_session(pool, &session.id, now, Some(&set.exercise_name)).await?;
+    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
+    let state = build_state(
+        pool,
+        member_id,
+        today,
+        session.id,
+        Some(set.exercise_name.clone()),
+        day,
+        exercises,
+    )
+    .await?;
+    Ok(DeletedSet { set, state })
+}
+
+/// Close today's workout; per exercise, what was done and the next target.
+pub async fn close_workout(
+    pool: &SqlitePool,
+    member_id: &str,
+    now: DateTime<Utc>,
+    today: NaiveDate,
+) -> WorkoutResult<Vec<ExerciseSummary>> {
+    let session = active_session(pool, member_id, now, today)
+        .await?
+        .ok_or(WorkoutError::NoOpenWorkout)?;
+    let sets = session_sets(pool, &session.id).await?;
+    close_session(pool, &session.id, now).await?;
+    let (_, exercises) = todays_plan_exercises(pool, member_id, today).await?;
+    let tomorrow = today + Duration::days(1);
+    let mut summary = Vec::new();
+    for (name, done) in group_by_exercise(&sets) {
+        let next = match match_plan_exercise(&exercises, &name) {
+            Some(i) => plan_target(pool, member_id, tomorrow, &exercises[i]).await?,
+            None => None,
+        };
+        summary.push(ExerciseSummary {
+            name,
+            sets: done,
+            next,
+        });
+    }
+    Ok(summary)
+}
+
 // ─── Storage ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -562,27 +996,13 @@ struct WorkoutSession {
     last_activity_at: String,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct SessionSet {
-    exercise_key: String,
-    exercise_name: String,
-    weight_lb: Option<f64>,
-    reps: i64,
-}
-
-impl SessionSet {
-    fn record(&self) -> SetRecord {
-        (self.weight_lb, self.reps as u32)
-    }
-}
-
 /// Open session for today, closing it first when stale (other day or idle too long).
 async fn active_session(
     pool: &SqlitePool,
     member_id: &str,
     now: DateTime<Utc>,
     today: NaiveDate,
-) -> Result<Option<WorkoutSession>> {
+) -> WorkoutResult<Option<WorkoutSession>> {
     let Some(session) = sqlx::query_as::<_, WorkoutSession>(
         "SELECT id, date, current_exercise, last_activity_at FROM fitness_workout_sessions \
          WHERE family_member_id = ? AND closed_at IS NULL",
@@ -590,7 +1010,7 @@ async fn active_session(
     .bind(member_id)
     .fetch_optional(pool)
     .await
-    .context("Failed to load open workout")?
+    .map_err(db("Failed to load open workout"))?
     else {
         return Ok(None);
     };
@@ -604,13 +1024,17 @@ async fn active_session(
     Ok(Some(session))
 }
 
-async fn start_session(
+/// Today's open session, or a new one on the first planned lift.
+async fn open_or_start(
     pool: &SqlitePool,
     member_id: &str,
     now: DateTime<Utc>,
     today: NaiveDate,
-    first_exercise: Option<&str>,
-) -> Result<WorkoutSession> {
+    exercises: &[PlanExercise],
+) -> WorkoutResult<WorkoutSession> {
+    if let Some(session) = active_session(pool, member_id, now, today).await? {
+        return Ok(session);
+    }
     let now_s = now.to_rfc3339();
     // The partial unique index keeps one open session per member.
     sqlx::query(
@@ -621,24 +1045,28 @@ async fn start_session(
     .bind(uuid::Uuid::new_v4().to_string())
     .bind(member_id)
     .bind(today.format("%Y-%m-%d").to_string())
-    .bind(first_exercise)
+    .bind(exercises.first().map(|e| e.name.as_str()))
     .bind(&now_s)
     .bind(&now_s)
     .execute(pool)
     .await
-    .context("Failed to start workout")?;
+    .map_err(db("Failed to start workout"))?;
     active_session(pool, member_id, now, today)
         .await?
-        .context("Workout session missing after start")
+        .ok_or(WorkoutError::NoOpenWorkout)
 }
 
-async fn close_session(pool: &SqlitePool, session_id: &str, now: DateTime<Utc>) -> Result<()> {
+async fn close_session(
+    pool: &SqlitePool,
+    session_id: &str,
+    now: DateTime<Utc>,
+) -> WorkoutResult<()> {
     sqlx::query("UPDATE fitness_workout_sessions SET closed_at = ? WHERE id = ?")
         .bind(now.to_rfc3339())
         .bind(session_id)
         .execute(pool)
         .await
-        .context("Failed to close workout")?;
+        .map_err(db("Failed to close workout"))?;
     Ok(())
 }
 
@@ -647,7 +1075,7 @@ async fn touch_session(
     session_id: &str,
     now: DateTime<Utc>,
     current_exercise: Option<&str>,
-) -> Result<()> {
+) -> WorkoutResult<()> {
     sqlx::query(
         "UPDATE fitness_workout_sessions SET last_activity_at = ?, current_exercise = ? WHERE id = ?",
     )
@@ -656,19 +1084,20 @@ async fn touch_session(
     .bind(session_id)
     .execute(pool)
     .await
-    .context("Failed to update workout")?;
+    .map_err(db("Failed to update workout"))?;
     Ok(())
 }
 
-async fn session_sets(pool: &SqlitePool, session_id: &str) -> Result<Vec<SessionSet>> {
-    sqlx::query_as(
-        "SELECT exercise_key, exercise_name, weight_lb, reps FROM fitness_set_log \
+async fn session_sets(pool: &SqlitePool, session_id: &str) -> WorkoutResult<Vec<LoggedSet>> {
+    let rows: Vec<SetRow> = sqlx::query_as(
+        "SELECT id, exercise_key, exercise_name, weight_lb, reps FROM fitness_set_log \
          WHERE session_id = ? ORDER BY rowid",
     )
     .bind(session_id)
     .fetch_all(pool)
     .await
-    .context("Failed to load workout sets")
+    .map_err(db("Failed to load workout sets"))?;
+    Ok(rows.into_iter().map(LoggedSet::from_row).collect())
 }
 
 /// Up to `limit` most recent days of sets for an exercise before `before` (newest first).
@@ -678,7 +1107,7 @@ async fn exercise_history(
     key: &str,
     before: NaiveDate,
     limit: usize,
-) -> Result<Vec<Vec<SetRecord>>> {
+) -> WorkoutResult<Vec<Vec<SetRecord>>> {
     let rows: Vec<(String, Option<f64>, i64)> = sqlx::query_as(
         "SELECT date, weight_lb, reps FROM fitness_set_log \
          WHERE family_member_id = ? AND exercise_key = ? AND date < ? \
@@ -689,7 +1118,7 @@ async fn exercise_history(
     .bind(before.format("%Y-%m-%d").to_string())
     .fetch_all(pool)
     .await
-    .context("Failed to load exercise history")?;
+    .map_err(db("Failed to load exercise history"))?;
     let mut sessions: Vec<(String, Vec<SetRecord>)> = Vec::new();
     for (date, weight, reps) in rows {
         if let Some((_, sets)) = sessions.last_mut().filter(|(d, _)| *d == date) {
@@ -708,7 +1137,7 @@ async fn plan_target(
     member_id: &str,
     before: NaiveDate,
     exercise: &PlanExercise,
-) -> Result<Option<Target>> {
+) -> WorkoutResult<Option<Target>> {
     let history =
         exercise_history(pool, member_id, &exercise_key(&exercise.name), before, 2).await?;
     Ok(next_target(
@@ -738,10 +1167,11 @@ async fn todays_plan_exercises(
     pool: &SqlitePool,
     member_id: &str,
     today: NaiveDate,
-) -> Result<(Option<PlanDay>, Vec<PlanExercise>)> {
+) -> WorkoutResult<(Option<PlanDay>, Vec<PlanExercise>)> {
     let week_start = week_start_monday(today).format("%Y-%m-%d").to_string();
     let day = load_weekly_plan(pool, member_id, &week_start)
-        .await?
+        .await
+        .map_err(|e| WorkoutError::Plan(e.into()))?
         .and_then(|stored| session_for_date_from_stored(&stored, today));
     let exercises = day
         .as_ref()
@@ -751,7 +1181,56 @@ async fn todays_plan_exercises(
     Ok((day, exercises))
 }
 
-// ─── Replies ────────────────────────────────────────────────────────────────
+async fn build_state(
+    pool: &SqlitePool,
+    member_id: &str,
+    today: NaiveDate,
+    session_id: String,
+    current_exercise: Option<String>,
+    plan_day: Option<PlanDay>,
+    exercises: Vec<PlanExercise>,
+) -> WorkoutResult<WorkoutState> {
+    let mut targets = Vec::with_capacity(exercises.len());
+    for exercise in &exercises {
+        targets.push(plan_target(pool, member_id, today, exercise).await?);
+    }
+    let sets = session_sets(pool, &session_id).await?;
+    Ok(WorkoutState {
+        session_id,
+        current_exercise,
+        plan_day,
+        exercises,
+        targets,
+        sets,
+    })
+}
+
+/// Sets grouped by exercise in first-logged order.
+fn group_by_exercise(sets: &[LoggedSet]) -> Vec<(String, Vec<SetRecord>)> {
+    let mut groups: Vec<(String, Vec<SetRecord>)> = Vec::new();
+    for set in sets {
+        match groups
+            .iter_mut()
+            .find(|(name, _)| exercise_key(name) == set.exercise_key)
+        {
+            Some((_, records)) => records.push(set.record()),
+            None => groups.push((set.exercise_name.clone(), vec![set.record()])),
+        }
+    }
+    groups
+}
+
+fn capitalize(raw: &str) -> String {
+    let mut chars = raw.trim().chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+// ─── Signal replies ─────────────────────────────────────────────────────────
+
+const NO_PLANNED_LIFTS: &str = "No lifts planned today — log any lift by name, e.g. `bench 135x8`.";
 
 /// `/log [input]` in a linked DM: start or resume today's workout, optionally applying input.
 pub async fn log_command_reply(
@@ -761,40 +1240,21 @@ pub async fn log_command_reply(
     today: NaiveDate,
     args: &str,
 ) -> Result<String> {
-    let (day, exercises) = todays_plan_exercises(pool, member_id, today).await?;
-    let existing = active_session(pool, member_id, now, today).await?;
     if args.trim().is_empty() {
-        let resumed = existing.is_some();
-        let session = match existing {
-            Some(s) => s,
-            None => {
-                let first = exercises.first().map(|e| e.name.as_str());
-                start_session(pool, member_id, now, today, first).await?
-            }
-        };
-        return status_reply(
-            pool,
-            member_id,
-            today,
-            &session,
-            day.as_ref(),
-            &exercises,
-            resumed,
-        )
-        .await;
+        let start = start_workout(pool, member_id, now, today).await?;
+        return Ok(status_text(&start.state, start.resumed));
     }
     let Some(input) = parse_workout_input(args) else {
         return Ok(LOG_USAGE.into());
     };
-    let session = match (existing, &input) {
-        (Some(s), _) => s,
+    let state = match (workout_state(pool, member_id, now, today).await?, &input) {
+        (Some(state), _) => state,
         (None, WorkoutInput::Sets { .. } | WorkoutInput::Jump(_)) => {
-            let first = exercises.first().map(|e| e.name.as_str());
-            start_session(pool, member_id, now, today, first).await?
+            start_workout(pool, member_id, now, today).await?.state
         }
         (None, _) => return Ok("No workout in progress. Send /log to start one.".into()),
     };
-    apply_input(pool, member_id, now, today, &session, &exercises, input).await
+    apply_input(pool, member_id, now, today, &state, input).await
 }
 
 /// Plain DM text during an open workout. `None` when no workout is open or the
@@ -812,46 +1272,106 @@ pub async fn workout_message_reply(
     let Some(input) = parse_workout_input(text) else {
         return Ok(None);
     };
-    let Some(session) = active_session(pool, member_id, now, today).await? else {
+    let Some(state) = workout_state(pool, member_id, now, today).await? else {
         return Ok(None);
     };
-    let (_, exercises) = todays_plan_exercises(pool, member_id, today).await?;
-    apply_input(pool, member_id, now, today, &session, &exercises, input)
+    apply_input(pool, member_id, now, today, &state, input)
         .await
         .map(Some)
 }
 
-async fn exercise_line(
+async fn apply_input(
     pool: &SqlitePool,
     member_id: &str,
+    now: DateTime<Utc>,
     today: NaiveDate,
-    exercises: &[PlanExercise],
-    index: usize,
+    state: &WorkoutState,
+    input: WorkoutInput,
 ) -> Result<String> {
-    let exercise = &exercises[index];
-    let suffix = plan_target(pool, member_id, today, exercise)
-        .await?
+    match input {
+        WorkoutInput::Done => Ok(finish_text(
+            &close_workout(pool, member_id, now, today).await?,
+        )),
+        WorkoutInput::Undo => {
+            let Some(last) = state.sets.last() else {
+                touch_session(
+                    pool,
+                    &state.session_id,
+                    now,
+                    state.current_exercise.as_deref(),
+                )
+                .await?;
+                return Ok("Nothing to undo in this workout.".into());
+            };
+            let deleted = delete_set(pool, member_id, now, today, &last.id).await?;
+            Ok(format!(
+                "↩️ Removed {} {}",
+                deleted.set.exercise_name,
+                format_sets(&[deleted.set.record()])
+            ))
+        }
+        WorkoutInput::Next | WorkoutInput::Jump(_) => {
+            let target = match input {
+                WorkoutInput::Jump(n) => n - 1,
+                _ => state.current_index().map_or(0, |i| i + 1),
+            };
+            if state.exercises.is_empty() {
+                return Ok(NO_PLANNED_LIFTS.into());
+            }
+            if target >= state.exercises.len() {
+                touch_session(
+                    pool,
+                    &state.session_id,
+                    now,
+                    state.current_exercise.as_deref(),
+                )
+                .await?;
+                return Ok(match input {
+                    WorkoutInput::Jump(_) => {
+                        format!("Pick an exercise from #1 to #{}.", state.exercises.len())
+                    }
+                    _ => "That was the last planned lift. Log extras like `curl 30x12`, or send `done`."
+                        .into(),
+                });
+            }
+            let state = select_exercise(pool, member_id, now, today, target).await?;
+            Ok(format!("Now: {}", exercise_line(&state, target)))
+        }
+        WorkoutInput::Sets { exercise, sets } => {
+            match log_sets(pool, member_id, now, today, exercise.as_deref(), &sets).await {
+                Ok(logged) => Ok(logged_text(&logged)),
+                Err(WorkoutError::NoCurrentExercise) => {
+                    Ok("Which lift? Send it with the set, e.g. `bench 135x8`.".into())
+                }
+                Err(WorkoutError::UnknownLoad { exercise }) => Ok(format!(
+                    "No weight yet for {exercise} — send it once like `135x8` (or `bwx8` for bodyweight)."
+                )),
+                Err(error) => Err(error.into()),
+            }
+        }
+    }
+}
+
+fn exercise_line(state: &WorkoutState, index: usize) -> String {
+    let suffix = state.targets[index]
         .as_ref()
         .map(target_suffix)
         .unwrap_or_default();
-    Ok(format!("{}. {}{}", index + 1, exercise.render(), suffix))
+    format!(
+        "{}. {}{}",
+        index + 1,
+        state.exercises[index].render(),
+        suffix
+    )
 }
 
-async fn status_reply(
-    pool: &SqlitePool,
-    member_id: &str,
-    today: NaiveDate,
-    session: &WorkoutSession,
-    day: Option<&PlanDay>,
-    exercises: &[PlanExercise],
-    resumed: bool,
-) -> Result<String> {
+fn status_text(state: &WorkoutState, resumed: bool) -> String {
     let mut out = if resumed {
         "▶️ Workout resumed".to_string()
     } else {
         "▶️ Workout started".to_string()
     };
-    if let Some(day) = day {
+    if let Some(day) = &state.plan_day {
         let notes = day.notes.trim();
         out.push_str(&format!(" — {} {}", day.weekday, day.kind.as_str()));
         if !notes.is_empty() {
@@ -860,296 +1380,89 @@ async fn status_reply(
     }
     out.push('\n');
 
-    let sets = session_sets(pool, &session.id).await?;
-    for (i, exercise) in exercises.iter().enumerate() {
+    for (i, exercise) in state.exercises.iter().enumerate() {
         let key = exercise_key(&exercise.name);
-        let done: Vec<SetRecord> = sets
+        let done: Vec<SetRecord> = state
+            .sets
             .iter()
             .filter(|s| s.exercise_key == key)
-            .map(SessionSet::record)
+            .map(LoggedSet::record)
             .collect();
-        out.push_str(&format!(
-            " {}",
-            exercise_line(pool, member_id, today, exercises, i).await?
-        ));
+        out.push_str(&format!(" {}", exercise_line(state, i)));
         if !done.is_empty() {
             out.push_str(&format!("  ✓ {}", format_sets(&done)));
         }
         out.push('\n');
     }
-    let plan_keys: BTreeSet<String> = exercises.iter().map(|e| exercise_key(&e.name)).collect();
-    for (name, done) in group_by_exercise(&sets) {
+    let plan_keys: BTreeSet<String> = state
+        .exercises
+        .iter()
+        .map(|e| exercise_key(&e.name))
+        .collect();
+    for (name, done) in group_by_exercise(&state.sets) {
         if !plan_keys.contains(&exercise_key(&name)) {
             out.push_str(&format!(" + {name}  ✓ {}\n", format_sets(&done)));
         }
     }
-    if exercises.is_empty() {
-        out.push_str("No lifts planned today — log any lift by name, e.g. `bench 135x8`.\n");
-    } else if let Some(current) = session.current_exercise.as_deref() {
+    if state.exercises.is_empty() {
+        out.push_str(NO_PLANNED_LIFTS);
+        out.push('\n');
+    } else if let Some(current) = state.current_exercise.as_deref() {
         out.push_str(&format!("\nNow: {current}\n"));
     }
     out.push_str(SHORT_HELP);
-    Ok(out)
+    out
 }
 
-/// Sets grouped by exercise in first-logged order.
-fn group_by_exercise(sets: &[SessionSet]) -> Vec<(String, Vec<SetRecord>)> {
-    let mut groups: Vec<(String, Vec<SetRecord>)> = Vec::new();
-    for set in sets {
-        match groups
-            .iter_mut()
-            .find(|(name, _)| exercise_key(name) == set.exercise_key)
-        {
-            Some((_, records)) => records.push(set.record()),
-            None => groups.push((set.exercise_name.clone(), vec![set.record()])),
-        }
-    }
-    groups
-}
-
-async fn apply_input(
-    pool: &SqlitePool,
-    member_id: &str,
-    now: DateTime<Utc>,
-    today: NaiveDate,
-    session: &WorkoutSession,
-    exercises: &[PlanExercise],
-    input: WorkoutInput,
-) -> Result<String> {
-    let current_index = session
-        .current_exercise
-        .as_deref()
-        .and_then(|name| match_plan_exercise(exercises, name));
-    match input {
-        WorkoutInput::Done => finish_reply(pool, member_id, now, today, session, exercises).await,
-        WorkoutInput::Undo => {
-            let last: Option<(String, String, Option<f64>, i64)> = sqlx::query_as(
-                "DELETE FROM fitness_set_log WHERE rowid = \
-                 (SELECT rowid FROM fitness_set_log WHERE session_id = ? ORDER BY rowid DESC LIMIT 1) \
-                 RETURNING id, exercise_name, weight_lb, reps",
-            )
-            .bind(&session.id)
-            .fetch_optional(pool)
-            .await
-            .context("Failed to undo set")?;
-            let Some((_, name, weight, reps)) = last else {
-                touch_session(pool, &session.id, now, session.current_exercise.as_deref()).await?;
-                return Ok("Nothing to undo in this workout.".into());
-            };
-            touch_session(pool, &session.id, now, Some(&name)).await?;
-            Ok(format!(
-                "↩️ Removed {name} {}",
-                format_sets(&[(weight, reps as u32)])
-            ))
-        }
-        WorkoutInput::Next | WorkoutInput::Jump(_) => {
-            let target = match input {
-                WorkoutInput::Jump(n) => n - 1,
-                _ => current_index.map_or(0, |i| i + 1),
-            };
-            if exercises.is_empty() {
-                return Ok(
-                    "No lifts planned today — log any lift by name, e.g. `bench 135x8`.".into(),
-                );
-            }
-            if target >= exercises.len() {
-                touch_session(pool, &session.id, now, session.current_exercise.as_deref()).await?;
-                return Ok(match input {
-                    WorkoutInput::Jump(_) => format!("Pick an exercise from #1 to #{}.", exercises.len()),
-                    _ => "That was the last planned lift. Log extras like `curl 30x12`, or send `done`."
-                        .into(),
-                });
-            }
-            touch_session(pool, &session.id, now, Some(&exercises[target].name)).await?;
-            Ok(format!(
-                "Now: {}",
-                exercise_line(pool, member_id, today, exercises, target).await?
-            ))
-        }
-        WorkoutInput::Sets { exercise, sets } => {
-            let (name, plan_index) = match exercise.as_deref() {
-                Some(query) => match match_plan_exercise(exercises, query) {
-                    Some(i) => (exercises[i].name.clone(), Some(i)),
-                    None => (capitalize(query), None),
-                },
-                None => match session.current_exercise.clone() {
-                    Some(name) => (name, current_index),
-                    None => {
-                        return Ok("Which lift? Send it with the set, e.g. `bench 135x8`.".into())
-                    }
-                },
-            };
-            log_sets_reply(
-                pool, member_id, now, today, session, exercises, &name, plan_index, &sets,
-            )
-            .await
-        }
-    }
-}
-
-fn capitalize(raw: &str) -> String {
-    let mut chars = raw.trim().chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn log_sets_reply(
-    pool: &SqlitePool,
-    member_id: &str,
-    now: DateTime<Utc>,
-    today: NaiveDate,
-    session: &WorkoutSession,
-    exercises: &[PlanExercise],
-    name: &str,
-    plan_index: Option<usize>,
-    inputs: &[SetInput],
-) -> Result<String> {
-    let key = exercise_key(name);
-    let earlier: Vec<SetRecord> = session_sets(pool, &session.id)
-        .await?
-        .iter()
-        .filter(|s| s.exercise_key == key)
-        .map(SessionSet::record)
-        .collect();
-
-    // Resolve `x8` against the previous set; fall back to the last session's load.
-    let mut previous = match earlier.last() {
-        Some((weight, _)) => Some(*weight),
-        None => exercise_history(pool, member_id, &key, today, 1)
-            .await?
-            .first()
-            .map(|sets| working_sets(sets).0),
-    };
-    let mut records: Vec<SetRecord> = Vec::new();
-    for input in inputs {
-        let weight = match input.load {
-            Load::Weight(w) => Some(w),
-            Load::Bodyweight => None,
-            Load::Same => match previous {
-                Some(w) => w,
-                None => {
-                    return Ok(format!(
-                        "No weight yet for {name} — send it once like `135x8` (or `bwx8` for bodyweight)."
-                    ))
-                }
-            },
-        };
-        previous = Some(weight);
-        records.extend(std::iter::repeat_n(
-            (weight, input.reps),
-            input.count as usize,
-        ));
-    }
-
-    let mut tx = pool.begin().await.context("Failed to begin set log")?;
-    for (weight, reps) in &records {
-        sqlx::query(
-            "INSERT INTO fitness_set_log \
-             (id, session_id, family_member_id, date, exercise_key, exercise_name, weight_lb, reps) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&session.id)
-        .bind(member_id)
-        .bind(today.format("%Y-%m-%d").to_string())
-        .bind(&key)
-        .bind(name)
-        .bind(weight)
-        .bind(*reps as i64)
-        .execute(&mut *tx)
-        .await
-        .context("Failed to save set")?;
-    }
-    tx.commit().await.context("Failed to commit set log")?;
-
-    let first_number = earlier.len() + 1;
-    let last_number = earlier.len() + records.len();
+fn logged_text(logged: &SetsLogged) -> String {
+    let records: Vec<SetRecord> = logged.logged.iter().map(LoggedSet::record).collect();
+    let first = logged.first_number;
     let label = if records.len() == 1 {
-        format!("set {first_number}")
+        format!("set {first}")
     } else {
-        format!("sets {first_number}–{last_number}")
+        format!("sets {first}–{}", first + records.len() - 1)
     };
-    let mut out = format!("✓ {name} {label}: {}", format_sets(&records));
-
-    let Some(index) = plan_index else {
-        touch_session(pool, &session.id, now, Some(name)).await?;
-        return Ok(out);
-    };
-    let planned = exercises[index].sets.max(1) as usize;
-    if last_number < planned {
-        touch_session(pool, &session.id, now, Some(name)).await?;
-        return Ok(out);
-    }
-
-    // Planned sets done: move to the next plan lift that still needs sets.
-    let all_sets = session_sets(pool, &session.id).await?;
-    let incomplete = |i: usize| {
-        let key = exercise_key(&exercises[i].name);
-        all_sets.iter().filter(|s| s.exercise_key == key).count()
-            < exercises[i].sets.max(1) as usize
-    };
-    let next = (index + 1..exercises.len())
-        .chain(0..index)
-        .find(|i| incomplete(*i));
-    match next {
-        Some(i) => {
-            touch_session(pool, &session.id, now, Some(&exercises[i].name)).await?;
-            out.push_str(&format!(
-                "\n→ Next: {}",
-                exercise_line(pool, member_id, today, exercises, i).await?
-            ));
+    let mut out = format!("✓ {} {label}: {}", logged.exercise, format_sets(&records));
+    match logged.advance {
+        Advance::Stay => {}
+        Advance::Next(i) => {
+            out.push_str(&format!("\n→ Next: {}", exercise_line(&logged.state, i)));
         }
-        None => {
-            touch_session(pool, &session.id, now, Some(name)).await?;
+        Advance::AllPlannedDone => {
             out.push_str("\nAll planned lifts logged 💪 Send `done` to finish.");
         }
     }
-    Ok(out)
+    out
 }
 
-async fn finish_reply(
-    pool: &SqlitePool,
-    member_id: &str,
-    now: DateTime<Utc>,
-    today: NaiveDate,
-    session: &WorkoutSession,
-    exercises: &[PlanExercise],
-) -> Result<String> {
-    let sets = session_sets(pool, &session.id).await?;
-    close_session(pool, &session.id, now).await?;
-    if sets.is_empty() {
-        return Ok("Workout closed — nothing was logged.".into());
+fn finish_text(summary: &[ExerciseSummary]) -> String {
+    if summary.is_empty() {
+        return "Workout closed — nothing was logged.".into();
     }
-    let groups = group_by_exercise(&sets);
+    let total: usize = summary.iter().map(|e| e.sets.len()).sum();
     let mut out = format!(
-        "🏁 Workout logged: {} sets across {} exercises.\n",
-        sets.len(),
-        groups.len()
+        "🏁 Workout logged: {total} sets across {} exercises.\n",
+        summary.len()
     );
-    let tomorrow = today + Duration::days(1);
-    for (name, done) in &groups {
-        out.push_str(&format!("• {name}: {}", format_sets(done)));
-        let planned = match_plan_exercise(exercises, name).map(|i| &exercises[i]);
-        if let Some(exercise) = planned {
-            let target = plan_target(pool, member_id, tomorrow, exercise).await?;
-            if let Some(target) = target.filter(|t| !t.reps.is_empty()) {
-                if let Some(w) = target.weight_lb {
-                    out.push_str(&format!(
-                        " → next {} lb, aim {}",
-                        format_weight(w),
-                        format_reps(&target.reps)
-                    ));
-                } else {
-                    out.push_str(&format!(" → next aim {}", format_reps(&target.reps)));
-                }
+    for exercise in summary {
+        out.push_str(&format!(
+            "• {}: {}",
+            exercise.name,
+            format_sets(&exercise.sets)
+        ));
+        if let Some(target) = exercise.next.as_ref().filter(|t| !t.reps.is_empty()) {
+            match target.weight_lb {
+                Some(w) => out.push_str(&format!(
+                    " → next {} lb, aim {}",
+                    format_weight(w),
+                    format_reps(&target.reps)
+                )),
+                None => out.push_str(&format!(" → next aim {}", format_reps(&target.reps))),
             }
         }
         out.push('\n');
     }
-    Ok(out.trim_end().to_string())
+    out.trim_end().to_string()
 }
 
 #[cfg(test)]
@@ -1571,6 +1884,181 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("{path}: {e} (run with UPDATE_SNAPSHOTS=1)"));
         assert_eq!(actual, expected, "snapshot {name} changed");
+    }
+
+    #[tokio::test]
+    async fn typed_core_start_log_jump_delete_close() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        assert_eq!(
+            workout_state(&pool, "alex", at(17, 0), monday)
+                .await
+                .unwrap(),
+            None
+        );
+
+        let start = start_workout(&pool, "alex", at(17, 0), monday)
+            .await
+            .unwrap();
+        assert!(!start.resumed);
+        let state = start.state;
+        assert_eq!(state.current_exercise.as_deref(), Some("Leg press"));
+        assert_eq!(state.exercises.len(), 2);
+        assert_eq!(state.targets.len(), 2);
+        assert!(
+            state.targets[0].as_ref().unwrap().reps.is_empty(),
+            "first time"
+        );
+        assert!(state.sets.is_empty());
+        let again = start_workout(&pool, "alex", at(17, 1), monday)
+            .await
+            .unwrap();
+        assert!(again.resumed);
+        assert_eq!(again.state.session_id, state.session_id);
+
+        let logged = log_sets(
+            &pool,
+            "alex",
+            at(17, 2),
+            monday,
+            None,
+            &[set(Load::Weight(180.0), 12, 2)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(logged.exercise, "Leg press");
+        assert_eq!(logged.first_number, 1);
+        assert_eq!(logged.logged.len(), 2);
+        assert_eq!(logged.advance, Advance::Next(1));
+        assert_eq!(
+            logged.state.current_exercise.as_deref(),
+            Some("Chest press")
+        );
+        assert_eq!(logged.state.sets, logged.logged);
+
+        let jumped = select_exercise(&pool, "alex", at(17, 3), monday, 0)
+            .await
+            .unwrap();
+        assert_eq!(jumped.current_exercise.as_deref(), Some("Leg press"));
+        assert!(matches!(
+            select_exercise(&pool, "alex", at(17, 3), monday, 2).await,
+            Err(WorkoutError::ExerciseOutOfRange { index: 2, count: 2 })
+        ));
+
+        let same = log_sets(
+            &pool,
+            "alex",
+            at(17, 4),
+            monday,
+            None,
+            &[set(Load::Same, 10, 1)],
+        )
+        .await
+        .unwrap();
+        assert_eq!(same.logged[0].weight_lb, Some(180.0));
+        assert_eq!(same.first_number, 3);
+
+        let deleted = delete_set(&pool, "alex", at(17, 5), monday, &same.logged[0].id)
+            .await
+            .unwrap();
+        assert_eq!(deleted.set, same.logged[0]);
+        assert_eq!(deleted.state.sets, logged.logged);
+        assert_eq!(deleted.state.current_exercise.as_deref(), Some("Leg press"));
+        assert!(matches!(
+            delete_set(&pool, "alex", at(17, 5), monday, &same.logged[0].id).await,
+            Err(WorkoutError::SetNotFound)
+        ));
+
+        let summary = close_workout(&pool, "alex", at(17, 6), monday)
+            .await
+            .unwrap();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].name, "Leg press");
+        assert_eq!(summary[0].sets, vec![(Some(180.0), 12), (Some(180.0), 12)]);
+        assert_eq!(summary[0].next.as_ref().unwrap().weight_lb, Some(190.0));
+        assert_eq!(
+            workout_state(&pool, "alex", at(17, 7), monday)
+                .await
+                .unwrap(),
+            None
+        );
+        assert!(matches!(
+            close_workout(&pool, "alex", at(17, 7), monday).await,
+            Err(WorkoutError::NoOpenWorkout)
+        ));
+        assert!(matches!(
+            delete_set(&pool, "alex", at(17, 7), monday, &logged.logged[0].id).await,
+            Err(WorkoutError::NoOpenWorkout)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delete_set_refuses_another_members_set() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let theirs = log_sets(
+            &pool,
+            "sam",
+            at(9, 0),
+            monday,
+            Some("bench"),
+            &[set(Load::Weight(95.0), 8, 1)],
+        )
+        .await
+        .unwrap();
+        start_workout(&pool, "alex", at(9, 1), monday)
+            .await
+            .unwrap();
+        assert!(matches!(
+            delete_set(&pool, "alex", at(9, 2), monday, &theirs.logged[0].id).await,
+            Err(WorkoutError::SetNotFound)
+        ));
+        let still = workout_state(&pool, "sam", at(9, 3), monday)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(still.sets, theirs.logged);
+    }
+
+    #[tokio::test]
+    async fn log_sets_rejects_bad_input() {
+        let pool = pool_with_plan().await;
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        for (exercise, sets) in [
+            (None, vec![]),
+            (None, vec![set(Load::Weight(100.0), 0, 1)]),
+            (None, vec![set(Load::Weight(100.0), 8, 11)]),
+            (None, vec![set(Load::Weight(-5.0), 8, 1)]),
+            (None, vec![set(Load::Weight(f64::NAN), 8, 1)]),
+            (Some(" - "), vec![set(Load::Weight(100.0), 8, 1)]),
+        ] {
+            assert!(
+                matches!(
+                    log_sets(&pool, "alex", at(9, 0), monday, exercise, &sets).await,
+                    Err(WorkoutError::InvalidSet(_))
+                ),
+                "{exercise:?} {sets:?}"
+            );
+        }
+        assert_eq!(
+            workout_state(&pool, "alex", at(9, 0), monday)
+                .await
+                .unwrap(),
+            None,
+            "invalid input never starts a workout"
+        );
+        assert!(matches!(
+            log_sets(
+                &pool,
+                "alex",
+                at(9, 1),
+                monday,
+                Some("curl"),
+                &[set(Load::Same, 8, 1)]
+            )
+            .await,
+            Err(WorkoutError::UnknownLoad { exercise }) if exercise == "Curl"
+        ));
     }
 
     #[tokio::test]

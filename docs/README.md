@@ -11,6 +11,7 @@ Living notes for running the household agent: credentials, services, and how Sig
 | [Memory](./commands/memory.md) | `/memory` RAG |
 | [Finance](./commands/finance.md) | Monthly, budget, net worth, research |
 | [Condition tracking spec](./condition-tracking-spec.md) | M1–M5 shipped (tags, check-ins, watchlists, meal flags, coaching); M6 trends still open |
+| [App technical design](./app-technical-design.md) | Expo app + private HTTPS API over a shared Rust service layer; phased plan starting with gym set logging |
 | [Relationship graph spec](./relationship-graph-spec.md) | Product intent only: local people graph, multi-channel ingest, brief/cal/memory leverage |
 | [Signal vs Telegram](./signal-vs-telegram.md) | What carried over after the chat transport switch — and what you miss |
 
