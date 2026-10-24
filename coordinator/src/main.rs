@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
 
     // Bind before spawning agents so a bad address or busy port fails startup.
     let mut api_server = match config.api.as_ref() {
-        Some(api_config) => Some(api::ApiServer::start(api_config).await?),
+        Some(api_config) => Some(api::ApiServer::start(api_config, &config).await?),
         None => None,
     };
 

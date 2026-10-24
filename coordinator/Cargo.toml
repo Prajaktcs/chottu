@@ -2,6 +2,7 @@
 name = "coordinator"
 version = "0.1.0"
 edition = "2021"
+default-run = "coordinator"
 
 [dependencies]
 chotu-common = { path = "../chotu-common" }

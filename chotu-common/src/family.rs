@@ -622,20 +622,59 @@ pub struct SpendBudgets {
 pub struct ApiConfig {
     /// Listen address, e.g. `127.0.0.1:8787`. Must be a loopback address.
     pub bind: SocketAddr,
+    /// Devices allowed to call the API. Each authenticates with its own bearer
+    /// token, whose hash lives in `.env` as `API_TOKEN_<NAME>`.
+    #[serde(default)]
+    pub devices: Vec<ApiDevice>,
+}
+
+/// One app install and the household members (profiles) it may act as.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ApiDevice {
+    /// ASCII letters, digits and `_`; unique ignoring case.
+    pub name: String,
+    /// `family.members[].id` values this device may pick as its profile.
+    pub members: Vec<String>,
 }
 
 impl ApiConfig {
     /// Rejects any non-loopback bind (`0.0.0.0`, LAN, Tailscale `100.x`): the only
-    /// way in must be through `tailscale serve`.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.bind.ip().is_loopback() {
-            Ok(())
-        } else {
-            Err(format!(
+    /// way in must be through `tailscale serve`. Every device needs a valid,
+    /// unique name and at least one configured member.
+    pub fn validate(&self, members: &[FamilyMember]) -> Result<(), String> {
+        if !self.bind.ip().is_loopback() {
+            return Err(format!(
                 "api.bind {} is not a loopback address. Bind to 127.0.0.1 or ::1 and expose it with `tailscale serve`.",
                 self.bind
-            ))
+            ));
         }
+        let mut names = HashSet::new();
+        for device in &self.devices {
+            crate::api_token::validate_device_name(&device.name)
+                .map_err(|e| format!("api.devices: {e}"))?;
+            if !names.insert(device.name.to_ascii_lowercase()) {
+                return Err(format!(
+                    "api.devices: duplicate device name {:?}",
+                    device.name
+                ));
+            }
+            if device.members.is_empty() {
+                return Err(format!(
+                    "api.devices: device {:?} must list at least one member",
+                    device.name
+                ));
+            }
+            for member_id in &device.members {
+                if !members.iter().any(|m| m.id.eq_ignore_ascii_case(member_id)) {
+                    return Err(format!(
+                        "api.devices: device {:?} lists unknown member {member_id:?}",
+                        device.name
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1007,7 +1046,7 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, String> {
         }
     }
     if let Some(api) = config.api.as_ref() {
-        api.validate()
+        api.validate(&config.family.members)
             .map_err(|e| format!("Configuration file {:?}: {e}", path_ref))?;
     }
     let tz_name = config.resolved_timezone_name();
@@ -1249,6 +1288,42 @@ schedules:
         let mut tmp = NamedTempFile::new().unwrap();
         write!(tmp, "{}", yaml).unwrap();
         load_config(tmp.path())
+    }
+
+    fn load_with_api_devices(devices: &str) -> Result<AppConfig, String> {
+        let yaml = format!(
+            "family:\n  members:\n    - id: alex\n      name: Alex\n      role: adult\n    - id: jordan\n      name: Jordan\n      role: adult\napi:\n  bind: \"127.0.0.1:8787\"\n  devices:\n{devices}"
+        );
+        let mut tmp = NamedTempFile::new().unwrap();
+        write!(tmp, "{}", yaml).unwrap();
+        load_config(tmp.path())
+    }
+
+    #[test]
+    fn api_devices_load_with_their_profiles() {
+        let loaded = load_with_api_devices(
+            "    - name: kitchen_ipad\n      members: [alex, jordan]\n    - name: alex_phone\n      members: [ALEX]\n",
+        )
+        .unwrap();
+        let devices = loaded.api.unwrap().devices;
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].members, ["alex", "jordan"]);
+    }
+
+    #[test]
+    fn api_devices_reject_bad_entries() {
+        for (devices, expected) in [
+            ("    - name: alex-phone\n      members: [alex]\n", "ASCII letters"),
+            ("    - name: phone\n      members: []\n", "at least one member"),
+            ("    - name: phone\n      members: [sam]\n", "unknown member"),
+            (
+                "    - name: phone\n      members: [alex]\n    - name: PHONE\n      members: [jordan]\n",
+                "duplicate device name",
+            ),
+        ] {
+            let err = load_with_api_devices(devices).expect_err(devices);
+            assert!(err.contains(expected), "{devices}: {err}");
+        }
     }
 
     #[test]

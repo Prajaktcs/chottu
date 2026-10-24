@@ -279,6 +279,11 @@ hooks:
 backfill-health *args:
     cargo run -q -p health-coach --bin backfill-health-summary -- {{args}}
 
+# Example: just api-token alex_phone
+# Mint an app API token for a device: prints the token once and its hashed .env line
+api-token device:
+    cargo run -q -p coordinator --bin api-token -- {{device}}
+
 # Clean cargo build artifacts
 clean:
     cargo clean
