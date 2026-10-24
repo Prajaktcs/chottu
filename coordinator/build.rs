@@ -17,9 +17,15 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let sha = git(&["rev-parse", "--short=7", "HEAD"]);
     if sha.is_some() {
-        // Rebuild when HEAD moves: a checkout changes HEAD, a commit changes the
-        // branch ref (loose, or in packed-refs after `git gc`).
-        let mut watched = vec!["HEAD".to_string(), "packed-refs".to_string()];
+        // Rebuild when HEAD moves. The HEAD reflog gains a line on every commit,
+        // checkout, reset or rebase, even when the commit creates a loose ref
+        // that did not exist at the last build (refs packed by `git gc`). HEAD,
+        // the branch ref and packed-refs cover repos with reflogs turned off.
+        let mut watched = vec![
+            "logs/HEAD".to_string(),
+            "HEAD".to_string(),
+            "packed-refs".to_string(),
+        ];
         watched.extend(git(&["symbolic-ref", "-q", "HEAD"]));
         for path in watched {
             // A missing watched file would make cargo rerun this on every build.
