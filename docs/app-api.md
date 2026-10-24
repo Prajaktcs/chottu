@@ -112,6 +112,29 @@ Every authenticated request acts for exactly one member, the same way a linked S
 
 **Revoke a device:** remove its `API_TOKEN_<DEVICE>` line from `.env` and restart. A configured device with no token line logs a warning at startup and cannot sign in. To rotate, mint a new token and replace the line.
 
+## Writes are idempotent
+
+Every `POST` and `DELETE` sends a client-generated `request_id` in the `Idempotency-Key` header. A retry with the same id gets the original response back, and the write is not applied a second time. The app generates a fresh UUIDv4 per write and keeps it when it retries or replays a queued write.
+
+```text
+Authorization: Bearer <token>
+X-Chotu-Member: alex
+Idempotency-Key: 3f2b9c4e-8a1d-4c55-9a8e-2b7f0c1d9e6a
+```
+
+- The id is a header rather than a body field, so writes without a body (`DELETE`, `POST /v1/workout/done`) carry it the same way.
+- Ids are scoped to the member, not the device. The same id from Alex's phone and the kitchen iPad acting as Alex is one write. Jordan's writes never collide with Alex's.
+- A repeat returns the stored status, `Content-Type` and body. Ids are kept for 7 days. After that, the same id applies again.
+- A `5xx` response is not stored, so the client can retry it with the same id.
+
+| Request | Status |
+| --- | --- |
+| A write without `Idempotency-Key`, or with one that is not 1–128 visible ASCII characters | `400` |
+| The same id while its first attempt is still running | `409`; retry shortly |
+| The same id on a different method or path | `422` |
+
+Server side, every write handler extracts `Idempotency` and wraps its write in `Idempotency::run` (`coordinator/src/api/idempotency.rs`). Responses are stored in `api_write_requests`, keyed by `(member_id, request_id)`. Two concurrent attempts race on that primary key, and only the winner applies. Ids still in flight when the coordinator stopped are released at the next startup.
+
 ## Request logs
 
 Every request logs one line:

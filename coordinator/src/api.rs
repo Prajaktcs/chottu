@@ -1,6 +1,8 @@
 //! HTTP API for the Chotu app. Listens on loopback only; `tailscale serve`
 //! terminates HTTPS in front of it and is the only way in (see `docs/app-api.md`).
 
+mod idempotency;
+
 use crate::scope::CallerScope;
 use anyhow::{anyhow, Context, Result};
 use axum::extract::{FromRequestParts, MatchedPath, Request, State};
@@ -17,6 +19,7 @@ use chotu_common::api_token::{
 };
 use chotu_common::{ApiConfig, AppConfig, FamilyMember};
 use serde::Serialize;
+use sqlx::SqlitePool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
@@ -40,10 +43,18 @@ pub struct ApiServer {
 impl ApiServer {
     /// Binds the listener before returning so a bad address, a busy port, or a
     /// malformed token hash fails startup.
-    pub async fn start(api: &ApiConfig, config: &AppConfig) -> Result<Self> {
+    pub async fn start(api: &ApiConfig, config: &AppConfig, pool: SqlitePool) -> Result<Self> {
         api.validate(&config.family.members)
             .map_err(anyhow::Error::msg)?;
         let auth = DeviceAuth::from_env(api, &config.family.members)?;
+        let abandoned = idempotency::release_abandoned(&pool)
+            .await
+            .context("Failed to release abandoned API write requests")?;
+        if abandoned > 0 {
+            println!(
+                "API: released {abandoned} write request id(s) left in flight at last shutdown."
+            );
+        }
         let listener = TcpListener::bind(api.bind)
             .await
             .with_context(|| format!("Failed to bind API server to {}", api.bind))?;
@@ -51,7 +62,7 @@ impl ApiServer {
             "API server listening on http://{} (expose with `tailscale serve`)",
             api.bind
         );
-        Ok(Self::spawn(listener, router(Arc::new(auth))))
+        Ok(Self::spawn(listener, router(Arc::new(auth), pool)))
     }
 
     fn spawn(listener: TcpListener, app: Router) -> Self {
@@ -86,16 +97,18 @@ impl ApiServer {
     }
 }
 
-fn router(auth: Arc<DeviceAuth>) -> Router {
-    with_auth(auth, Router::new().route("/v1/me", get(me)))
+fn router(auth: Arc<DeviceAuth>, pool: SqlitePool) -> Router {
+    with_auth(auth, pool, Router::new().route("/v1/me", get(me)))
 }
 
 /// Mounts `protected` behind device-token auth, next to the open health check.
-fn with_auth(auth: Arc<DeviceAuth>, protected: Router) -> Router {
+/// Handlers reach the database with `State<SqlitePool>`.
+fn with_auth(auth: Arc<DeviceAuth>, pool: SqlitePool, protected: Router<SqlitePool>) -> Router {
     Router::new()
         .route("/v1/health", get(health))
         .merge(protected.route_layer(middleware::from_fn_with_state(auth, authenticate)))
         .layer(middleware::from_fn(log_request))
+        .with_state(pool)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -250,6 +263,10 @@ pub(crate) enum ApiError {
     Forbidden,
     #[cfg_attr(not(test), allow(dead_code))] // Only `Caller` rejects with it.
     MemberRequired,
+    RequestIdRequired,
+    RequestIdReused,
+    RequestInProgress,
+    Internal,
 }
 
 #[derive(Serialize)]
@@ -263,6 +280,19 @@ impl IntoResponse for ApiError {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, "missing or invalid device token"),
             Self::Forbidden => (StatusCode::FORBIDDEN, "member not allowed for this device"),
             Self::MemberRequired => (StatusCode::BAD_REQUEST, "X-Chotu-Member header required"),
+            Self::RequestIdRequired => (
+                StatusCode::BAD_REQUEST,
+                "Idempotency-Key header required (1-128 visible ASCII characters)",
+            ),
+            Self::RequestIdReused => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Idempotency-Key already used for a different request",
+            ),
+            Self::RequestInProgress => (
+                StatusCode::CONFLICT,
+                "a request with this Idempotency-Key is still in progress",
+            ),
+            Self::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "internal error"),
         };
         let mut response = (status, Json(ErrorBody { error })).into_response();
         if status == StatusCode::UNAUTHORIZED {
@@ -379,7 +409,10 @@ async fn log_request(request: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::routing::post;
+    use idempotency::{Idempotency, IDEMPOTENCY_KEY};
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     const ALEX_PHONE: &str = "alex_phone.alex-secret";
     const KITCHEN_IPAD: &str = "kitchen_ipad.kitchen-secret";
@@ -419,14 +452,120 @@ mod tests {
         format!("{scope:?}")
     }
 
+    /// Stand-in for `POST /v1/workout/sets`: logs one set through the typed core.
+    async fn log_test_set(
+        idempotency: Idempotency,
+        Caller(scope): Caller,
+        State(pool): State<SqlitePool>,
+        Json(reps): Json<u32>,
+    ) -> Response {
+        idempotency
+            .run(async move {
+                let member_id = scope.member_id().expect("linked DM");
+                let now = chrono::Utc::now();
+                let set = health_coach::SetInput {
+                    load: health_coach::Load::Weight(135.0),
+                    reps,
+                    count: 1,
+                };
+                match health_coach::log_sets(
+                    &pool,
+                    member_id,
+                    now,
+                    now.date_naive(),
+                    Some("bench press"),
+                    &[set],
+                )
+                .await
+                {
+                    Ok(logged) => {
+                        let ids: Vec<_> = logged.logged.into_iter().map(|s| s.id).collect();
+                        (StatusCode::CREATED, Json(json!({ "set_ids": ids }))).into_response()
+                    }
+                    Err(err) => (StatusCode::UNPROCESSABLE_ENTITY, err.to_string()).into_response(),
+                }
+            })
+            .await
+    }
+
+    /// Fails with 500 on its first call, then succeeds.
+    async fn flaky_write(idempotency: Idempotency) -> Response {
+        static FAILED_ONCE: AtomicBool = AtomicBool::new(false);
+        idempotency
+            .run(async {
+                if FAILED_ONCE.swap(true, Ordering::SeqCst) {
+                    (StatusCode::OK, "applied")
+                } else {
+                    (StatusCode::INTERNAL_SERVER_ERROR, "failed")
+                }
+            })
+            .await
+    }
+
+    /// A pool for tests that never touch the database.
+    fn unused_pool() -> SqlitePool {
+        SqlitePool::connect_lazy("sqlite::memory:").unwrap()
+    }
+
+    async fn test_pool() -> (tempfile::TempDir, SqlitePool) {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = chotu_common::init_db(dir.path().join("api.sqlite").to_str().unwrap())
+            .await
+            .unwrap();
+        (dir, pool)
+    }
+
     async fn serve_test_app() -> (ApiServer, String) {
+        serve_test_app_with(unused_pool()).await
+    }
+
+    async fn serve_test_app_with(pool: SqlitePool) -> (ApiServer, String) {
         let protected = Router::new()
             .route("/v1/me", get(me))
-            .route("/v1/data", get(member_data).post(member_data));
+            .route("/v1/data", get(member_data).post(member_data))
+            .route("/v1/test/sets", post(log_test_set))
+            .route("/v1/test/flaky", post(flaky_write));
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = ApiServer::spawn(listener, with_auth(test_auth(), protected));
+        let server = ApiServer::spawn(listener, with_auth(test_auth(), pool, protected));
         (server, format!("http://{addr}"))
+    }
+
+    async fn set_count(pool: &SqlitePool, member_id: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM fitness_set_log WHERE family_member_id = ?")
+            .bind(member_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// POSTs `reps` and returns `(status, content type, body)`.
+    async fn write(
+        client: &reqwest::Client,
+        url: &str,
+        token: &str,
+        member: &str,
+        request_id: Option<&str>,
+    ) -> (u16, String, String) {
+        let mut builder = request(
+            client,
+            reqwest::Method::POST,
+            url.to_string(),
+            Some(token),
+            Some(member),
+        )
+        .json(&8);
+        if let Some(request_id) = request_id {
+            builder = builder.header(IDEMPOTENCY_KEY, request_id);
+        }
+        let response = builder.send().await.unwrap();
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        (status, content_type, response.text().await.unwrap())
     }
 
     fn request(
@@ -452,7 +591,7 @@ mod tests {
             bind: "0.0.0.0:0".parse().unwrap(),
             devices: vec![],
         };
-        let err = ApiServer::start(&api, &AppConfig::default())
+        let err = ApiServer::start(&api, &AppConfig::default(), unused_pool())
             .await
             .err()
             .expect("must refuse");
@@ -463,7 +602,7 @@ mod tests {
     async fn serves_health_and_shuts_down_gracefully() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = ApiServer::spawn(listener, router(test_auth()));
+        let server = ApiServer::spawn(listener, router(test_auth(), unused_pool()));
 
         let client = reqwest::Client::new();
         let response = client
@@ -668,6 +807,120 @@ mod tests {
                 "profiles": profiles,
             })
         );
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn repeated_request_id_applies_once_and_replays_the_response() {
+        let (_dir, pool) = test_pool().await;
+        let (server, base) = serve_test_app_with(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/v1/test/sets");
+
+        let first = write(&client, &url, ALEX_PHONE, "alex", Some("req-1")).await;
+        assert_eq!(first.0, 201, "{first:?}");
+        assert_eq!(first.1, "application/json");
+        // A retry, even from another of the member's devices, replays the original.
+        let retry = write(&client, &url, ALEX_PHONE, "alex", Some("req-1")).await;
+        let other_device = write(&client, &url, KITCHEN_IPAD, "alex", Some("req-1")).await;
+        assert_eq!(retry, first);
+        assert_eq!(other_device, first);
+        assert_eq!(set_count(&pool, "alex").await, 1);
+
+        let next = write(&client, &url, ALEX_PHONE, "alex", Some("req-2")).await;
+        assert_eq!(next.0, 201);
+        assert_ne!(next.2, first.2);
+        assert_eq!(set_count(&pool, "alex").await, 2);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn same_request_id_from_another_member_is_independent() {
+        let (_dir, pool) = test_pool().await;
+        let (server, base) = serve_test_app_with(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/v1/test/sets");
+
+        let alex = write(&client, &url, KITCHEN_IPAD, "alex", Some("shared")).await;
+        let jordan = write(&client, &url, KITCHEN_IPAD, "jordan", Some("shared")).await;
+        assert_eq!(alex.0, 201);
+        assert_eq!(jordan.0, 201);
+        assert_ne!(alex.2, jordan.2);
+        assert_eq!(set_count(&pool, "alex").await, 1);
+        assert_eq!(set_count(&pool, "jordan").await, 1);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_duplicates_apply_once() {
+        let (_dir, pool) = test_pool().await;
+        let (server, base) = serve_test_app_with(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/v1/test/sets");
+
+        let attempts: Vec<_> = (0..8)
+            .map(|_| {
+                let (client, url) = (client.clone(), url.clone());
+                tokio::spawn(async move {
+                    write(&client, &url, ALEX_PHONE, "alex", Some("burst")).await
+                })
+            })
+            .collect();
+        let mut responses = Vec::new();
+        for attempt in attempts {
+            responses.push(attempt.await.unwrap());
+        }
+        let applied: Vec<_> = responses.iter().filter(|r| r.0 == 201).collect();
+        assert!(!applied.is_empty(), "{responses:?}");
+        assert!(applied.iter().all(|r| *r == applied[0]), "{responses:?}");
+        // The rest replayed the response or saw the first still in flight.
+        assert!(
+            responses.iter().all(|r| r.0 == 201 || r.0 == 409),
+            "{responses:?}"
+        );
+        assert_eq!(set_count(&pool, "alex").await, 1);
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn write_without_valid_request_id_or_reused_on_another_route_is_rejected() {
+        let (_dir, pool) = test_pool().await;
+        let (server, base) = serve_test_app_with(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let sets = format!("{base}/v1/test/sets");
+
+        for request_id in [None, Some(""), Some("has space")] {
+            let response = write(&client, &sets, ALEX_PHONE, "alex", request_id).await;
+            assert_eq!(response.0, 400, "{request_id:?}");
+        }
+        assert_eq!(set_count(&pool, "alex").await, 0);
+
+        let first = write(&client, &sets, ALEX_PHONE, "alex", Some("k")).await;
+        assert_eq!(first.0, 201);
+        let flaky = format!("{base}/v1/test/flaky");
+        let reused = write(&client, &flaky, ALEX_PHONE, "alex", Some("k")).await;
+        assert_eq!(reused.0, 422, "{reused:?}");
+
+        server.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn server_error_is_not_stored_so_a_retry_applies() {
+        let (_dir, pool) = test_pool().await;
+        let (server, base) = serve_test_app_with(pool).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/v1/test/flaky");
+
+        let failed = write(&client, &url, ALEX_PHONE, "alex", Some("retry-me")).await;
+        assert_eq!(failed.0, 500);
+        let applied = write(&client, &url, ALEX_PHONE, "alex", Some("retry-me")).await;
+        assert_eq!((applied.0, applied.2.as_str()), (200, "applied"));
+        let replayed = write(&client, &url, ALEX_PHONE, "alex", Some("retry-me")).await;
+        assert_eq!(replayed, applied);
 
         server.shutdown().await;
     }

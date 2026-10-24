@@ -88,7 +88,7 @@ The first endpoints, in the order they ship:
 | Scope | Every token resolves to `LinkedDm { member_id }`; household-group views are not exposed | Reuses the existing self-only rules instead of inventing new ones |
 | Shared logic | Typed service functions; Signal and the API are formatters | One behaviour per feature; tests sit on the typed core |
 | API shape | JSON over REST, versioned under `/v1`, `serde` types in the coordinator | A handful of endpoints for one known client; OpenAPI and code generation would cost more than they save |
-| Writes | Every POST carries a client-generated `request_id`; the server ignores repeats | A retry over a flaky gym connection must not log a set twice |
+| Writes | Every POST and DELETE carries a client-generated `request_id` in the `Idempotency-Key` header; a repeat from the same member gets the stored response back (`docs/app-api.md`) | A retry over a flaky gym connection must not log a set twice |
 | Push | None from the app. Signal keeps due reminders, the morning brief and evening reflection | Avoids Google-routed push. A self-hosted relay such as ntfy can come later if needed |
 | App stack | Expo (React Native, TypeScript), Expo Router, fetch + TanStack Query; token in expo-secure-store on Android, browser storage on web | One codebase for Android and web, and native iOS later through EAS if ever needed. Only libraries with web support, so the web build never lags |
 | iOS delivery | Not yet. When needed: the Expo web build, served by the coordinator over Tailscale HTTPS and added to the iPhone home screen | No $99/yr Apple account or 90-day TestFlight rebuilds. The same code can become a native iOS build later without a rewrite |
